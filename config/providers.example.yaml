@@ -1,0 +1,60 @@
+# Example configuration — copy to providers.yaml and fill in your credentials
+global:
+  listen_addr: ":8080"
+  default_format: openai
+  log_file: proxy.log
+  cb_threshold: 2
+  cb_cooldown: 30
+  cb_skip_requests: 10
+
+model_routes:
+  - alias: gpt-4o
+    target: glm-5.2
+  - alias: gpt-4o-mini
+    target: deepseek-v4-flash
+  - alias: default
+    target: deepseek-v4-flash
+
+providers:
+
+  # ════════ Priority 1 ════════
+  - name: glm-5.2
+    vendor: openai
+    model_id: glm-5.2
+    api_key: YOUR_API_KEY_HERE
+    base_url: https://api.example.com/v1
+    priority: 1
+    format: openai
+    timeout: 60
+    retry:
+      max_retries: 3
+      retry_interval: 2
+      backoff_factor: 2
+
+  # ════════ Priority 2 ════════
+  - name: deepseek-v4-flash
+    vendor: openai
+    model_id: deepseek-v4-flash
+    api_key: YOUR_API_KEY_HERE
+    base_url: https://api.example.com/v1
+    priority: 2
+    format: openai
+    timeout: 60
+    retry:
+      max_retries: 3
+      retry_interval: 2
+      backoff_factor: 2
+
+  # ════════ Priority 3 ════════
+  - name: u1-fast
+    vendor: openai
+    model_id: sensenova-u1-fast
+    api_key: YOUR_API_KEY_HERE
+    base_url: https://api.example.com/v1
+    priority: 3
+    format: openai
+    timeout: 60
+    retry:
+      max_retries: 3
+      retry_interval: 2
+      backoff_factor: 2

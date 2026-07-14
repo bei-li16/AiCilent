@@ -1,0 +1,41 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+ai-proxy
+
+# Logs
+*.log
+
+# Go workspace
+go.work
+go.work.sum
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config (keep template, ignore actual)
+config.json
+test.json
+old.json
+providers.yaml
+providers.json
+
+# Environment files
+.env
+.env.*
+
+# Temp
+old/
