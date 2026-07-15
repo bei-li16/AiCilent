@@ -30,4 +30,7 @@ build-macos:
 build-macos-arm64:
 	GOOS=darwin GOARCH=arm64 go build -o $(APP_NAME)-macos-arm64 ./cmd/proxy/
 
-build-all: build build-linux build-macos build-macos-arm64
+build-linux-arm64:
+	GOOS=linux GOARCH=arm64 go build -o $(APP_NAME)-linux-arm64 ./cmd/proxy/
+
+build-all: build build-linux build-linux-arm64 build-macos build-macos-arm64

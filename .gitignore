@@ -6,7 +6,7 @@
 *.dylib
 *.test
 *.out
-ai-proxy
+ai-proxy*
 
 # Logs
 *.log

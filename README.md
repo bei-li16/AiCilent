@@ -1,6 +1,6 @@
 # AI Proxy — AI 请求转发平台
 
-统一管理多个 AI 供应商，提供单一入口供 OpenCode、Claude Desktop、OpenClaw 等 Agent 工具接入。支持优先级路由、故障转移、重试策略、流式传输和协议自动转换。
+统一管理多个 AI 供应商，提供单一入口供 OpenCode、Claude Desktop、OpenClaw 等 Agent 工具接入。支持优先级路由、故障转移、重试策略、流式传输、协议自动转换，以及内建监控面板。
 
 ---
 
@@ -48,6 +48,58 @@ ai-proxy.exe --config config/providers.yaml
 
 ---
 
+## 架构概览
+
+```
+Agent 请求 → middleware/logger → middleware/detector → router/engine
+                                                           │
+                                              ┌────────────┼────────────┐
+                                              ▼            ▼            ▼
+                                          Provider P1  Provider P2  Provider P3
+                                          (round-robin + 重试 + 断路器)
+
+tracer 日志 → gin.DefaultWriter → io.MultiWriter(logFile, sseHub) → 监控面板
+```
+
+- **router/engine** — 核心引擎：路由匹配、优先级降级、断路器、round-robin、per-provider TryLock、指数退避重试
+- **middleware/detector** — 自动检测 OpenAI / Anthropic 请求格式（`/api/*` 跳过）
+- **middleware/logger** — 请求日志记录（`/api/*` 跳过）
+- **tracer** — 每次请求的结构化追踪日志（PROVIDER / CB / QUEUE / TTFB / SUMMARY）
+- **stats** — 统计收集器：per-provider 计数 + 全局 atomic 计数器 + 代理运行状态
+- **sse** — SSE Hub：日志实时扇出到 Web 面板客户端
+
+---
+
+## 监控面板
+
+代理启动后，浏览器访问 `http://<host>:8080/`：
+
+- **状态开关** — 一键启用/停用代理（停用时 AI 请求返回 503，管理 API 正常）
+- **汇总卡片** — 总请求 / 成功 / 失败 / 成功率
+- **供应商表格** — 按 priority 显示每个供应商的请求数、成功率（颜色编码）
+- **实时日志** — SSE 流式日志，自动更新，上限 500 行
+
+---
+
+## API 端点
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/v1/chat/completions` | Chat Completions（同步 + 流式） |
+| `POST` | `/chat/completions` | 兼容不带 v1 的路径 |
+| `POST` | `/v1/messages` | Messages API |
+| `GET` | `/health` | 健康检查 `{"status":"ok"}` |
+| `GET` | `/` | 监控面板页面 |
+| `GET` | `/style.css` | 面板样式表 |
+| `GET` | `/app.js` | 面板前端脚本 |
+| `GET` | `/api/stats` | 统计快照 JSON（面板每 2s 轮询） |
+| `GET` | `/api/logs` | SSE 实时日志流 |
+| `POST` | `/api/control` | 启用/停用代理 `{"running":bool}` |
+
+系统自动检测请求体格式（OpenAI / Anthropic），无需手动指定端点协议。
+
+---
+
 ## 配置参考
 
 ### global
@@ -92,19 +144,6 @@ model_routes:
 
 ---
 
-## API 端点
-
-| 端点 | 说明 |
-|------|------|
-| `POST /v1/chat/completions` | Chat Completions（同步 + 流式） |
-| `POST /chat/completions` | 兼容不带 v1 的路径 |
-| `POST /v1/messages` | Messages API |
-| `GET /health` | 健康检查 |
-
-系统自动检测请求体格式（OpenAI / Anthropic），无需手动指定。
-
----
-
 ## 跨平台编译
 
 ```bash
@@ -117,8 +156,11 @@ make build-all
 # Windows
 go build -o ai-proxy.exe ./cmd/proxy/
 
-# Linux
+# Linux (amd64)
 GOOS=linux GOARCH=amd64 go build -o ai-proxy-linux ./cmd/proxy/
+
+# Linux (ARM64 — 树莓派)
+GOOS=linux GOARCH=arm64 go build -o ai-proxy-linux-arm64 ./cmd/proxy/
 
 # macOS Intel
 GOOS=darwin GOARCH=amd64 go build -o ai-proxy-macos ./cmd/proxy/
