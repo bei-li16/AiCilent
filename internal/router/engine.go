@@ -27,7 +27,7 @@ type Engine struct {
 	failureCount     map[int]int
 	circuitOpenSince map[int]*time.Time
 	skipRemaining    map[int]int
-	priorityQueues   map[int]*sync.Mutex
+	providerLocks    map[string]*sync.Mutex
 	rrIndex          map[int]int
 	logWriter        io.Writer
 }
@@ -42,7 +42,7 @@ func NewEngine(cfg *config.Config, logWriter io.Writer) *Engine {
 		failureCount:     make(map[int]int),
 		circuitOpenSince: make(map[int]*time.Time),
 		skipRemaining:    make(map[int]int),
-		priorityQueues:   make(map[int]*sync.Mutex),
+		providerLocks:    make(map[string]*sync.Mutex),
 		rrIndex:          make(map[int]int),
 		logWriter:        logWriter,
 	}
@@ -130,107 +130,98 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 			continue
 		}
 
-		e.acquireQueue(priority)
-		queueHeld := true
+		startIdx := e.advanceRRIndex(priority, len(group))
+		tr.LogQueue(priority, "trying", startIdx, len(group))
 
-		func() {
-			defer func() {
-				if queueHeld {
-					e.releaseQueue(priority)
-					queueHeld = false
+		anyTried := false
+
+		for i := 0; i < len(group); i++ {
+			idx := (startIdx + i) % len(group)
+			provider := group[idx]
+
+			if !e.tryAcquireProvider(provider.Name) {
+				tr.LogQueue(priority, fmt.Sprintf("provider %s busy, skipped", provider.Name), idx, len(group))
+				continue
+			}
+			anyTried = true
+
+			if i > 0 && lastErr != nil {
+				tr.LogDegradeProvider(provider.Name, priority, lastErr.Error())
+			}
+
+			maxRetries := provider.Retry.MaxRetries
+			rm := retry.NewManager(maxRetries, provider.Retry.RetryInterval, provider.Retry.BackoffFactor)
+			for rm.ShouldRetry() {
+				attempt := rm.Attempt()
+				start := time.Now()
+
+				var fwdErr error
+				if streaming {
+					fwdErr = e.forwardRequestStream(c, body, requestFormat, provider, tr)
+				} else {
+					fwdErr = e.forwardRequest(c, body, requestFormat, provider)
 				}
-				if r := recover(); r != nil {
-					if queueHeld {
-						e.releaseQueue(priority)
-						queueHeld = false
-					}
-					panic(r)
-				}
-			}()
 
-			startIdx := e.advanceRRIndex(priority, len(group))
-			tr.LogQueue(priority, "acquired", startIdx, len(group))
+				latency := time.Since(start)
 
-			for i := 0; i < len(group); i++ {
-				idx := (startIdx + i) % len(group)
-				provider := group[idx]
-
-				if i > 0 {
-					tr.LogDegradeProvider(provider.Name, priority, lastErr.Error())
+				if fwdErr == nil {
+					tr.LogAttempt(provider.Name, priority, attempt, maxRetries+1, true, "", latency)
+					e.closeCircuitBreaker(priority, modelName, tr)
+					tr.LogResult(true, provider.Name, startIdx)
+					tr.LogQueue(priority, "released", startIdx, len(group))
+					e.releaseProvider(provider.Name)
+					fmt.Fprint(e.logWriter, tr.Dump())
+					completed = true
+					break
 				}
 
-				maxRetries := provider.Retry.MaxRetries
-				rm := retry.NewManager(maxRetries, provider.Retry.RetryInterval, provider.Retry.BackoffFactor)
-				for rm.ShouldRetry() {
-					attempt := rm.Attempt()
-					start := time.Now()
-
-					var fwdErr error
-					if streaming {
-						fwdErr = e.forwardRequestStream(c, body, requestFormat, provider, tr)
-					} else {
-						fwdErr = e.forwardRequest(c, body, requestFormat, provider)
-					}
-
-					latency := time.Since(start)
-
-					if fwdErr == nil {
-						tr.LogAttempt(provider.Name, priority, attempt, maxRetries+1, true, "", latency)
-						e.closeCircuitBreaker(priority, modelName, tr)
-						tr.LogResult(true, provider.Name, startIdx)
-						tr.LogQueue(priority, "released", startIdx, len(group))
-						queueHeld = false
-						e.releaseQueue(priority)
-						fmt.Fprint(e.logWriter, tr.Dump())
-						completed = true
-						return
-					}
-
-					tr.LogAttempt(provider.Name, priority, attempt, maxRetries+1, false, fwdErr.Error(), latency)
-					lastErr = fwdErr
-
-					if c.Writer.Written() {
-						tr.LogQueue(priority, "released (stream written)", startIdx, len(group))
-						tr.LogResult(false, provider.Name, startIdx)
-						queueHeld = false
-						e.releaseQueue(priority)
-						e.recordGroupFailure(modelName, priority, tr)
-						fmt.Fprint(e.logWriter, tr.Dump())
-						completed = true
-						return
-					}
-
-					if apiErr, ok := fwdErr.(*adapter.APIError); ok && !apiErr.Retryable() {
-						tr.LogSkipRetry(provider.Name, priority, apiErr.StatusCode)
-						break
-					}
-
-					if ctx.Err() != nil {
-						break
-					}
-
-					if err := rm.Wait(ctx); err != nil {
-						break
-					}
-				}
+				tr.LogAttempt(provider.Name, priority, attempt, maxRetries+1, false, fwdErr.Error(), latency)
+				lastErr = fwdErr
 
 				if c.Writer.Written() {
 					tr.LogQueue(priority, "released (stream written)", startIdx, len(group))
 					tr.LogResult(false, provider.Name, startIdx)
-					queueHeld = false
-					e.releaseQueue(priority)
+					e.releaseProvider(provider.Name)
 					e.recordGroupFailure(modelName, priority, tr)
 					fmt.Fprint(e.logWriter, tr.Dump())
 					completed = true
-					return
+					break
+				}
+
+				if apiErr, ok := fwdErr.(*adapter.APIError); ok && !apiErr.Retryable() {
+					tr.LogSkipRetry(provider.Name, priority, apiErr.StatusCode)
+					break
+				}
+
+				if ctx.Err() != nil {
+					break
+				}
+
+				if err := rm.Wait(ctx); err != nil {
+					break
 				}
 			}
 
+			if completed {
+				break
+			}
+
+			e.releaseProvider(provider.Name)
+
+			if c.Writer.Written() {
+				break
+			}
+		}
+
+		if !anyTried {
+			tr.LogQueue(priority, "all providers busy", startIdx, len(group))
+			continue
+		}
+
+		if !completed && !c.Writer.Written() {
 			tr.LogQueue(priority, "released (all failed)", startIdx, len(group))
-			queueHeld = false
-			e.releaseQueue(priority)
 			e.recordGroupFailure(modelName, priority, tr)
-		}()
+		}
 
 		if completed {
 			break
@@ -340,20 +331,20 @@ func (e *Engine) closeCircuitBreaker(priority int, modelName string, tr *tracer.
 	}
 }
 
-func (e *Engine) acquireQueue(priority int) {
+func (e *Engine) tryAcquireProvider(name string) bool {
 	e.cbMu.Lock()
-	mu, ok := e.priorityQueues[priority]
+	mu, ok := e.providerLocks[name]
 	if !ok {
 		mu = &sync.Mutex{}
-		e.priorityQueues[priority] = mu
+		e.providerLocks[name] = mu
 	}
 	e.cbMu.Unlock()
-	mu.Lock()
+	return mu.TryLock()
 }
 
-func (e *Engine) releaseQueue(priority int) {
+func (e *Engine) releaseProvider(name string) {
 	e.cbMu.Lock()
-	mu, ok := e.priorityQueues[priority]
+	mu, ok := e.providerLocks[name]
 	e.cbMu.Unlock()
 	if ok {
 		mu.Unlock()
