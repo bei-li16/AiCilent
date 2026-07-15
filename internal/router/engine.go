@@ -191,7 +191,7 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 
 					if c.Writer.Written() {
 						tr.LogQueue(priority, "released (stream written)", startIdx, len(group))
-						tr.LogResult(true, provider.Name, startIdx)
+						tr.LogResult(false, provider.Name, startIdx)
 						queueHeld = false
 						e.releaseQueue(priority)
 						e.recordGroupFailure(modelName, priority, tr)
@@ -216,7 +216,7 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 
 				if c.Writer.Written() {
 					tr.LogQueue(priority, "released (stream written)", startIdx, len(group))
-					tr.LogResult(true, provider.Name, startIdx)
+					tr.LogResult(false, provider.Name, startIdx)
 					queueHeld = false
 					e.releaseQueue(priority)
 					e.recordGroupFailure(modelName, priority, tr)
@@ -462,23 +462,32 @@ func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat
 	timeout := time.Duration(provider.Timeout) * time.Second
 	idleReader := &idleTimeoutReader{r: resp.Body, timeout: timeout}
 
+	fw := &flushWriter{w: c.Writer}
 	if requestFormat != provider.Format {
-		err = adapter.StreamConvertResponse(idleReader, c.Writer, provider.Format, requestFormat)
+		err = adapter.StreamConvertResponse(idleReader, fw, provider.Format, requestFormat)
 	} else {
-		_, err = io.Copy(c.Writer, idleReader)
+		_, err = io.Copy(fw, idleReader)
 	}
 
 	idleReader.Close()
-	if err != nil {
-		errorMsg := fmt.Sprintf("data: {\"error\":\"upstream timeout\",\"type\":\"stream_timeout\",\"detail\":\"%v\"}\n\ndata: [DONE]\n\n", err)
-		c.Writer.Write([]byte(errorMsg))
-	}
 	return err
 }
 
 type startTimeContextKey struct{}
 
 var startTimeKey = startTimeContextKey{}
+
+type flushWriter struct {
+	w http.ResponseWriter
+}
+
+func (fw *flushWriter) Write(p []byte) (int, error) {
+	n, err := fw.w.Write(p)
+	if f, ok := fw.w.(http.Flusher); ok {
+		f.Flush()
+	}
+	return n, err
+}
 
 type idleTimeoutReader struct {
 	r       io.ReadCloser
