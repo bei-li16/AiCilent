@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI 请求转发平台</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <div class="header-left">
+      <h1>AI 请求转发平台</h1>
+      <span class="uptime" id="uptime"></span>
+    </div>
+    <div class="header-right">
+      <span class="status" id="status">● 运行中</span>
+      <label class="switch">
+        <input type="checkbox" id="toggle" checked onchange="toggleProxy()">
+        <span class="slider"></span>
+      </label>
+    </div>
+  </header>
+
+  <section class="summary" id="summary">
+    <div class="card"><div class="card-label">总请求</div><div class="card-value" id="totalReq">0</div></div>
+    <div class="card success"><div class="card-label">成功</div><div class="card-value" id="totalSuccess">0</div></div>
+    <div class="card fail"><div class="card-label">失败</div><div class="card-value" id="totalFail">0</div></div>
+    <div class="card"><div class="card-label">成功率</div><div class="card-value" id="totalRate">—</div></div>
+  </section>
+
+  <section class="table-section">
+    <h2>供应商统计</h2>
+    <table id="stats-table">
+      <thead>
+        <tr><th>优先级</th><th>供应商</th><th>模型</th><th>请求</th><th>成功</th><th>失败</th><th>成功率</th></tr>
+      </thead>
+      <tbody id="stats-body"></tbody>
+    </table>
+  </section>
+
+  <section class="log-section">
+    <div class="log-header">
+      <h2>实时日志</h2>
+      <button class="btn-small" onclick="clearLog()">清空</button>
+    </div>
+    <div class="log-container" id="log-container"></div>
+  </section>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>

@@ -15,6 +15,7 @@ import (
 	"ai-proxy/internal/config"
 	"ai-proxy/internal/middleware"
 	"ai-proxy/internal/retry"
+	"ai-proxy/internal/stats"
 	"ai-proxy/internal/tracer"
 
 	"github.com/gin-gonic/gin"
@@ -30,9 +31,10 @@ type Engine struct {
 	providerLocks    map[string]*sync.Mutex
 	rrIndex          map[int]int
 	logWriter        io.Writer
+	stats            *stats.Collector
 }
 
-func NewEngine(cfg *config.Config, logWriter io.Writer) *Engine {
+func NewEngine(cfg *config.Config, logWriter io.Writer, stats *stats.Collector) *Engine {
 	if logWriter == nil {
 		logWriter = os.Stdout
 	}
@@ -45,10 +47,16 @@ func NewEngine(cfg *config.Config, logWriter io.Writer) *Engine {
 		providerLocks:    make(map[string]*sync.Mutex),
 		rrIndex:          make(map[int]int),
 		logWriter:        logWriter,
+		stats:            stats,
 	}
 }
 
 func (e *Engine) HandleRequest(c *gin.Context) {
+	if !e.stats.IsRunning() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "proxy is disabled"})
+		return
+	}
+
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot read request body"})
@@ -165,6 +173,7 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 				latency := time.Since(start)
 
 				if fwdErr == nil {
+					e.stats.Record(provider.Name, provider.ModelID, priority, true)
 					tr.LogAttempt(provider.Name, priority, attempt, maxRetries+1, true, "", latency)
 					e.closeCircuitBreaker(priority, modelName, tr)
 					tr.LogResult(true, provider.Name, startIdx)
@@ -175,7 +184,8 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 					break
 				}
 
-				tr.LogAttempt(provider.Name, priority, attempt, maxRetries+1, false, fwdErr.Error(), latency)
+				e.stats.Record(provider.Name, provider.ModelID, priority, false)
+					tr.LogAttempt(provider.Name, priority, attempt, maxRetries+1, false, fwdErr.Error(), latency)
 				lastErr = fwdErr
 
 				if c.Writer.Written() {

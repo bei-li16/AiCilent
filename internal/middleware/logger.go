@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -13,6 +14,10 @@ func Logger() gin.HandlerFunc {
 		path := c.Request.URL.Path
 
 		c.Next()
+
+		if strings.HasPrefix(path, "/api/") {
+			return
+		}
 
 		latency := time.Since(start)
 		status := c.Writer.Status()
