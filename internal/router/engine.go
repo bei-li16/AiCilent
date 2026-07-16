@@ -8,12 +8,15 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"ai-proxy/internal/adapter"
 	"ai-proxy/internal/config"
 	"ai-proxy/internal/middleware"
+	"ai-proxy/internal/ratelimit"
 	"ai-proxy/internal/retry"
 	"ai-proxy/internal/stats"
 	"ai-proxy/internal/tracer"
@@ -23,32 +26,165 @@ import (
 
 type Engine struct {
 	cfg              *config.Config
+	configPath       string
 	matcher          *Matcher
+
+	// Circuit breaker state (cbMu protects)
 	cbMu             sync.Mutex
 	failureCount     map[int]int
 	circuitOpenSince map[int]*time.Time
 	skipRemaining    map[int]int
+
+	// Provider concurrency locks (providerMu protects)
+	providerMu       sync.Mutex
 	providerLocks    map[string]*sync.Mutex
+
+	// Rate limiters (rlMu protects)
+	rlMu             sync.Mutex
+	rateLimiters     map[string]*ratelimit.TokenBucket
+
+	// Round-robin index (rrMu protects)
+	rrMu             sync.Mutex
 	rrIndex          map[int]int
+
+	// Config reload guard
+	reloadMu         sync.RWMutex
+
+	// Shared HTTP transport for connection reuse
+	transport        *http.Transport
+
 	logWriter        io.Writer
 	stats            *stats.Collector
 }
 
-func NewEngine(cfg *config.Config, logWriter io.Writer, stats *stats.Collector) *Engine {
+func NewEngine(cfg *config.Config, configPath string, logWriter io.Writer, stats *stats.Collector) *Engine {
 	if logWriter == nil {
 		logWriter = os.Stdout
 	}
-	return &Engine{
+
+	rl := make(map[string]*ratelimit.TokenBucket, len(cfg.Providers))
+	for _, p := range cfg.Providers {
+		if p.RateLimit.Enabled {
+			rps := p.RateLimit.RPM / 60.0
+			rl[p.Name] = ratelimit.New(rps, p.RateLimit.Burst)
+		}
+	}
+
+	e := &Engine{
 		cfg:              cfg,
+		configPath:       configPath,
 		matcher:          NewMatcher(cfg.ModelRoutes),
 		failureCount:     make(map[int]int),
 		circuitOpenSince: make(map[int]*time.Time),
 		skipRemaining:    make(map[int]int),
 		providerLocks:    make(map[string]*sync.Mutex),
 		rrIndex:          make(map[int]int),
-		logWriter:        logWriter,
-		stats:            stats,
+		rateLimiters:     rl,
+		transport: &http.Transport{
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 10,
+			IdleConnTimeout:     90 * time.Second,
+		},
+		logWriter: logWriter,
+		stats:    stats,
 	}
+	e.loadCBState()
+	return e
+}
+
+// StartWatcher starts a goroutine that polls the config file for changes
+// and hot-reloads the provider configuration.
+func (e *Engine) StartWatcher(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+
+	var lastMod time.Time
+	if fi, err := os.Stat(e.configPath); err == nil {
+		lastMod = fi.ModTime()
+	}
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				fi, err := os.Stat(e.configPath)
+				if err != nil {
+					continue
+				}
+				if fi.ModTime().After(lastMod) {
+					lastMod = fi.ModTime()
+					if err := e.reloadConfig(); err != nil {
+						fmt.Fprintf(e.logWriter, "[CONFIG] hot-reload failed: %v\n", err)
+					} else {
+						fmt.Fprintf(e.logWriter, "[CONFIG] hot-reloaded from %s\n", e.configPath)
+					}
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+}
+
+
+func (e *Engine) reloadConfig() error {
+	cfg, err := config.Load(e.configPath)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	e.reloadMu.Lock()
+	e.cfg = cfg
+	e.matcher = NewMatcher(cfg.ModelRoutes)
+	e.reloadMu.Unlock()
+
+	// Keep existing provider locks for stable names
+	oldLocks := make(map[string]*sync.Mutex)
+	e.providerMu.Lock()
+	for k, v := range e.providerLocks {
+		oldLocks[k] = v
+	}
+	newLocks := make(map[string]*sync.Mutex, len(cfg.Providers))
+	for _, p := range cfg.Providers {
+		if old, ok := oldLocks[p.Name]; ok {
+			newLocks[p.Name] = old
+		} else {
+			newLocks[p.Name] = &sync.Mutex{}
+		}
+	}
+	e.providerLocks = newLocks
+	e.providerMu.Unlock()
+
+	// Rebuild rate limiters
+	e.rlMu.Lock()
+	newRL := make(map[string]*ratelimit.TokenBucket, len(cfg.Providers))
+	for _, p := range cfg.Providers {
+		if p.RateLimit.Enabled {
+			rps := p.RateLimit.RPM / 60.0
+			if old, ok := e.rateLimiters[p.Name]; ok {
+				old.SetRate(rps, p.RateLimit.Burst)
+				newRL[p.Name] = old
+			} else {
+				newRL[p.Name] = ratelimit.New(rps, p.RateLimit.Burst)
+			}
+		}
+	}
+	e.rateLimiters = newRL
+	e.rlMu.Unlock()
+
+	// Reset RR indexes for any new priority groups
+	e.rrMu.Lock()
+	for _, p := range cfg.Providers {
+		if _, ok := e.rrIndex[p.Priority]; !ok {
+			e.rrIndex[p.Priority] = 0
+		}
+	}
+	e.rrMu.Unlock()
+
+	return nil
 }
 
 func (e *Engine) HandleRequest(c *gin.Context) {
@@ -83,7 +219,12 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 	bodySnippet := extractBodySnippet(body)
 	tr.LogRequest(c.Request.Method, c.Request.URL.Path, bodySnippet)
 
+	// Capture config pointer under read lock for consistency.
+	// Once captured, the pointed-to struct is never mutated by reloadConfig.
+	e.reloadMu.RLock()
 	providers := e.getOrderedProviders(modelName)
+	cfg := e.cfg
+	e.reloadMu.RUnlock()
 	if len(providers) == 0 {
 		tr.LogResult(false, "", 0)
 		fmt.Fprint(e.logWriter, tr.Dump())
@@ -110,7 +251,7 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 	// Log CB config for debugging
 	tr.LogCircuitBreaker(0, "config",
 		fmt.Sprintf("cb_threshold=%d cb_cooldown=%ds cb_skip_requests=%d",
-			e.cfg.Global.CBThreshold, e.cfg.Global.CBCooldown, e.cfg.Global.CBSkipRequests))
+			cfg.Global.CBThreshold, cfg.Global.CBCooldown, cfg.Global.CBSkipRequests))
 
 	var lastErr error
 	var completed bool
@@ -133,7 +274,8 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 			tr.LogDegradeGroup(priority, reason)
 		}
 
-		if e.shouldSkipGroup(priority, modelName, tr) {
+		if e.shouldSkipGroup(priority, modelName, tr,
+				cfg.Global.CBThreshold, cfg.Global.CBCooldown, cfg.Global.CBSkipRequests) {
 			tr.LogQueue(priority, "skipped (circuit breaker)", 0, len(group))
 			continue
 		}
@@ -157,6 +299,13 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 				tr.LogDegradeProvider(provider.Name, priority, lastErr.Error())
 			}
 
+			// Check rate limit before attempting
+			if rlErr := e.checkRateLimit(provider.Name); rlErr != nil {
+				tr.LogQueue(priority, fmt.Sprintf("provider %s rate limited, skipping", provider.Name), idx, len(group))
+				e.releaseProvider(provider.Name)
+				continue
+			}
+
 			maxRetries := provider.Retry.MaxRetries
 			rm := retry.NewManager(maxRetries, provider.Retry.RetryInterval, provider.Retry.BackoffFactor)
 			for rm.ShouldRetry() {
@@ -175,7 +324,8 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 				if fwdErr == nil {
 					e.stats.Record(provider.Name, provider.ModelID, priority, true)
 					tr.LogAttempt(provider.Name, priority, attempt, maxRetries+1, true, "", latency)
-					e.closeCircuitBreaker(priority, modelName, tr)
+					e.closeCircuitBreaker(priority, modelName, tr,
+			cfg.Global.CBThreshold, cfg.Global.CBCooldown, cfg.Global.CBSkipRequests)
 					tr.LogResult(true, provider.Name, startIdx)
 					tr.LogQueue(priority, "released", startIdx, len(group))
 					e.releaseProvider(provider.Name)
@@ -192,7 +342,8 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 					tr.LogQueue(priority, "released (stream written)", startIdx, len(group))
 					tr.LogResult(false, provider.Name, startIdx)
 					e.releaseProvider(provider.Name)
-					e.recordGroupFailure(modelName, priority, tr)
+					e.recordGroupFailure(modelName, priority, tr,
+		cfg.Global.CBThreshold, cfg.Global.CBCooldown, cfg.Global.CBSkipRequests)
 					fmt.Fprint(e.logWriter, tr.Dump())
 					completed = true
 					break
@@ -207,8 +358,11 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 					break
 				}
 
-				if err := rm.Wait(ctx); err != nil {
-					break
+				// Only wait if there is a next retry (skip after final attempt)
+				if attempt < maxRetries+1 {
+					if err := rm.Wait(ctx); err != nil {
+						break
+					}
 				}
 			}
 
@@ -230,7 +384,8 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 
 		if !completed && !c.Writer.Written() {
 			tr.LogQueue(priority, "released (all failed)", startIdx, len(group))
-			e.recordGroupFailure(modelName, priority, tr)
+			e.recordGroupFailure(modelName, priority, tr,
+		cfg.Global.CBThreshold, cfg.Global.CBCooldown, cfg.Global.CBSkipRequests)
 		}
 
 		if completed {
@@ -249,11 +404,10 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 	})
 }
 
-func (e *Engine) shouldSkipGroup(priority int, modelName string, tr *tracer.Recorder) bool {
+func (e *Engine) shouldSkipGroup(priority int, modelName string, tr *tracer.Recorder, threshold, cooldownSec, skipRequests int) bool {
 	e.cbMu.Lock()
 	defer e.cbMu.Unlock()
 
-	threshold := e.cfg.Global.CBThreshold
 	failures := e.failureCount[priority]
 
 	if failures < threshold {
@@ -265,23 +419,23 @@ func (e *Engine) shouldSkipGroup(priority int, modelName string, tr *tracer.Reco
 		return false
 	}
 
-	cooldown := time.Duration(e.cfg.Global.CBCooldown) * time.Second
+	cooldown := time.Duration(cooldownSec) * time.Second
 	elapsed := time.Since(*openSince)
 
 	if elapsed >= cooldown {
 		e.failureCount[priority] = 0
 		e.circuitOpenSince[priority] = nil
-		e.skipRemaining[priority] = e.cfg.Global.CBSkipRequests
+		e.skipRemaining[priority] = skipRequests
 		tr.LogCircuitBreaker(priority, "auto-closed",
 			fmt.Sprintf("condition=cooldown_expired cooldown=%ds elapsed=%v threshold=%d failures=%d",
-				e.cfg.Global.CBCooldown, elapsed.Round(time.Second), threshold, failures))
+				cooldownSec, elapsed.Round(time.Second), threshold, failures))
 		return false
 	}
 
 	if e.skipRemaining[priority] <= 0 {
 		e.failureCount[priority] = 0
 		e.circuitOpenSince[priority] = nil
-		e.skipRemaining[priority] = e.cfg.Global.CBSkipRequests
+		e.skipRemaining[priority] = skipRequests
 		tr.LogCircuitBreaker(priority, "auto-closed",
 			fmt.Sprintf("condition=skip_requests_exhausted threshold=%d failures=%d",
 				threshold, failures))
@@ -297,73 +451,94 @@ func (e *Engine) shouldSkipGroup(priority int, modelName string, tr *tracer.Reco
 	return true
 }
 
-func (e *Engine) recordGroupFailure(modelName string, priority int, tr *tracer.Recorder) {
+func (e *Engine) recordGroupFailure(modelName string, priority int, tr *tracer.Recorder, threshold, cooldownSec, skipRequests int) {
 	e.cbMu.Lock()
-	defer e.cbMu.Unlock()
 
 	e.failureCount[priority]++
 	failures := e.failureCount[priority]
-	threshold := e.cfg.Global.CBThreshold
 
 	if failures >= threshold && e.circuitOpenSince[priority] == nil {
 		now := time.Now()
 		e.circuitOpenSince[priority] = &now
-		e.skipRemaining[priority] = e.cfg.Global.CBSkipRequests
+		e.skipRemaining[priority] = skipRequests
 		tr.LogCircuitBreaker(priority, "opened",
 			fmt.Sprintf("condition=failures_reached_threshold model=%s cb_threshold=%d failures=%d/%d cooldown=%ds skip_requests=%d",
-				modelName, threshold, failures, threshold, e.cfg.Global.CBCooldown, e.cfg.Global.CBSkipRequests))
+				modelName, threshold, failures, threshold, cooldownSec, skipRequests))
 	} else {
 		tr.LogCircuitBreaker(priority, "failure-count",
 			fmt.Sprintf("condition=group_all_failed model=%s failures=%d/%d (threshold=%d)",
 				modelName, failures, threshold, threshold))
 	}
+	e.cbMu.Unlock()
+
+	e.saveCBState()
 }
 
-func (e *Engine) closeCircuitBreaker(priority int, modelName string, tr *tracer.Recorder) {
+func (e *Engine) closeCircuitBreaker(priority int, modelName string, tr *tracer.Recorder, threshold, cooldownSec, skipRequests int) {
 	e.cbMu.Lock()
-	defer e.cbMu.Unlock()
 
 	wasOpen := e.circuitOpenSince[priority] != nil
 	prevFailures := e.failureCount[priority]
 
 	e.failureCount[priority] = 0
 	e.circuitOpenSince[priority] = nil
-	e.skipRemaining[priority] = e.cfg.Global.CBSkipRequests
+	e.skipRemaining[priority] = skipRequests
 
 	if wasOpen {
 		tr.LogCircuitBreaker(priority, "closed",
 			fmt.Sprintf("condition=request_succeeded model=%s previous_failures=%d reset to 0 skip_remaining=%d",
-				modelName, prevFailures, e.cfg.Global.CBSkipRequests))
+				modelName, prevFailures, skipRequests))
 	} else if prevFailures > 0 {
 		tr.LogCircuitBreaker(priority, "reset",
 			fmt.Sprintf("condition=request_succeeded model=%s previous_failures=%d reset to 0 skip_remaining=%d",
-				modelName, prevFailures, e.cfg.Global.CBSkipRequests))
+				modelName, prevFailures, skipRequests))
 	}
+	e.cbMu.Unlock()
+
+	e.saveCBState()
 }
 
 func (e *Engine) tryAcquireProvider(name string) bool {
-	e.cbMu.Lock()
+	e.providerMu.Lock()
 	mu, ok := e.providerLocks[name]
 	if !ok {
 		mu = &sync.Mutex{}
 		e.providerLocks[name] = mu
 	}
-	e.cbMu.Unlock()
+	e.providerMu.Unlock()
 	return mu.TryLock()
 }
 
 func (e *Engine) releaseProvider(name string) {
-	e.cbMu.Lock()
+	e.providerMu.Lock()
 	mu, ok := e.providerLocks[name]
-	e.cbMu.Unlock()
+	e.providerMu.Unlock()
 	if ok {
 		mu.Unlock()
 	}
 }
 
+// checkRateLimit returns nil if the provider is within its rate limit,
+// or an error if rate limited. Always returns nil if rate limiting is disabled.
+func (e *Engine) checkRateLimit(providerName string) error {
+	e.rlMu.Lock()
+	rl, ok := e.rateLimiters[providerName]
+	e.rlMu.Unlock()
+	if !ok || rl == nil {
+		return nil
+	}
+	if !rl.Allow(providerName) {
+		return &adapter.APIError{
+			StatusCode: http.StatusTooManyRequests,
+			Message:    fmt.Sprintf("rate limit exceeded for provider %s", providerName),
+		}
+	}
+	return nil
+}
+
 func (e *Engine) advanceRRIndex(priority, groupLen int) int {
-	e.cbMu.Lock()
-	defer e.cbMu.Unlock()
+	e.rrMu.Lock()
+	defer e.rrMu.Unlock()
 	idx := e.rrIndex[priority]
 	e.rrIndex[priority] = (idx + 1) % groupLen
 	return idx
@@ -433,11 +608,13 @@ func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat
 		httpReq.Header.Set("anthropic-version", "2023-06-01")
 	}
 
-	client := &http.Client{
-		Transport: &http.Transport{
-			ResponseHeaderTimeout: 30 * time.Second,
-		},
+	respHeaderTimeout := time.Duration(provider.Timeout) * time.Second
+	if respHeaderTimeout > 30*time.Second {
+		respHeaderTimeout = 30 * time.Second // cap at 30s for header wait
 	}
+	clone := e.transport.Clone()
+	clone.ResponseHeaderTimeout = respHeaderTimeout
+	client := &http.Client{Transport: clone}
 	streamStart := time.Now()
 	resp, err := client.Do(httpReq)
 	if err != nil {
@@ -461,7 +638,7 @@ func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat
 	}
 
 	timeout := time.Duration(provider.Timeout) * time.Second
-	idleReader := &idleTimeoutReader{r: resp.Body, timeout: timeout}
+	idleReader := newIdleTimeoutReader(resp.Body, timeout)
 
 	fw := &flushWriter{w: c.Writer}
 	if requestFormat != provider.Format {
@@ -493,39 +670,55 @@ func (fw *flushWriter) Write(p []byte) (int, error) {
 type idleTimeoutReader struct {
 	r       io.ReadCloser
 	timeout time.Duration
+	done    chan struct{}
 	timer   *time.Timer
 }
 
-func (r *idleTimeoutReader) Read(p []byte) (int, error) {
-	if r.timer == nil {
-		r.timer = time.NewTimer(r.timeout)
+// newIdleTimeoutReader wraps an io.ReadCloser with an idle timeout.
+// If no data arrives within timeout, reads return an error.
+// Uses a single goroutine per stream (not per read).
+func newIdleTimeoutReader(r io.ReadCloser, timeout time.Duration) *idleTimeoutReader {
+	return &idleTimeoutReader{
+		r:       r,
+		timeout: timeout,
+		done:    make(chan struct{}),
+		timer:   time.NewTimer(timeout),
 	}
+}
+
+func (r *idleTimeoutReader) Read(p []byte) (int, error) {
+	type readResult struct {
+		n   int
+		err error
+	}
+	resultCh := make(chan readResult, 1)
+
+	// Reset the timer on each successful read
 	r.timer.Reset(r.timeout)
 
-	done := make(chan readResult, 1)
 	go func() {
 		n, err := r.r.Read(p)
-		done <- readResult{n, err}
+		select {
+		case resultCh <- readResult{n, err}:
+		case <-r.done:
+			// stream closed, discard result
+		}
 	}()
 
 	select {
-	case result := <-done:
+	case result := <-resultCh:
 		return result.n, result.err
 	case <-r.timer.C:
 		return 0, fmt.Errorf("idle timeout after %v", r.timeout)
+	case <-r.done:
+		return 0, io.ErrClosedPipe
 	}
 }
 
 func (r *idleTimeoutReader) Close() error {
-	if r.timer != nil {
-		r.timer.Stop()
-	}
+	close(r.done)
+	r.timer.Stop()
 	return r.r.Close()
-}
-
-type readResult struct {
-	n   int
-	err error
 }
 
 func (e *Engine) getOrderedProviders(modelName string) []*config.Provider {
@@ -672,15 +865,47 @@ func extractBodySnippet(body []byte) string {
 	if !ok {
 		return ""
 	}
-	content, ok := first["content"].(string)
-	if !ok {
-		return ""
-	}
-	if len(content) > 80 {
-		content = content[:80] + "..."
-	}
 	role, _ := first["role"].(string)
-	return fmt.Sprintf("%s: %s", role, content)
+
+	// Handle string content
+	if content, ok := first["content"].(string); ok {
+		if len(content) > 80 {
+			content = content[:80] + "..."
+		}
+		return fmt.Sprintf("%s: %s", role, content)
+	}
+
+	// Handle array content (multimodal — images, tools, etc.)
+	if contentArr, ok := first["content"].([]interface{}); ok && len(contentArr) > 0 {
+		parts := make([]string, 0, len(contentArr))
+		for _, c := range contentArr {
+			block, _ := c.(map[string]interface{})
+			if block == nil {
+				continue
+			}
+			switch block["type"] {
+			case "text":
+				if text, _ := block["text"].(string); text != "" {
+					parts = append(parts, text)
+				}
+			case "image_url", "image":
+				parts = append(parts, "[image]")
+			case "tool_use":
+				parts = append(parts, "[tool_use]")
+			case "tool_result":
+				parts = append(parts, "[tool_result]")
+			default:
+				parts = append(parts, fmt.Sprintf("[%s]", block["type"]))
+			}
+		}
+		snippet := strings.Join(parts, " ")
+		if len(snippet) > 80 {
+			snippet = snippet[:80] + "..."
+		}
+		return fmt.Sprintf("%s: %s", role, snippet)
+	}
+
+	return fmt.Sprintf("%s: [non-text content]", role)
 }
 
 func modeFilter(modelName string) string {
@@ -693,5 +918,93 @@ func modeFilter(modelName string) string {
 		return "all priorities"
 	default:
 		return "model match"
+	}
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Circuit breaker persistence
+// ─────────────────────────────────────────────────────────────
+
+// cbStateJSON is the on-disk format for circuit breaker state.
+type cbStateJSON struct {
+	FailureCount     map[int]int    `json:"failure_count"`
+	SkipRemaining    map[int]int    `json:"skip_remaining"`
+	CircuitsOpen     map[int]string `json:"circuits_open"` // priority → RFC3339 timestamp
+}
+
+func (e *Engine) cbStatePath() string {
+	dir := filepath.Dir(e.configPath)
+	return filepath.Join(dir, ".cb_state.json")
+}
+
+func (e *Engine) saveCBState() {
+	if e.configPath == "" {
+		return
+	}
+	e.cbMu.Lock()
+	state := e.captureCBState()
+	e.cbMu.Unlock()
+
+	// Write outside the lock to minimize hold time
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return
+	}
+	os.WriteFile(e.cbStatePath(), data, 0644)
+}
+
+// captureCBState must be called with e.cbMu held.
+func (e *Engine) captureCBState() cbStateJSON {
+	fc := make(map[int]int, len(e.failureCount))
+	for k, v := range e.failureCount {
+		fc[k] = v
+	}
+	sr := make(map[int]int, len(e.skipRemaining))
+	for k, v := range e.skipRemaining {
+		sr[k] = v
+	}
+	co := make(map[int]string)
+	for k, v := range e.circuitOpenSince {
+		if v != nil {
+			co[k] = v.Format(time.RFC3339)
+		}
+	}
+	return cbStateJSON{
+		FailureCount:  fc,
+		SkipRemaining: sr,
+		CircuitsOpen:  co,
+	}
+}
+
+func (e *Engine) loadCBState() {
+	if e.configPath == "" {
+		return
+	}
+	data, err := os.ReadFile(e.cbStatePath())
+	if err != nil {
+		return // no state file yet
+	}
+
+	var state cbStateJSON
+	if err := json.Unmarshal(data, &state); err != nil {
+		return
+	}
+
+	e.cbMu.Lock()
+	defer e.cbMu.Unlock()
+
+	for k, v := range state.FailureCount {
+		if v > 0 {
+			e.failureCount[k] = v
+		}
+	}
+	for k, v := range state.SkipRemaining {
+		e.skipRemaining[k] = v
+	}
+	for k, v := range state.CircuitsOpen {
+		t, err := time.Parse(time.RFC3339, v)
+		if err == nil {
+			e.circuitOpenSince[k] = &t
+		}
 	}
 }

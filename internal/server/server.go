@@ -1,13 +1,15 @@
 package server
 
 import (
+	"context"
 	"embed"
 	"io"
 	"net/http"
-	"os"
+	"time"
 
 	"ai-proxy/internal/config"
 	"ai-proxy/internal/middleware"
+	"ai-proxy/internal/rotator"
 	"ai-proxy/internal/router"
 	"ai-proxy/internal/sse"
 	"ai-proxy/internal/stats"
@@ -18,21 +20,34 @@ import (
 //go:embed web/*
 var webFS embed.FS
 
-func New(cfg *config.Config) *gin.Engine {
+type Instance struct {
+	*gin.Engine
+	Rot *rotator.Rotator
+}
+
+// New creates and configures the Gin engine with all routes and middleware.
+func New(cfg *config.Config, configPath string) *Instance {
 	gin.SetMode(gin.ReleaseMode)
 
 	sseHub := sse.NewHub()
 	statsCollector := stats.New()
 
-	logW := logWriter(cfg.Global.LogFile)
-	gin.DefaultWriter = io.MultiWriter(logW, sseHub)
+	rot := logWriter(cfg.Global.LogFile)
+	gin.DefaultWriter = io.MultiWriter(rot, sseHub)
 
 	r := gin.New()
 
 	r.Use(middleware.Logger())
 	r.Use(middleware.DetectFormat())
 
-	engine := router.NewEngine(cfg, gin.DefaultWriter, statsCollector)
+	engine := router.NewEngine(cfg, configPath, gin.DefaultWriter, statsCollector)
+
+	// Start config file watcher for hot-reload
+	if configPath != "" {
+		ctx, cancel := context.WithCancel(context.Background())
+		engine.StartWatcher(ctx, 30*time.Second)
+		_ = cancel // kept for future graceful shutdown
+	}
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})
@@ -66,7 +81,7 @@ func New(cfg *config.Config) *gin.Engine {
 		c.JSON(200, gin.H{"running": body.Running})
 	})
 
-	return r
+	return &Instance{Engine: r, Rot: rot}
 }
 
 func serveWeb(filePath, contentType string) gin.HandlerFunc {
@@ -80,13 +95,9 @@ func serveWeb(filePath, contentType string) gin.HandlerFunc {
 	}
 }
 
-func logWriter(path string) io.Writer {
+func logWriter(path string) *rotator.Rotator {
 	if path == "" {
-		return os.Stdout
+		return nil
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return os.Stdout
-	}
-	return io.MultiWriter(os.Stdout, f)
+	return rotator.New(path, rotator.DefaultMaxSize, rotator.DefaultMaxBackups)
 }

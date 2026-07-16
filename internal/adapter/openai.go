@@ -20,8 +20,21 @@ type OpenAIRequest struct {
 }
 
 type OpenAIMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role      string          `json:"role"`
+	Content   string          `json:"content"`
+	ToolCalls []OpenAIToolCall `json:"tool_calls,omitempty"`
+}
+
+type OpenAIToolCall struct {
+	Index    int              `json:"index,omitempty"`
+	ID       string           `json:"id"`
+	Type     string           `json:"type"`
+	Function OpenAIFunction   `json:"function"`
+}
+
+type OpenAIFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
 
 type OpenAIResponse struct {

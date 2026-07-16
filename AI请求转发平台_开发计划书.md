@@ -2,16 +2,21 @@
 
 ## 1. 项目概述
 
-构建一个轻量级 AI 请求转发网关，统一管理多个 AI 供应商（当前实际使用：腾讯云 sensenova），提供单一入口供本地 Agent 工具（OpenCode、Claude Desktop、OpenClaw 等）接入。核心能力包括**优先级路由**、**故障转移**、**指数退避重试**、**断路器保护**、**SSE 流式传输**、**OpenAI ↔ Anthropic 协议自动转换**，以及**监控面板**、**实时日志 SSE**、**启用/停用控制**。
+构建一个轻量级 AI 请求转发网关，统一管理多个 AI 供应商（当前实际使用：腾讯云 sensenova），提供单一入口供本地 Agent 工具（OpenCode、Claude Desktop、OpenClaw 等）接入。核心能力包括**优先级路由**、**故障转移**、**指数退避重试**（含 429 限流重试）、**断路器保护**（状态持久化）、**SSE 流式传输**、**OpenAI ↔ Anthropic 协议自动转换**（含 tool_use/tool_calls/thinking），以及**监控面板**、**实时日志 SSE**、**启用/停用控制**、**请求限流**（per-provider Token Bucket）、**日志自动轮转**、**配置热加载**、**版本号注入**。
 
 ### 关键设计原则
 
-- **单文件 exe，零依赖部署**
+- **单文件 exe，零依赖部署**（含 web 面板通过 `go:embed` 嵌入）
+- **Per-provider TryLock 并发**：每个供应商一把锁，`TryLock()` 非阻塞，同优先级不同供应商真正并发
 - **同优先级内 round-robin 负载均衡**：同一优先级组内多个供应商轮流作为首选，均衡各 API Key 的请求量
-- **同优先级串行排队**：每个 priority 级别有独立 Mutex，同一时刻只允许一个请求操作该优先级组（防止断路器竞争 + 减少并发压力）
-- **断路器隔离**：以 priority 为粒度熔断，失败次数达到阈值后自动跳过该组，经过 cooldown 时间或 skip_requests 耗尽后自动半开
+- **断路器隔离**：以 priority 为粒度熔断，失败次数达到阈值后自动跳过该组，经过 cooldown 时间或 skip_requests 耗尽后自动半开；**状态持久化到文件**，重启后恢复
 - **降级链路**：优先级组从高到低依次尝试，P1 全失败 → P2 → P3 → 503
-- **嵌入 Web 面板**：Dashboard、实时日志 SSE、统计 API 均内嵌于单文件 exe
+- **协议转换**：OpenAI ↔ Anthropic 双向转换，支持 tool_use/tool_calls/thinking 等 content block
+- **配置热加载**：30s 轮询配置文件，自动重载 provider 列表无需重启
+- **请求限流**：per-provider Token Bucket，可配置 RPM + burst
+- **日志轮转**：100MB 自动分割，保留 5 个备份
+- **版本号注入**：通过 ldflags 注入 Version/Commit/BuildDate，支持 `--version`
+- **优雅关闭**：SIGINT/SIGTERM → 10s 超时优雅关闭 HTTP 服务
 
 ---
 
@@ -21,27 +26,33 @@
 ai-proxy/
 ├── cmd/
 │   └── proxy/
-│       └── main.go                  # 入口：加载配置、启动服务
+│       └── main.go                  # 入口：加载配置、启动服务 + 优雅关闭
 ├── internal/
+│   ├── version/
+│   │   └── version.go               # 版本号注入（ldflags: Version/Commit/BuildDate）
 │   ├── server/
-│   │   ├── server.go                # Gin 引擎组装、中间件注册、路由挂载
+│   │   ├── server.go                # Gin 引擎组装、中间件注册、路由挂载（返回 *Instance）
 │   │   └── web/                     # 嵌入的监控面板前端
 │   │       ├── index.html           # Dashboard 页面
 │   │       ├── style.css            # 样式
 │   │       └── app.js               # 前端逻辑（轮询 stats + SSE 日志流）
 │   ├── config/
 │   │   ├── loader.go                # 配置加载/校验/默认值/排序
-│   │   └── types.go                 # 配置结构体定义
+│   │   └── types.go                 # 配置结构体定义（支持 rate_limit）
 │   ├── router/
-│   │   └── engine.go                # 核心引擎：请求分发、重试、转发、断路器、并发控制
+│   │   ├── engine.go                # 核心引擎：请求分发、重试、转发、断路器、并发控制
 │   │   └── matcher.go               # 模型名 → 供应商映射
 │   ├── adapter/
-│   │   ├── openai.go                # OpenAI 格式 HTTP 调用
+│   │   ├── openai.go                # OpenAI 格式 HTTP 调用 + ToolCalls 类型
 │   │   ├── anthropic.go             # Anthropic 格式 HTTP 调用
-│   │   ├── converter.go             # 协议转换：请求/响应/SSE 流双向转换
-│   │   └── errors.go                # APIError + Retryable 判定
+│   │   ├── converter.go             # 协议转换含 tool_use/tool_calls/thinking
+│   │   └── errors.go                # APIError + Retryable 判定（含 429）
 │   ├── retry/
 │   │   └── manager.go               # 指数退避重试管理器（支持 context 取消）
+│   ├── ratelimit/
+│   │   └── tokenbucket.go           # Token Bucket 限流器（per-provider）
+│   ├── rotator/
+│   │   └── rotator.go               # 日志轮转（100MB 自动分割，保留 5 个备份）
 │   ├── middleware/
 │   │   ├── detector.go              # 自动检测请求格式 (OpenAI / Anthropic)
 │   │   └── logger.go                # 请求日志中间件
@@ -327,7 +338,8 @@ type Manager struct {
 | 错误类型 | 行为 |
 |----------|------|
 | HTTP 5xx | retryable：等待退避后重试同一供应商 |
-| HTTP 4xx | 非 retryable：跳过重试，立即切换下一供应商 |
+| HTTP 429 Too Many Requests | retryable：等待退避后重试同一供应商（速率限制通常为临时状态） |
+| HTTP 4xx (除 429) | 非 retryable：跳过重试，立即切换下一供应商 |
 | context.DeadlineExceeded | 跳过重试，立即切换下一供应商 |
 | context.Canceled | 跳过重试，立即切换下一供应商 |
 | 流式响应已部分写入（`c.Writer.Written()`） | 停止重试，记录组失败，返回 |
@@ -391,11 +403,38 @@ advanceRRIndex(priority, groupLen int) int
   → 返回当前索引，同时将 rrIndex[priority] = (idx + 1) % groupLen
 ```
 
-### 8.5 断路器互斥锁
+### 8.5 锁拆分架构
 
-`cbMu sync.Mutex` 保护断路器状态（failureCount, circuitOpenSince, skipRemaining）和 rrIndex、providerLocks 映射，所有读写操作均加锁。
+为减少锁竞争，将单一 `cbMu` 拆分为 4 把独立锁：
 
-### 8.6 原子操作
+| 锁 | 保护的数据 | 访问频率 |
+|---|-----------|---------|
+| `cbMu` | 断路器状态（failureCount、circuitOpenSince、skipRemaining） | 每个请求最多 3 次 |
+| `providerMu` | providerLocks 映射 | 每个 provider 尝试 2 次 |
+| `rrMu` | rrIndex（round-robin 索引） | 每个组 1 次 |
+| `rlMu` | rateLimiters 映射 | 每个 provider 尝试 1 次（启用限流时） |
+| `reloadMu` (RWMutex) | `cfg` 指针 + `matcher` 指针 | 每个请求读取 1 次，热加载写入 1 次 |
+
+**设计原则**：
+- 读多写少的数据用 RWMutex（reloadMu）
+- 高频低冲突的操作用独立 Mutex（rrMu、providerMu）
+- 写操作（断路器等状态变更）用专用锁（cbMu）
+
+### 8.6 共享 HTTP Transport
+
+为优化连接复用，引擎持有共享 `http.Transport`：
+
+```go
+transport: &http.Transport{
+    MaxIdleConns:        100,
+    MaxIdleConnsPerHost: 10,
+    IdleConnTimeout:     90 * time.Second,
+}
+```
+
+流式请求通过 `transport.Clone()` 获取传输副本并设置 `ResponseHeaderTimeout`，继承底层连接池。
+
+### 8.7 原子操作
 
 | 原子变量 | 用途 |
 |----------|------|
@@ -547,12 +586,20 @@ func (h *Hub) ServeHTTP(w, r)               // SSE 端点，每客户端一个 g
 | OpenAI → Anthropic | `OpenAIRequestToAnthropic()` | system 消息 → 顶层 `system` 字段，其余映射到 `messages` |
 | Anthropic → OpenAI | `AnthropicRequestToOpenAI()` | 顶层 `system` → 首条 system 消息，其余映射到 `messages` |
 
-### 12.2 响应转换（同步）
+### 12.2 响应转换（同步 + 通用 JSON）
 
-| 方向 | 函数 | 说明 |
-|------|------|------|
-| Anthropic → OpenAI | `AnthropicResponseToOpenAI()` | content[0].text → choices[0].message.content |
-| OpenAI → Anthropic | `OpenAIResponseToAnthropic()` | choices[0].message.content → content[0].text |
+同步响应使用 **通用 JSON 操作** 转换而非结构化 struct 映射，以支持 tool_use/tool_calls：
+
+**Anthropic → OpenAI**：
+- `content` 数组中的 text block → `choices[0].message.content`
+- `content` 数组中的 tool_use block → `choices[0].message.tool_calls[]`
+  - `id`、`name`、`input` → `{id, type:"function", function:{name, arguments}}`
+- `stop_reason: "tool_use"` → `finish_reason: "tool_calls"`
+
+**OpenAI → Anthropic**：
+- `choices[0].message.tool_calls[]` → content 数组中的 tool_use block
+  - `{id, type:"function", function:{name, arguments}}` → `{type:"tool_use", id, name, input}`
+- `finish_reason: "tool_calls"` → `stop_reason: "tool_use"`
 
 ### 12.3 字段映射
 
@@ -565,6 +612,7 @@ func (h *Hub) ServeHTTP(w, r)               // SSE 端点，每客户端一个 g
 | `top_p` | `top_p` |
 | `stream` | `stream` |
 | `stop` | `stop_sequences` |
+| `tool_calls` | tool_use content block |
 
 ### 12.4 FinishReason 映射
 
@@ -577,26 +625,36 @@ func (h *Hub) ServeHTTP(w, r)               // SSE 端点，每客户端一个 g
 
 ### 12.5 SSE 流式转换（StreamConvertResponse）
 
-逐行读取 SSE 流，根据 `fromFormat` → `toFormat` 方向实时转换：
+逐行读取 SSE 流，根据 `fromFormat` → `toFormat` 方向实时转换。
 
-**Anthropic SSE → OpenAI SSE**：
+**Anthropic SSE → OpenAI SSE**（含 tool_use + thinking）：
 
-| Anthropic 事件 | OpenAI 输出 |
-|----------------|-------------|
-| `message_start` | `data: {"choices":[{"delta":{"role":"assistant"}}]}` |
-| `content_block_delta` | `data: {"choices":[{"delta":{"content":"..."}}]}` |
-| `message_delta` | `data: {"choices":[{"delta":{},"finish_reason":"stop"}]}` + usage |
-| `message_stop` | `data: [DONE]` |
-| `content_block_start` / `content_block_stop` | 忽略（无对应事件） |
+| Anthropic 事件 | 处理方式 | OpenAI 输出 |
+|----------------|---------|-------------|
+| `message_start` | 检测 assistant role | `data: {"choices":[{"delta":{"role":"assistant"}}]}` |
+| `content_block_start` (type=text) | 记录 block，等待 delta | — |
+| `content_block_start` (type=tool_use) | 提取 id/name，分配 tool call index | `data: {"choices":[{"delta":{"tool_calls":[{index,id,type,function:{name}}]}}]}` |
+| `content_block_start` (type=thinking) | **跳过**（Claude 非标字段） | — |
+| `content_block_delta` (text_delta) | 转发文本内容 | `data: {"choices":[{"delta":{"content":"..."}}]}` |
+| `content_block_delta` (input_json_delta) | 转发工具调用参数 | `data: {"choices":[{"delta":{"tool_calls":[{index,function:{arguments}}]}}]}` |
+| `content_block_delta` (thinking_delta) | **跳过** | — |
+| `content_block_stop` | 无对应事件 | — |
+| `message_delta` | 映射 stop_reason + usage | `data: {"choices":[{"delta":{},"finish_reason":"..."}]}` + usage |
+| `message_stop` | 流结束 | `data: [DONE]` |
 
-**OpenAI SSE → Anthropic SSE**：
+**OpenAI SSE → Anthropic SSE**（含 tool_calls）：
 
-| OpenAI data | Anthropic 事件 |
-|-------------|----------------|
-| `delta.role == "assistant"` 首次出现 | `message_start` + `content_block_start` |
-| `delta.content` 非空 | `content_block_delta` |
-| `finish_reason` 非空 | `content_block_stop` + `message_delta` |
-| `[DONE]` | `message_stop` |
+| OpenAI data | 处理方式 | Anthropic 事件 |
+|-------------|---------|----------------|
+| `delta.role == "assistant"` 首次出现 | 初始化 message | `message_start` |
+| `delta.content` 首次非空 | 启动 text block | `content_block_start` (type=text) |
+| `delta.content` 后续 | 追加文本 | `content_block_delta` (text_delta) |
+| `delta.tool_calls[]` 首次出现 id/name | 启动 tool_use block | `content_block_start` (type=tool_use, id, name) |
+| `delta.tool_calls[].arguments` 非空 | 追加工具调用参数 | `content_block_delta` (input_json_delta, partial_json) |
+| `finish_reason` 非空 | 关闭所有 active block | `content_block_stop` + `message_delta` |
+| `[DONE]` | 流结束 | `message_stop` |
+
+**工具调用状态追踪**：使用 `toolCallAcc` 结构体在流转换期间追踪每个 tool call 的状态（index、id、name、arguments 累加器），支持多个并发工具调用。
 
 ---
 
@@ -637,13 +695,17 @@ forwardRequestStream()
 type idleTimeoutReader struct {
     r       io.ReadCloser
     timeout time.Duration
+    done    chan struct{}
     timer   *time.Timer
 }
+
+func newIdleTimeoutReader(r io.ReadCloser, timeout time.Duration) *idleTimeoutReader
 ```
 
-- 每次 `Read()` 启动一个 goroutine 执行实际读取，通过 `chan readResult` 返回
-- `select` 在读取结果和 timer 间竞争
-- timer 触发时返回 `"idle timeout after {timeout}"`
+- 每次 `Read()` 启动一个 goroutine 执行实际读取，通过缓冲 channel 返回结果
+- `select` 在读取结果、timer（空闲超时）和 `done`（流关闭信号）间竞争
+- `Close()` 关闭 `done` channel + 停止 timer + 关闭底层 reader，goroutine 通过 `select` 检测到 `done` 后退出，**不泄漏**
+- timer 在每次读取成功后 reset，确保超时窗口从最后一个字节到达时重新计算
 
 ---
 
@@ -765,10 +827,13 @@ model: Flash
 | HTTP 框架 | **Gin v1.10** | 高性能，社区活跃 |
 | 配置解析 | **gopkg.in/yaml.v3** | YAML/JSON 双格式支持 |
 | 配置文件 | `providers.yaml` | 主配置文件 |
-| 协议转换 | **自定义 Go struct 映射** | OpenAI ↔ Anthropic 格式互转 |
+| 协议转换 | **自定义通用 JSON 转换** | OpenAI ↔ Anthropic 双向，含 tool_use/tool_calls/thinking |
 | 嵌入前端 | **//go:embed** | HTML/CSS/JS 编译进二进制 |
 | 实时日志 | **SSE (Server-Sent Events)** | 浏览器 EventSource 消费 |
 | 统计收集 | **自定义 Collector** | atomic 计数器 + mutex 保护 map |
+| 限流 | **Token Bucket** | per-provider 独立桶，可配置 RPM + burst |
+| 日志轮转 | **自定义 Rotator** | 100MB 自动分割，保留 N 个备份 |
+| 构建注入 | **ldflags** | Version/Commit/BuildDate 编译时注入 |
 | 打包部署 | `go build` / `make build-all` | 单文件 exe，支持交叉编译 |
 | 目标部署 | **树莓派 (ARM64 Linux)** | 局域网内统一入口 |
 
@@ -829,7 +894,117 @@ model: Flash
 
 ---
 
-## 18. 扩展性考虑
+---
+
+## 18. 已修复问题记录（第二阶段）
+
+### 18.1 Fix 1 — 版本号缺失
+
+- **问题**：项目无版本号机制，无法通过命令行查看版本，运维定位困难
+- **修复**：新增 `internal/version` 包，`main.go` 添加 `--version` 标志，Makefile 通过 ldflags 注入 Version/Commit/BuildDate
+
+### 18.2 Fix 2 — 429 状态码不重试
+
+- **问题**：`Retryable()` 仅判定 HTTP ≥500 可重试，429 被归为 4xx 不重试，导致限流时直接跳过
+- **修复**：将 HTTP 429 加入 retryable 判定（`errors.go`）
+
+### 18.3 Fix 3 — idleTimeoutReader goroutine 泄漏
+
+- **问题**：每次 `Read()` 启动 goroutine，`Close()` 时未通知导致泄漏
+- **修复**：新增 `done` channel，`Close()` 关闭 `done` + 停止 timer + 关闭底层 reader，goroutine 通过 `select` 检测后退出
+
+### 18.4 Fix 4 — 日志文件无限增长
+
+- **问题**：`logWriter` 只追加不轮转，生产环境会写满磁盘
+- **修复**：新增 `internal/rotator` 包实现基于文件大小的自动轮转（默认 100MB，保留 5 个备份）
+
+### 18.5 Fix 5 — 无请求限流
+
+- **问题**：缺乏对上游 API 的速率保护，可能被 Agent 端突发请求打满 TPM 触发 429
+- **修复**：新增 `internal/ratelimit` 包实现 per-provider Token Bucket，`config/types.go` 增加 `RateLimitConfig`（enabled/rpm/burst），引擎在转发前检查限流
+
+### 18.6 Fix 6 — 协议转换不支持 tool_use/tool_calls/thinking
+
+- **问题**：converter.go 只处理 text 类型，工具调用和思考块在转换中被丢弃
+- **修复**：`AnthropicContent` 增加 ID/Name/Input/Thinking 字段；`ConvertResponse` 改用通用 JSON 转换；SSE 流转换添加 `content_block_start`(tool_use) + `input_json_delta` + `thinking_delta` 处理；`OpenAIMessage` 增加 ToolCalls 字段
+
+### 18.7 Fix 7 — 无配置热加载
+
+- **问题**：修改 providers.yaml 必须重启进程
+- **修复**：`Engine.StartWatcher()` 轮询配置文件修改时间（30s 间隔），`reloadConfig()` 原子替换 cfg/matcher/providerLocks/rateLimiters，无需重启
+
+### 18.8 Fix 8 — 断路器状态不持久化
+
+- **问题**：重启后断路器状态丢失，可能对仍不可用的上游立即重试
+- **修复**：`saveCBState()` 在 CB 状态每次变更时写入 `.cb_state.json`，`NewEngine` 中 `loadCBState()` 恢复之前状态
+
+---
+
+## 19. 已修复问题记录（第三阶段 — 全量代码审查）
+
+### 19.1 Bug 1 — loadCBState 调用时机
+
+- **问题**：`NewEngine` 中调用 `loadCBState()` 时 `configPath` 还未设置
+- **修复**：`NewEngine` 接受 `configPath` 参数，在构造后再调用 `loadCBState()`
+
+### 19.2 Bug 2 — reloadMu data race
+
+- **问题**：`reloadConfig` 获取 `reloadMu.Lock()` 写入 cfg/matcher，但 `HandleRequest` 等读取方未获取 `RLock()`
+- **修复**：`HandleRequest` 入口在 `reloadMu.RLock()` 下捕获 `cfg` 指针 + providers 列表；`shouldSkipGroup`/`recordGroupFailure`/`closeCircuitBreaker` 接受配置参数，不再直接读 `e.cfg`
+
+### 19.3 Bug 3 — ResponseHeaderTimeout 硬编码 30s
+
+- **问题**：流式请求的 `ResponseHeaderTimeout` 固定 30s，忽略 provider timeout
+- **修复**：使用 `provider.Timeout` 动态设置，上限 30s
+
+### 19.4 Bug 4 — 流式 http.Client 无连接池
+
+- **问题**：每次 `forwardRequestStream` 创建全新 `http.Client`/`Transport`，无连接复用
+- **修复**：引擎持有共享 `http.Transport`（MaxIdleConns=100），流式请求 `transport.Clone()` 继承连接池
+
+### 19.5 优化 1 — cbMu 锁拆分
+
+- **问题**：`cbMu` 同时保护断路器状态 + providerLocks + rateLimiters + rrIndex，高竞争
+- **修复**：拆分为 4 把独立锁（cbMu/providerMu/rrMu/rlMu） + cfg/matcher 用 reloadMu RWMutex
+
+### 19.6 优化 2 — StartWatcher goroutine 泄漏
+
+- **问题**：StartWatcher goroutine 无停止机制，服务器关闭后继续运行
+- **修复**：接受 `context.Context`，select 监听 `ctx.Done()` 退出
+
+### 19.7 优化 3 — saveCBState 竞态窗口
+
+- **问题**：释放 cbMu 后才写文件，期间 CB 状态可能被修改
+- **修复**：`captureCBState()` 在锁内捕获完整快照，锁外异步写文件
+
+### 19.8 清理 — AnthropicResponseToOpenAI 死代码
+
+- **问题**：toolCalls 被正确提取但用 `_ = toolCalls` 丢弃了
+- **修复**：补全注入逻辑，消息结构体增加 `OpenAIMessage.ToolCalls` 字段
+
+### 19.9 清理 — msg_ ID 生成
+
+- **问题**：`len(dataStr)%100000` 生成的 ID 不唯一
+- **修复**：使用递增计数器 `msg_proxy_N`
+
+### 19.10 清理 — extractBodySnippet 不支持多模态
+
+- **问题**：`first["content"].(string)` 类型断言对数组 content 失败
+- **修复**：处理 content 为数组的情况（text/image/tool_use/tool_result）
+
+### 19.11 清理 — Rotator 优雅关闭
+
+- **问题**：Rotator 实例从未关闭，文件句柄泄漏
+- **修复**：`server.New` 返回 `*Instance` 结构体暴露 `Rot` 字段，`main.go` 在优雅关闭时调用 `Close()`
+
+### 19.12 清理 — 优雅关闭流程
+
+- **问题**：缺乏 SIGINT/SIGTERM 处理，直接关闭可能丢失数据
+- **修复**：`main.go` 使用 `signal.Notify` 捕获退出信号，10s 超时 `http.Server.Shutdown` + 关闭 Rotator
+
+---
+
+## 20. 扩展性考虑
 
 - **插件化供应商适配器**：新增供应商只需实现统一接口（当前已抽象 adapter 层）
 - **多租户**：通过请求头区分不同用户的 API Key（阶段二）

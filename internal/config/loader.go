@@ -99,6 +99,12 @@ func (cfg *Config) applyDefaults() {
 		if cfg.Providers[i].Timeout <= 0 {
 			cfg.Providers[i].Timeout = 60
 		}
+		if cfg.Providers[i].RateLimit.RPM <= 0 {
+			cfg.Providers[i].RateLimit.RPM = 60 // default 60 RPM
+		}
+		if cfg.Providers[i].RateLimit.Burst <= 0 {
+			cfg.Providers[i].RateLimit.Burst = 10
+		}
 	}
 }
 

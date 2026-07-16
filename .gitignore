@@ -39,3 +39,6 @@ providers.json
 
 # Temp
 old/
+
+# Circuit breaker state (auto-generated)
+.cb_state.json

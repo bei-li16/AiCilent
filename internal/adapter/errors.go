@@ -12,5 +12,13 @@ func (e *APIError) Error() string {
 }
 
 func (e *APIError) Retryable() bool {
-	return e.StatusCode >= 500
+	// 5xx server errors are retryable
+	if e.StatusCode >= 500 {
+		return true
+	}
+	// 429 Too Many Requests is retryable (rate limit)
+	if e.StatusCode == 429 {
+		return true
+	}
+	return false
 }

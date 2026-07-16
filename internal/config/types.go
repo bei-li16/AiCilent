@@ -22,16 +22,23 @@ type RetryConfig struct {
 	BackoffFactor  float64 `yaml:"backoff_factor" json:"backoff_factor"`
 }
 
+type RateLimitConfig struct {
+	Enabled bool    `yaml:"enabled" json:"enabled"`
+	RPM     float64 `yaml:"rpm" json:"rpm"`         // requests per minute
+	Burst   int     `yaml:"burst" json:"burst"`     // max burst
+}
+
 type Provider struct {
-	Name     string      `yaml:"name" json:"name"`
-	Vendor   string      `yaml:"vendor" json:"vendor"`
-	ModelID  string      `yaml:"model_id" json:"model_id"`
-	APIKey   string      `yaml:"api_key" json:"api_key"`
-	BaseURL  string      `yaml:"base_url" json:"base_url"`
-	Priority int         `yaml:"priority" json:"priority"`
-	Retry    RetryConfig `yaml:"retry" json:"retry"`
-	Timeout  int         `yaml:"timeout" json:"timeout"`
-	Format   string      `yaml:"format" json:"format"`
+	Name     string         `yaml:"name" json:"name"`
+	Vendor   string         `yaml:"vendor" json:"vendor"`
+	ModelID  string         `yaml:"model_id" json:"model_id"`
+	APIKey   string         `yaml:"api_key" json:"api_key"`
+	BaseURL  string         `yaml:"base_url" json:"base_url"`
+	Priority int            `yaml:"priority" json:"priority"`
+	Retry    RetryConfig    `yaml:"retry" json:"retry"`
+	Timeout  int            `yaml:"timeout" json:"timeout"`
+	Format   string         `yaml:"format" json:"format"`
+	RateLimit RateLimitConfig `yaml:"rate_limit" json:"rate_limit"`
 }
 
 type ModelRoute struct {

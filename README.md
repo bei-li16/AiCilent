@@ -1,6 +1,6 @@
 # AI Proxy — AI 请求转发平台
 
-统一管理多个 AI 供应商，提供单一入口供 OpenCode、Claude Desktop、OpenClaw 等 Agent 工具接入。支持优先级路由、故障转移、重试策略、流式传输、协议自动转换，以及内建监控面板。
+统一管理多个 AI 供应商，提供单一入口供 OpenCode、Claude Desktop、OpenClaw 等 Agent 工具接入。支持优先级路由、故障转移、重试策略（含 429 限流重试）、流式传输、协议自动转换（含 tool_use/tool_calls）、断路器（状态持久化）、请求限流、日志自动轮转、配置热加载，以及内建监控面板。
 
 ---
 
@@ -9,7 +9,14 @@
 ### 编译
 
 ```bash
+# 使用 make（推荐，自动注入版本号）
+make build
+
+# 或直接 go build（版本号显示为 dev）
 go build -o ai-proxy.exe ./cmd/proxy/
+
+# 查看版本
+ai-proxy.exe --version
 ```
 
 ### 配置
@@ -141,16 +148,104 @@ model_routes:
 | `retry.max_retries` | 最大重试次数，默认 3 |
 | `retry.retry_interval` | 首次重试间隔秒数，默认 2 |
 | `retry.backoff_factor` | 退避因子，默认 2 |
+| `rate_limit.enabled` | 是否启用限流，默认 false |
+| `rate_limit.rpm` | 每分钟允许的请求数，默认 60 |
+| `rate_limit.burst` | 最大突发请求数，默认 10 |
+
+---
+
+## 部署到树莓派 (Linux ARM64)
+
+### 1. 复制文件
+
+```bash
+# 将二进制和配置传到树莓派
+scp ai-proxy-linux-arm64 pi@raspberrypi:~/ai-proxy
+scp config/providers.yaml pi@raspberrypi:~/config/providers.yaml
+```
+
+### 2. 安装为 systemd 服务（推荐）
+
+在树莓派上创建 `/etc/systemd/system/ai-proxy.service`：
+
+```ini
+[Unit]
+Description=AI Proxy
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi
+ExecStart=/home/pi/ai-proxy --config /home/pi/config/providers.yaml
+Restart=always
+RestartSec=5
+# 日志由内置 rotator 管理（100MB 轮转，保留 5 份）
+StandardOutput=append:/home/pi/proxy.log
+StandardError=inherit
+
+[Install]
+WantedBy=multi-user.target
+```
+
+启动：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable ai-proxy
+sudo systemctl start ai-proxy
+sudo systemctl status ai-proxy
+```
+
+### 3. 查看日志
+
+```bash
+# 实时日志
+sudo journalctl -u ai-proxy -f
+
+# 或直接查看日志文件
+tail -f ~/proxy.log
+```
+
+### 4. 更新版本
+
+```bash
+# 上传新二进制
+scp ai-proxy-linux-arm64 pi@raspberrypi:~/ai-proxy-new
+
+# 在树莓派上替换并重启
+sudo systemctl stop ai-proxy
+mv ~/ai-proxy-new ~/ai-proxy
+chmod +x ~/ai-proxy
+sudo systemctl start ai-proxy
+```
+
+### 5. 验证
+
+```bash
+# 检查版本
+~/ai-proxy --version
+
+# 健康检查
+curl http://localhost:8080/health
+
+# 浏览器打开监控面板
+# http://<树莓派IP>:8080/
+```
 
 ---
 
 ## 跨平台编译
 
 ```bash
+# 一键编译所有平台（版本号自动注入）
 make build-all
+
+# 或手动指定版本号
+make build VERSION=v1.0.0
 ```
 
-或手动：
+手动编译（版本号显示为 dev）：
 
 ```bash
 # Windows
@@ -168,3 +263,47 @@ GOOS=darwin GOARCH=amd64 go build -o ai-proxy-macos ./cmd/proxy/
 # macOS Apple Silicon
 GOOS=darwin GOARCH=arm64 go build -o ai-proxy-macos-arm64 ./cmd/proxy/
 ```
+
+如需注入版本号，手动指定 ldflags：
+
+```bash
+go build -ldflags "-X ai-proxy/internal/version.Version=v1.0.0 \
+  -X ai-proxy/internal/version.Commit=$(git rev-parse --short HEAD) \
+  -X ai-proxy/internal/version.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  -o ai-proxy.exe ./cmd/proxy/
+```
+
+---
+
+## 高级功能
+
+### 请求限流
+
+为每个供应商独立配置速率限制，避免 API Key 被 TPM 限流打满：
+
+```yaml
+providers:
+  - name: my-provider
+    rate_limit:
+      enabled: true
+      rpm: 60       # 每分钟 60 次请求
+      burst: 10      # 最多突发 10 个请求
+```
+
+限流使用 Token Bucket 算法，请求超出限制时自动跳过该供应商，尝试同级其他供应商或降级到下一优先级。
+
+### 配置热加载
+
+代理启动后，修改 `providers.yaml` 无需重启。系统每 30 秒自动检测文件变更并热加载。热加载仅更新供应商列表和路由映射，**不影响**正在处理的请求和断路器状态。
+
+### 日志轮转
+
+日志文件默认 100MB 自动分割，保留 5 个备份。日志文件名为 `proxy.log`，轮转后自动命名为 `proxy.log.<时间戳>`，旧文件自动清理。
+
+### 断路器状态持久化
+
+断路器的熔断状态（失败计数、冷却时间、跳过次数）保存在 `config/.cb_state.json`。代理重启后自动恢复，避免对仍不可用的上游立即发起请求。
+
+### 优雅关闭
+
+代理捕获 `SIGINT`/`SIGTERM` 信号，收到后等待正在处理的请求最多 10 秒，然后关闭日志文件后退出。可通过 `Ctrl+C` 或系统管理工具触发。
