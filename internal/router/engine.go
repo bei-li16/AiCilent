@@ -235,9 +235,18 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 	// Capture config pointer under read lock for consistency.
 	// Once captured, the pointed-to struct is never mutated by reloadConfig.
 	e.reloadMu.RLock()
-	providers := e.getOrderedProviders(modelName)
+	allProviders := e.getOrderedProviders(modelName)
 	cfg := e.cfg
 	e.reloadMu.RUnlock()
+
+	// Filter to only same-format providers — no cross-format degradation.
+	// OpenAI requests route to OpenAI providers only; Anthropic to Anthropic.
+	providers := make([]*config.Provider, 0, len(allProviders))
+	for _, p := range allProviders {
+		if p.Format == requestFormat {
+			providers = append(providers, p)
+		}
+	}
 	if len(providers) == 0 {
 		tr.LogResult(false, "", 0)
 		fmt.Fprint(e.logWriter, tr.Dump())
