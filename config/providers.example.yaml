@@ -1,33 +1,33 @@
 # Example configuration — copy to providers.yaml and fill in your credentials
 global:
-  listen_addr: ":8080"
-  log_file: proxy.log
-  cb_threshold: 2
-  cb_cooldown: 30
-  cb_skip_requests: 10
+  listen_addr: ":8080"          # 监听地址，代理服务器在此端口接收请求
+  log_file: proxy.log            # 日志文件路径
+  cb_threshold: 2                # 熔断阈值，同一优先级组连续失败次数达到此值后熔断
+  cb_cooldown: 30                # 熔断冷却时间（秒），熔断后等待此时间后尝试恢复
+  cb_skip_requests: 10           # 熔断恢复后跳过的请求数，用于探测后端是否恢复
 
-model_routes:
-  - alias: gpt-4o
-    target: glm-5.2
+model_routes:                    # 模型路由别名映射，将别名映射到实际 provider
+  - alias: gpt-4o                # 对外暴露的模型别名
+    target: glm-5.2              # 映射到的 provider name
   - alias: gpt-4o-mini
     target: deepseek-v4-flash
-  - alias: default
+  - alias: default               # 默认路由，请求中模型不在路由表时使用
     target: deepseek-v4-flash
 
-providers:
+providers:                       # 供应商列表，按优先级从高到低降级
 
   # ════════ Priority 1 ════════
-  - name: glm-5.2
-    model_id: glm-5.2
-    api_key: YOUR_API_KEY_HERE
-    base_url: https://api.example.com/v1
-    priority: 1
-    format: openai
-    timeout: 60
-    retry:
-      max_retries: 3
-      retry_interval: 2
-      backoff_factor: 2
+  - name: glm-5.2                # 供应商唯一标识名
+    model_id: glm-5.2            # 实际发送给上游的模型名称
+    api_key: YOUR_API_KEY_HERE   # API 密钥
+    base_url: https://api.example.com/v1  # API 端点地址，OpenAI 格式需包含 /v1
+    priority: 1                  # 优先级（数字越小越优先），失败后降级到下一优先级
+    format: openai               # 请求体转换格式，openai 或 anthropic
+    timeout: 60                  # 请求超时时间（秒）
+    retry:                       # 重试策略
+      max_retries: 3             # 最大重试次数
+      retry_interval: 2          # 初始重试间隔（秒）
+      backoff_factor: 2          # 退避因子，等待时间 = retry_interval * (backoff_factor ^ (attempt-1))
 
   # ════════ Priority 2 ════════
   - name: deepseek-v4-flash
@@ -46,10 +46,10 @@ providers:
   - name: u1-fast
     model_id: sensenova-u1-fast
     api_key: YOUR_API_KEY_HERE
-    base_url: https://api.example.com
+    base_url: https://api.example.com  # Anthropic 格式 base_url 不含 /v1
     priority: 3
-    format: anthropic
-    auth_type: bearer         # "bearer" (Authorization) or "x-api-key" (default for anthropic)
+    format: anthropic             # 请求体按 Anthropic Messages API 格式转换
+    auth_type: bearer             # 认证方式，bearer=Authorization 头，x-api-key=X-Api-Key 头（anthropic 默认）
     timeout: 60
     retry:
       max_retries: 3
