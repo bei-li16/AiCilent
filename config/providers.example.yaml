@@ -1,10 +1,11 @@
 # Example configuration — copy to providers.yaml and fill in your credentials
 global:
   listen_addr: ":8080"          # 监听地址，代理服务器在此端口接收请求
+  default_format: openai         # 默认请求格式，客户端未指定时使用
   log_file: proxy.log            # 日志文件路径
-  cb_threshold: 2                # 熔断阈值，同一优先级组连续失败次数达到此值后熔断
-  cb_cooldown: 30                # 熔断冷却时间（秒），熔断后等待此时间后尝试恢复
-  cb_skip_requests: 10           # 熔断恢复后跳过的请求数，用于探测后端是否恢复
+  cb_threshold: 3                # 熔断阈值，同一优先级组连续失败次数达到此值后熔断
+  cb_cooldown: 10                # 熔断冷却时间（秒），熔断后等待此时间后尝试恢复
+  cb_skip_requests: 1            # 熔断恢复后跳过的请求数，用于探测后端是否恢复
 
 model_routes:                    # 模型路由别名映射，将别名映射到实际 provider
   - alias: gpt-4o                # 对外暴露的模型别名
@@ -16,42 +17,31 @@ model_routes:                    # 模型路由别名映射，将别名映射到
 
 providers:                       # 供应商列表，按优先级从高到低降级
 
-  # ════════ Priority 1 ════════
+  # ════════ OpenAI 格式示例 ════════
   - name: glm-5.2                # 供应商唯一标识名
+    vendor: openai               # 供应商类型，openai=兼容 OpenAI API 格式，anthropic=兼容 Anthropic API 格式
     model_id: glm-5.2            # 实际发送给上游的模型名称
     api_key: YOUR_API_KEY_HERE   # API 密钥
     base_url: https://api.example.com/v1  # API 端点地址，OpenAI 格式需包含 /v1
     priority: 1                  # 优先级（数字越小越优先），失败后降级到下一优先级
-    format: openai               # 请求体转换格式，openai 或 anthropic
+    format: openai               # 请求体转换格式，决定如何将客户端请求转为上游格式
     timeout: 60                  # 请求超时时间（秒）
     retry:                       # 重试策略
       max_retries: 3             # 最大重试次数
-      retry_interval: 2          # 初始重试间隔（秒）
+      retry_interval: 1          # 初始重试间隔（秒）
       backoff_factor: 2          # 退避因子，等待时间 = retry_interval * (backoff_factor ^ (attempt-1))
 
-  # ════════ Priority 2 ════════
-  - name: deepseek-v4-flash
-    model_id: deepseek-v4-flash
-    api_key: YOUR_API_KEY_HERE
-    base_url: https://api.example.com/v1
-    priority: 2
-    format: openai
-    timeout: 60
-    retry:
-      max_retries: 3
-      retry_interval: 2
-      backoff_factor: 2
-
-  # ════════ Priority 3 (Anthropic format example) ════════
-  - name: u1-fast
-    model_id: sensenova-u1-fast
+  # ════════ Anthropic 格式示例（auth_type: bearer，base_url 无 /v1）════════
+  - name: glm-5.2-anthropic
+    vendor: anthropic             # 供应商类型为 anthropic，使用 x-api-key 或 bearer 认证
+    model_id: glm-5.2
     api_key: YOUR_API_KEY_HERE
     base_url: https://api.example.com  # Anthropic 格式 base_url 不含 /v1
-    priority: 3
+    priority: 1
     format: anthropic             # 请求体按 Anthropic Messages API 格式转换
-    auth_type: bearer             # 认证方式，bearer=Authorization 头，x-api-key=X-Api-Key 头（anthropic 默认）
+    auth_type: bearer             # 认证方式，bearer=Authorization 头，x-api-key=X-Api-Key 头
     timeout: 60
     retry:
       max_retries: 3
-      retry_interval: 2
+      retry_interval: 1
       backoff_factor: 2
