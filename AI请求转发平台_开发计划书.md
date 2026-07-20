@@ -2,7 +2,7 @@
 
 ## 1. 项目概述
 
-构建一个轻量级 AI 请求转发网关，统一管理多个 AI 供应商（当前实际使用：腾讯云 sensenova），提供单一入口供本地 Agent 工具（OpenCode、Claude Desktop、OpenClaw 等）接入。核心能力包括**优先级路由**、**故障转移**、**指数退避重试**（含 429 限流重试）、**断路器保护**（状态持久化）、**SSE 流式传输**、**OpenAI ↔ Anthropic 协议自动转换**（含 tool_use/tool_calls/thinking），以及**监控面板**、**实时日志 SSE**、**启用/停用控制**、**请求限流**（per-provider Token Bucket）、**日志自动轮转**、**配置热加载**、**版本号注入**。
+构建一个轻量级 AI 请求转发网关，统一管理多个 AI 供应商（当前实际使用：腾讯云 sensenova），提供单一入口供本地 Agent 工具（OpenCode、Claude Desktop、OpenClaw 等）接入。核心能力包括**优先级路由**、**故障转移**、**指数退避重试**（含 429 限流重试）、**断路器保护**（状态持久化、原子写入）、**SSE 流式传输**（3min 硬超时 + idleTimeoutReader + 中途错误事件注入）、**OpenAI ↔ Anthropic 协议自动转换**（含 tool_use/tool_calls/thinking，通用 JSON map 保留未知字段），以及**监控面板**、**实时日志 SSE**、**启用/停用控制**、**请求限流**（per-provider Token Bucket）、**日志自动轮转**、**配置热加载**、**版本号注入**。
 
 ### 关键设计原则
 
@@ -43,9 +43,9 @@ ai-proxy/
 │   │   ├── engine.go                # 核心引擎：请求分发、重试、转发、断路器、并发控制
 │   │   └── matcher.go               # 模型名 → 供应商映射
 │   ├── adapter/
-│   │   ├── openai.go                # OpenAI 格式 HTTP 调用 + ToolCalls 类型
-│   │   ├── anthropic.go             # Anthropic 格式 HTTP 调用
-│   │   ├── converter.go             # 协议转换含 tool_use/tool_calls/thinking
+│   │   ├── openai.go                # OpenAI 格式 HTTP 调用（CallOpenAIRaw，共享 transport）
+│   │   ├── anthropic.go             # Anthropic 格式 HTTP 调用（CallAnthropicRaw，共享 transport）
+│   │   ├── converter.go             # 协议转换含 tool_use/tool_calls/thinking（通用 JSON map 转换）
 │   │   └── errors.go                # APIError + Retryable 判定（含 429）
 │   ├── retry/
 │   │   └── manager.go               # 指数退避重试管理器（支持 context 取消）
@@ -338,11 +338,11 @@ type Manager struct {
 | 错误类型 | 行为 |
 |----------|------|
 | HTTP 5xx | retryable：等待退避后重试同一供应商 |
-| HTTP 429 Too Many Requests | retryable：等待退避后重试同一供应商（速率限制通常为临时状态） |
+| HTTP 429 Too Many Requests | retryable：等待退避后重试同一供应商（速率限制通常为临时状态，TPM 配额会逐步恢复） |
 | HTTP 4xx (除 429) | 非 retryable：跳过重试，立即切换下一供应商 |
 | context.DeadlineExceeded | 跳过重试，立即切换下一供应商 |
 | context.Canceled | 跳过重试，立即切换下一供应商 |
-| 流式响应已部分写入（`c.Writer.Written()`） | 停止重试，记录组失败，返回 |
+| 流式响应已部分写入（`c.Writer.Written()`） | 停止重试，注入 SSE 错误事件，记录组失败，返回 |
 
 ### 7.4 重试等待可取消
 
@@ -405,7 +405,7 @@ advanceRRIndex(priority, groupLen int) int
 
 ### 8.5 锁拆分架构
 
-为减少锁竞争，将单一 `cbMu` 拆分为 4 把独立锁：
+为减少锁竞争，将单一 `cbMu` 拆分为 5 把独立锁 + 1 把文件锁：
 
 | 锁 | 保护的数据 | 访问频率 |
 |---|-----------|---------|
@@ -414,6 +414,7 @@ advanceRRIndex(priority, groupLen int) int
 | `rrMu` | rrIndex（round-robin 索引） | 每个组 1 次 |
 | `rlMu` | rateLimiters 映射 | 每个 provider 尝试 1 次（启用限流时） |
 | `reloadMu` (RWMutex) | `cfg` 指针 + `matcher` 指针 | 每个请求读取 1 次，热加载写入 1 次 |
+| `fileMu` | CB 状态文件写入（防止并发写损坏） | 每次组失败/成功 1 次 |
 
 **设计原则**：
 - 读多写少的数据用 RWMutex（reloadMu）
@@ -549,16 +550,18 @@ func (h *Hub) ServeHTTP(w, r)               // SSE 端点，每客户端一个 g
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `name` | string | 是 | 供应商唯一标识名 |
-| `vendor` | string | 是 | `openai` 或 `anthropic` |
 | `model_id` | string | 是 | 实际调用的模型名 |
 | `api_key` | string | 是 | API Key |
 | `base_url` | string | 是 | API 地址 |
 | `priority` | int | 是 | 优先级（越小越优先） |
 | `format` | string | 是 | `openai` 或 `anthropic` |
 | `timeout` | int | 否 | 请求超时秒数，默认 **60** |
-| `retry.max_retries` | int | 否 | 最大重试次数，默认 **3** |
-| `retry.retry_interval` | int | 否 | 首次重试等待秒数，默认 **2** |
-| `retry.backoff_factor` | float | 否 | 退避因子，默认 **2** |
+| `retry.max_retries` | int | 否 | 最大重试次数，默认 **3**（不能为负） |
+| `retry.retry_interval` | int | 否 | 首次重试等待秒数，默认 **2**（不能为负） |
+| `retry.backoff_factor` | float | 否 | 退避因子，默认 **2**（不能为负） |
+| `rate_limit.enabled` | bool | 否 | 是否启用 per-provider 限流，默认 **false** |
+| `rate_limit.rpm` | float | 否 | 每分钟请求数，默认 **60** |
+| `rate_limit.burst` | int | 否 | 最大突发请求数，默认 **10** |
 
 ### 11.2 当前供应商列表
 
@@ -579,12 +582,16 @@ func (h *Hub) ServeHTTP(w, r)               // SSE 端点，每客户端一个 g
 
 ## 12. 协议转换
 
-### 12.1 请求转换（同步）
+### 12.1 请求转换（同步 — 通用 JSON 保留未知字段）
 
-| 方向 | 函数 | 说明 |
-|------|------|------|
-| OpenAI → Anthropic | `OpenAIRequestToAnthropic()` | system 消息 → 顶层 `system` 字段，其余映射到 `messages` |
-| Anthropic → OpenAI | `AnthropicRequestToOpenAI()` | 顶层 `system` → 首条 system 消息，其余映射到 `messages` |
+`ConvertRequest()` 使用 **通用 JSON map 操作** 而非结构化 struct 映射，以保留所有未知字段（`tools`、`tool_choice`、`response_format`、`seed` 等）：
+
+| 方向 | 转换操作 |
+|------|---------|
+| OpenAI → Anthropic | 提取 `messages` 中 role=system 的消息 → 顶层 `system` 字段；重命名 `stop` → `stop_sequences`；其余字段原样保留 |
+| Anthropic → OpenAI | 顶层 `system` → 首条 system message；重命名 `stop_sequences` → `stop`；其余字段原样保留 |
+
+**关键改进**：相比旧的 struct 映射方式，map 方式不会丢弃 `tools`、`tool_choice`、`response_format` 等高级字段，确保跨格式转换时功能完整。
 
 ### 12.2 响应转换（同步 + 通用 JSON）
 
@@ -654,7 +661,9 @@ func (h *Hub) ServeHTTP(w, r)               // SSE 端点，每客户端一个 g
 | `finish_reason` 非空 | 关闭所有 active block | `content_block_stop` + `message_delta` |
 | `[DONE]` | 流结束 | `message_stop` |
 
-**工具调用状态追踪**：使用 `toolCallAcc` 结构体在流转换期间追踪每个 tool call 的状态（index、id、name、arguments 累加器），支持多个并发工具调用。
+**工具调用状态追踪**：
+- Anthropic→OpenAI 方向：使用 `blockTracker` 存储 **OpenAI tool_call index**（非 Anthropic block index），确保 `content_block_delta` 中的 `input_json_delta` 发送到正确的 tool_call 索引
+- OpenAI→Anthropic 方向：使用 `toolCallAcc` 结构体追踪每个 tool call 的状态（index、id、name、arguments 累加器），支持多个并发工具调用
 
 ---
 
@@ -673,39 +682,47 @@ forwardRequestStream()
   ├── 格式不同？→ ConvertRequest() 转换
   │
   ├── 构建 URL（/chat/completions 或 /messages）
-  ├── http.NewRequestWithContext(ctx, ...) — 支持 context 取消
-  ├── http.Client{Timeout: 0, ResponseHeaderTimeout: provider.Timeout}
-  │   — Timeout: 0 允许无限流式读取
+  ├── streamCtx = context.WithTimeout(ctx, 3min)  — 流式整体超时硬上限
+  ├── http.NewRequestWithContext(streamCtx, ...)
+  ├── transport.Clone() + ResponseHeaderTimeout(≤30s)
   │   — ResponseHeaderTimeout 确保首包超时
+  │   — streamCtx 3min 硬上限防止无限慢速流
   │
   ├── 检查 StatusCode == 200
   ├── 设置 SSE 响应头（仅一次，通过 Written() 检查）
   ├── TTFB 日志记录
   │
+  ├── defer idleReader.Close()  — 确保资源清理
   ├── 创建 idleTimeoutReader（流式读取空闲超时保护）
   ├── 格式相同？→ io.Copy 直传
-  └── 格式不同？→ StreamConvertResponse 逐行转换
+  ├── 格式不同？→ StreamConvertResponse 逐行转换
+  │
+  └── 流式失败且已 Written？→ 注入 SSE error event 通知客户端截断
 ```
 
-### 13.3 idleTimeoutReader
+### 13.3 流式整体超时（maxStreamDuration）
+
+`maxStreamDuration = 3 * time.Minute` 作为流式传输的硬上限。`idleTimeoutReader` 处理每段间隔的停顿，但如果上游持续滴漏数据（每 `timeout-ε` 秒一个字节），`idleTimeoutReader` 的 timer 会不断 reset，永不触发。`streamCtx` 作为安全网，3 分钟后强制取消上游请求。
+
+### 13.4 idleTimeoutReader
 
 当流式响应中途卡住时，`idleTimeoutReader` 确保在 `provider.Timeout` 秒内没有新数据时返回超时错误：
 
 ```go
 type idleTimeoutReader struct {
-    r       io.ReadCloser
-    timeout time.Duration
-    done    chan struct{}
-    timer   *time.Timer
+    r         io.ReadCloser
+    timeout   time.Duration
+    done      chan struct{}
+    timer     *time.Timer
+    closeOnce sync.Once  // 安全的多次 Close
 }
-
-func newIdleTimeoutReader(r io.ReadCloser, timeout time.Duration) *idleTimeoutReader
 ```
 
-- 每次 `Read()` 启动一个 goroutine 执行实际读取，通过缓冲 channel 返回结果
+- 每次 `Read()` 启动一个 goroutine 执行实际读取（使用**内部缓冲**避免数据竞争），通过缓冲 channel 返回结果
+- `Read()` 前先 `timer.Stop()` + 排空 stale channel value，再 `Reset()`（遵循 `time.Timer` 文档要求）
+- goroutine 读取到内部 `buf`，仅在正常返回时 `copy(p, buf)` 到调用者缓冲，避免 timer 超时后 goroutine 仍写入 `p` 的数据竞争
 - `select` 在读取结果、timer（空闲超时）和 `done`（流关闭信号）间竞争
-- `Close()` 关闭 `done` channel + 停止 timer + 关闭底层 reader，goroutine 通过 `select` 检测到 `done` 后退出，**不泄漏**
-- timer 在每次读取成功后 reset，确保超时窗口从最后一个字节到达时重新计算
+- `Close()` 使用 `sync.Once` 确保安全多次调用不 panic，`defer idleReader.Close()` 确保资源清理
 
 ---
 
@@ -734,7 +751,7 @@ tracer.Log*() → fmt.Fprint(e.logWriter, ...)
 
 ### 14.2 tracer.Recorder 结构化追踪
 
-每次请求创建一个 `Recorder` 实例，记录完整的请求路径：
+每次请求创建一个 `Recorder` 实例，记录完整的请求路径。Recorder 仅存储最终结果字段（`resultStatus`/`resultProv`/`resultRR`），不积累 entries 切片，零额外内存分配：
 
 | 日志标签 | 触发时机 | 内容 |
 |----------|----------|------|
@@ -742,9 +759,11 @@ tracer.Log*() → fmt.Fprint(e.logWriter, ...)
 | `ROUTER` | 路由决策 | 过滤模式、匹配供应商列表、降级、跳过 |
 | `PROVIDER` | 每次供应商调用 | 优先级、尝试次数、供应商名、延迟、错误信息 |
 | `CB` | 断路器操作 | 熔断/跳过/自动关闭/成功关闭/配置 |
-| `QUEUE` | 优先级队列操作 | acquire/released/skipped/busy + rr start index |
+| `QUEUE` | 优先级队列操作 | trying/released/skipped/busy + rr 索引 + 组大小 |
 | `TTFB` | 流式首包到达 | 供应商名、首包延迟、状态码 |
-| `SUMMARY` | 请求结束 | 最终结果、成功供应商、rr 轮转索引、总耗时 |
+| `SUMMARY` | 请求结束 | 最终结果、成功供应商、rr 轮转索引、总耗时（由 `Dump()` 输出） |
+
+**优化**：移除了旧的 `entries []entry` 切片（每个 Log* 方法都 append，仅在 `Dump()` 中扫描一次后丢弃），改为 `LogResult()` 直接存储最终结果到字段，`Dump()` 直接读取，零切片分配。
 
 ### 14.3 日志输出示例
 
@@ -1004,10 +1023,109 @@ model: Flash
 
 ---
 
-## 20. 扩展性考虑
+## 20. 已修复问题记录（第四阶段 — 第一轮全量审查修复）
 
+### 20.1 Bug — `_ = cancel` watcher 泄漏（server.go）
+- **问题**：config watcher 的 `context.CancelFunc` 被丢弃（`_ = cancel`），优雅关闭时 watcher goroutine 永不退出
+- **修复**：`Instance` 结构体增加 `cancelCtx` 字段，新增 `StopWatcher()` 方法，`main.go` 在优雅关闭时调用
+
+### 20.2 Bug — nil 传入 io.MultiWriter 导致 panic（server.go）
+- **问题**：`log_file` 为空时 `logWriter()` 返回 nil `*rotator.Rotator`，作为非 nil `io.Writer` 接口传入 `io.MultiWriter`，首请求触发 nil 指针 panic
+- **修复**：`rot != nil` 时用 `io.MultiWriter(rot, sseHub)`，否则用 `io.MultiWriter(os.Stdout, sseHub)`
+
+### 20.3 Bug — Anthropic 格式探测失效（detector.go）
+- **问题**：`detect()` 检测 `data["messages"]` 返回 openai（Anthropic 也有 messages），`data["anthropic_version"]` 是 HTTP header 不是 body 字段，永不命中。所有请求被识别为 openai
+- **修复**：按 URL 路径探测（`/v1/messages` → anthropic）+ body 字段探测（`system` 为 string 或 array、`stop_sequences`）；`GetRequestFormat` 改为安全类型断言
+
+### 20.4 保持 — 429 作为 retryable（errors.go）
+- **设计决策**：429（Too Many Requests）标记为 retryable，与 5xx 一样等待退避后重试同一供应商。TPM 限速是临时状态，配额会逐步恢复，重试可以命中恢复后的窗口
+- **退避策略**：默认 `maxRetries=3`，退避 `retry_interval × backoff_factor^(N-1)` = 2s → 4s → 8s，最多 4 次尝试
+- **CB 配合**：如果同一优先级组所有供应商都连续 429 导致组失败，断路器会累积失败计数，达到 threshold 后熔断整个优先级组，后续请求直接跳到更低优先级组
+
+### 20.5 Bug — SUMMARY 日志 rr= 报起始索引非实际命中索引（engine.go）
+- **问题**：`LogResult(true, provider.Name, startIdx)` 传的是组起始索引 `startIdx`，而非实际命中的 `idx`。组内第 2 个供应商成功时 SUMMARY 显示 `rr=0` 而非 `rr=1`
+- **修复**：所有 `LogResult`/`LogQueue` 调用传 `idx` 而非 `startIdx`
+
+### 20.6 Bug — 流式无整体超时（engine.go）
+- **问题**：流式请求仅设 `ResponseHeaderTimeout`（≤30s）和 per-idle-gap `idleTimeoutReader`，无整体 `Timeout`。上游持续滴漏数据的流可无限运行（日志已观测 2m12s）
+- **修复**：新增 `maxStreamDuration = 3min` 硬上限，用 `context.WithTimeout` 包裹流式请求
+
+### 20.7 清理 — 死配置字段 + 死代码（types.go, loader.go, openai.go, anthropic.go, converter.go）
+- **问题**：`DefaultFormat`、`HealthCheckInterval`、`Vendor` 字段定义但从未被读；`CallOpenAI`、`CallAnthropic`、`OpenAIResponseToAnthropic`、`AnthropicResponseToOpenAI`、`OpenAIResponse`、`Choice`、`Usage` 等死代码
+- **修复**：移除所有死字段和死函数；清理 example yaml 中的 `vendor:` 和 `default_format:` 字段
+
+### 20.8 优化 — 非流式不共享 transport（openai.go, anthropic.go）
+- **问题**：非流式 `postOpenAI`/`postAnthropic` 每次新建 `http.Client{Timeout:...}` 不共享 transport，无连接复用
+- **修复**：`CallOpenAIRaw`/`CallAnthropicRaw` 增加 `transport http.RoundTripper` 参数，引擎传入共享 `e.transport`
+
+---
+
+## 21. 已修复问题记录（第五阶段 — 第二轮全量审查修复）
+
+### 21.1 [CRASH] 未检查类型断言（converter.go）
+- **问题**：`tcMap["index"].(float64)` 未用 comma-ok 模式，nil 或非 float64 值会 panic 崩溃整个进程
+- **修复**：改为 comma-ok 模式 + `continue`
+
+### 21.2 [BUG] Tool Call 索引不匹配（converter.go）
+- **问题**：Anthropic→OpenAI SSE 转换中，`blockTracker.index` 存储的是 Anthropic block index，而非 OpenAI tool_call index。`input_json_delta` 发送到错误的 tool_call 索引，客户端丢失工具参数
+- **修复**：`blockTracker` 存储 OpenAI tool_call index（`tcIdx`），text block 存 -1
+
+### 21.3 [BUG] ConvertRequest 丢失高级字段（converter.go）
+- **问题**：`ConvertRequest` 使用 typed struct（`OpenAIRequest`/`AnthropicRequest`）仅含 7 个字段，`tools`、`tool_choice`、`response_format`、`seed` 等被静默丢弃
+- **修复**：改为通用 JSON map 操作，仅转换已知字段（system 提取、stop↔stop_sequences），其余字段原样保留
+
+### 21.4 [BUG] Anthropic array system 探测失败（detector.go）
+- **问题**：Anthropic API 支持 `system` 为 string 或 array，但 `detect()` 仅检查 `.(string)`，array 形式被误判为 openai
+- **修复**：`switch s.(type) { case string, []interface{}: return "anthropic" }`
+
+### 21.5 [SECURITY] 无 http.Server 超时 — Slowloris 漏洞（main.go）
+- **问题**：`http.Server{}` 未设 `ReadHeaderTimeout`/`IdleTimeout`，slowloris 攻击可耗尽文件描述符
+- **修复**：设 `ReadHeaderTimeout: 10s`、`IdleTimeout: 120s`（不设 ReadTimeout/WriteTimeout 因流式需要）
+
+### 21.6 [BUG] CB 状态文件并发写损坏（engine.go）
+- **问题**：`os.WriteFile` 非原子写，多 goroutine 并发写可交错损坏 JSON 文件，重启后 `loadCBState` 静默失败丢失状态
+- **修复**：新增 `fileMu` 互斥锁 + 临时文件 + `os.Rename` 原子写入
+
+### 21.7 [BUG] idleTimeoutReader 双 Close panic（engine.go）
+- **问题**：`close(r.done)` 在第二次 `Close()` 时 panic；`Close()` 非 defer，panic 时资源泄漏
+- **修复**：`sync.Once` 确保安全多次 Close + `defer idleReader.Close()`
+
+### 21.8 [BUG] Timer 未排空 stale value（engine.go）
+- **问题**：`r.timer.Reset(r.timeout)` 未先排空 `r.timer.C` 中的 stale value，可能导致 spurious 超时
+- **修复**：`if !r.timer.Stop() { select { case <-r.timer.C: default: } }` 再 `Reset()`
+
+### 21.9 [BUG] idleTimeoutReader 缓冲数据竞争（engine.go）
+- **问题**：timer 超时后 goroutine 仍写入调用者 `p` 缓冲，造成数据竞争
+- **修复**：goroutine 读取到内部 `buf`，仅正常返回时 `copy(p, buf)`
+
+### 21.10 [优化] tracer entries 切片浪费内存（tracer.go）
+- **问题**：每个 `Log*` 方法 append 到 `entries` 切片，仅 `Dump()` 扫描一次后丢弃，每请求 20+ entries 纯浪费
+- **修复**：移除 `entries` 切片和 `entry` 结构体，`LogResult` 直接存储最终结果到字段，`Dump()` 直接读取；移除 "acquired" 死分支
+
+### 21.11 [BUG] 流式中途失败无错误事件（engine.go）
+- **问题**：流式在已 `WriteHeader(200)` 后失败，客户端收到截断的 SSE 流无任何错误指示，可能 hang 或误判为完整响应
+- **修复**：`forwardRequestStream` 返回错误且 `c.Writer.Written()` 为 true 时，注入 SSE error event（OpenAI/Anthropic 格式分别处理）
+
+### 21.12 [BUG] flushWriter 写失败仍 Flush（engine.go）
+- **问题**：`fw.w.Write(p)` 返回错误后仍调用 `Flush()`，浪费工作
+- **修复**：`if err == nil { f.Flush() }`
+
+### 21.13 [SECURITY] 无请求体大小限制（engine.go）
+- **问题**：`io.ReadAll(c.Request.Body)` 无限制，恶意大 payload 可致 OOM
+- **修复**：`http.MaxBytesReader(c.Writer, c.Request.Body, 10<<20)` 限制 10MB
+
+### 21.14 [BUG] 配置校验缺失负值检查（loader.go）
+- **问题**：`max_retries: -5` 等负值不报错，负 `retry_interval` 致 timer 立即触发
+- **修复**：`validate()` 增加 `MaxRetries`/`RetryInterval`/`BackoffFactor`/`Timeout` 负值校验
+
+---
+
+## 22. 扩展性考虑
+
+- **共享 TPM 池感知限流**：当前限流器以 provider name 为 key，同账号多供应商各自独立桶。可增加 `account`/`quota_group` 字段让限流跨供应商共享
+- **单元测试**：当前无 `*_test.go` 文件。converter.go（753 行复杂状态机）、retry manager、token bucket、CB 持久化为优先测试目标
+- **`/api/*` 端点认证**：当前监控面板和 control 端点无认证，暴露到公网时需加 API key middleware
 - **插件化供应商适配器**：新增供应商只需实现统一接口（当前已抽象 adapter 层）
-- **多租户**：通过请求头区分不同用户的 API Key（阶段二）
-- **缓存层**：对 Embedding 等幂等请求做缓存（阶段二）
-- **健康检查自动下线**：定期检测供应商可用性，自动移除不可用供应商（阶段二）
-- **Dashboard 增强**：历史图表、链路耗时分布、手动降级控制（阶段三）
+- **健康检查自动下线**：定期检测供应商可用性，自动移除不可用供应商
+- **Dashboard 增强**：历史图表、链路耗时分布、手动降级控制
+- **热加载 CB/RR 状态清理**：热加载更换 priority 供应商后，旧 priority 的 CB 计数和 RR 索引仍残留（当前为设计意图，CB 按 priority 粒度隔离）

@@ -2,7 +2,6 @@ package adapter
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,16 +19,16 @@ type OpenAIRequest struct {
 }
 
 type OpenAIMessage struct {
-	Role      string          `json:"role"`
-	Content   string          `json:"content"`
+	Role      string           `json:"role"`
+	Content   string           `json:"content"`
 	ToolCalls []OpenAIToolCall `json:"tool_calls,omitempty"`
 }
 
 type OpenAIToolCall struct {
-	Index    int              `json:"index,omitempty"`
-	ID       string           `json:"id"`
-	Type     string           `json:"type"`
-	Function OpenAIFunction   `json:"function"`
+	Index    int            `json:"index,omitempty"`
+	ID       string         `json:"id"`
+	Type     string         `json:"type"`
+	Function OpenAIFunction `json:"function"`
 }
 
 type OpenAIFunction struct {
@@ -37,51 +36,11 @@ type OpenAIFunction struct {
 	Arguments string `json:"arguments"`
 }
 
-type OpenAIResponse struct {
-	ID      string   `json:"id"`
-	Object  string   `json:"object"`
-	Model   string   `json:"model"`
-	Choices []Choice `json:"choices"`
-	Usage   Usage    `json:"usage"`
+func CallOpenAIRaw(baseURL, apiKey string, body []byte, timeout int, transport http.RoundTripper) ([]byte, error) {
+	return postOpenAI(baseURL+"/chat/completions", apiKey, body, timeout, transport)
 }
 
-type Choice struct {
-	Index        int           `json:"index"`
-	Message      OpenAIMessage `json:"message"`
-	FinishReason string        `json:"finish_reason"`
-}
-
-type Usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
-}
-
-func CallOpenAI(baseURL, apiKey, model string, req OpenAIRequest, timeout int) (*OpenAIResponse, error) {
-	req.Model = model
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
-	}
-
-	respBody, err := postOpenAI(baseURL+"/chat/completions", apiKey, body, timeout)
-	if err != nil {
-		return nil, err
-	}
-
-	var result OpenAIResponse
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, fmt.Errorf("parse response: %w", err)
-	}
-
-	return &result, nil
-}
-
-func CallOpenAIRaw(baseURL, apiKey string, body []byte, timeout int) ([]byte, error) {
-	return postOpenAI(baseURL+"/chat/completions", apiKey, body, timeout)
-}
-
-func postOpenAI(url, apiKey string, body []byte, timeout int) ([]byte, error) {
+func postOpenAI(url, apiKey string, body []byte, timeout int, transport http.RoundTripper) ([]byte, error) {
 	httpReq, err := http.NewRequest("POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
@@ -89,7 +48,10 @@ func postOpenAI(url, apiKey string, body []byte, timeout int) ([]byte, error) {
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 
-	client := &http.Client{Timeout: time.Duration(timeout) * time.Second}
+	client := &http.Client{
+		Timeout:   time.Duration(timeout) * time.Second,
+		Transport: transport,
+	}
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("send request: %w", err)

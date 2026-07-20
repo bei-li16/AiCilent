@@ -5,6 +5,7 @@ import (
 	"embed"
 	"io"
 	"net/http"
+	"os"
 	"time"
 
 	"ai-proxy/internal/config"
@@ -22,7 +23,8 @@ var webFS embed.FS
 
 type Instance struct {
 	*gin.Engine
-	Rot *rotator.Rotator
+	Rot       *rotator.Rotator
+	cancelCtx context.CancelFunc
 }
 
 // New creates and configures the Gin engine with all routes and middleware.
@@ -33,7 +35,11 @@ func New(cfg *config.Config, configPath string) *Instance {
 	statsCollector := stats.New()
 
 	rot := logWriter(cfg.Global.LogFile)
-	gin.DefaultWriter = io.MultiWriter(rot, sseHub)
+	if rot != nil {
+		gin.DefaultWriter = io.MultiWriter(rot, sseHub)
+	} else {
+		gin.DefaultWriter = io.MultiWriter(os.Stdout, sseHub)
+	}
 
 	r := gin.New()
 
@@ -43,10 +49,11 @@ func New(cfg *config.Config, configPath string) *Instance {
 	engine := router.NewEngine(cfg, configPath, gin.DefaultWriter, statsCollector)
 
 	// Start config file watcher for hot-reload
+	var cancel context.CancelFunc
 	if configPath != "" {
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, c := context.WithCancel(context.Background())
+		cancel = c
 		engine.StartWatcher(ctx, 30*time.Second)
-		_ = cancel // kept for future graceful shutdown
 	}
 
 	r.GET("/health", func(c *gin.Context) {
@@ -81,7 +88,14 @@ func New(cfg *config.Config, configPath string) *Instance {
 		c.JSON(200, gin.H{"running": body.Running})
 	})
 
-	return &Instance{Engine: r, Rot: rot}
+	return &Instance{Engine: r, Rot: rot, cancelCtx: cancel}
+}
+
+// StopWatcher cancels the config watcher goroutine for graceful shutdown.
+func (i *Instance) StopWatcher() {
+	if i.cancelCtx != nil {
+		i.cancelCtx()
+	}
 }
 
 func serveWeb(filePath, contentType string) gin.HandlerFunc {

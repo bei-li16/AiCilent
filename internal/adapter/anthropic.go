@@ -2,7 +2,6 @@ package adapter
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -37,12 +36,12 @@ type AnthropicResponse struct {
 }
 
 type AnthropicContent struct {
-	Type   string      `json:"type"`
-	Text   string      `json:"text,omitempty"`
-	ID     string      `json:"id,omitempty"`
-	Name   string      `json:"name,omitempty"`
-	Input  interface{} `json:"input,omitempty"`
-	Thinking string   `json:"thinking,omitempty"`
+	Type     string      `json:"type"`
+	Text     string      `json:"text,omitempty"`
+	ID       string      `json:"id,omitempty"`
+	Name     string      `json:"name,omitempty"`
+	Input    interface{} `json:"input,omitempty"`
+	Thinking string      `json:"thinking,omitempty"`
 }
 
 type AnthropicUsage struct {
@@ -50,31 +49,11 @@ type AnthropicUsage struct {
 	OutputTokens int `json:"output_tokens"`
 }
 
-func CallAnthropic(baseURL, apiKey, model string, req AnthropicRequest, timeout int) (*AnthropicResponse, error) {
-	req.Model = model
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
-	}
-
-	respBody, err := postAnthropic(baseURL+"/messages", apiKey, body, timeout)
-	if err != nil {
-		return nil, err
-	}
-
-	var result AnthropicResponse
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, fmt.Errorf("parse response: %w", err)
-	}
-
-	return &result, nil
+func CallAnthropicRaw(baseURL, apiKey string, body []byte, timeout int, transport http.RoundTripper) ([]byte, error) {
+	return postAnthropic(baseURL+"/messages", apiKey, body, timeout, transport)
 }
 
-func CallAnthropicRaw(baseURL, apiKey string, body []byte, timeout int) ([]byte, error) {
-	return postAnthropic(baseURL+"/messages", apiKey, body, timeout)
-}
-
-func postAnthropic(url, apiKey string, body []byte, timeout int) ([]byte, error) {
+func postAnthropic(url, apiKey string, body []byte, timeout int, transport http.RoundTripper) ([]byte, error) {
 	httpReq, err := http.NewRequest("POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
@@ -83,7 +62,10 @@ func postAnthropic(url, apiKey string, body []byte, timeout int) ([]byte, error)
 	httpReq.Header.Set("x-api-key", apiKey)
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 
-	client := &http.Client{Timeout: time.Duration(timeout) * time.Second}
+	client := &http.Client{
+		Timeout:   time.Duration(timeout) * time.Second,
+		Transport: transport,
+	}
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("send request: %w", err)

@@ -8,137 +8,6 @@ import (
 	"strings"
 )
 
-func OpenAIRequestToAnthropic(openAIReq OpenAIRequest) AnthropicRequest {
-	anthropicReq := AnthropicRequest{
-		Model:         openAIReq.Model,
-		MaxTokens:     openAIReq.MaxTokens,
-		Temperature:   openAIReq.Temperature,
-		TopP:          openAIReq.TopP,
-		Stream:        openAIReq.Stream,
-		StopSequences: openAIReq.Stop,
-	}
-
-	var systemMsg string
-	for _, msg := range openAIReq.Messages {
-		if msg.Role == "system" {
-			systemMsg = msg.Content
-			continue
-		}
-		anthropicReq.Messages = append(anthropicReq.Messages, AnthropicMessage{
-			Role:    msg.Role,
-			Content: msg.Content,
-		})
-	}
-	anthropicReq.System = systemMsg
-
-	return anthropicReq
-}
-
-func AnthropicResponseToOpenAI(anthropicResp AnthropicResponse, model string) OpenAIResponse {
-	oaResp := OpenAIResponse{
-		ID:     anthropicResp.ID,
-		Object: "chat.completion",
-		Model:  model,
-		Choices: []Choice{
-			{
-				Index: 0,
-				Message: OpenAIMessage{
-					Role:    "assistant",
-					Content: "",
-				},
-				FinishReason: mapStopReason(anthropicResp.StopReason),
-			},
-		},
-	}
-
-	// Handle content blocks: text, tool_use, thinking
-	for _, block := range anthropicResp.Content {
-		switch block.Type {
-		case "text":
-			oaResp.Choices[0].Message.Content += block.Text
-		case "tool_use":
-			var inputJSON []byte
-			if block.Input != nil {
-				inputJSON, _ = json.Marshal(block.Input)
-			}
-			oaResp.Choices[0].Message.ToolCalls = append(
-				oaResp.Choices[0].Message.ToolCalls, OpenAIToolCall{
-					ID:   block.ID,
-					Type: "function",
-					Function: OpenAIFunction{
-						Name:      block.Name,
-						Arguments: string(inputJSON),
-					},
-				})
-		}
-	}
-
-	if anthropicResp.Usage != nil {
-		oaResp.Usage = Usage{
-			PromptTokens:     anthropicResp.Usage.InputTokens,
-			CompletionTokens: anthropicResp.Usage.OutputTokens,
-			TotalTokens:      anthropicResp.Usage.InputTokens + anthropicResp.Usage.OutputTokens,
-		}
-	}
-
-	return oaResp
-}
-
-func AnthropicRequestToOpenAI(anthropicReq AnthropicRequest) OpenAIRequest {
-	oaReq := OpenAIRequest{
-		Model:       anthropicReq.Model,
-		MaxTokens:   anthropicReq.MaxTokens,
-		Temperature: anthropicReq.Temperature,
-		TopP:        anthropicReq.TopP,
-		Stream:      anthropicReq.Stream,
-		Stop:        anthropicReq.StopSequences,
-	}
-
-	if anthropicReq.System != "" {
-		oaReq.Messages = append(oaReq.Messages, OpenAIMessage{
-			Role:    "system",
-			Content: anthropicReq.System,
-		})
-	}
-	for _, msg := range anthropicReq.Messages {
-		oaReq.Messages = append(oaReq.Messages, OpenAIMessage{
-			Role:    msg.Role,
-			Content: msg.Content,
-		})
-	}
-
-	return oaReq
-}
-
-func OpenAIResponseToAnthropic(oaResp OpenAIResponse, model string) AnthropicResponse {
-	anthropicResp := AnthropicResponse{
-		ID:    oaResp.ID,
-		Type:  "message",
-		Role:  "assistant",
-		Model: model,
-		StopReason: mapFinishReason(oaResp.Choices[0].FinishReason),
-		Usage: &AnthropicUsage{
-			InputTokens:  oaResp.Usage.PromptTokens,
-			OutputTokens: oaResp.Usage.CompletionTokens,
-		},
-	}
-
-	if len(oaResp.Choices) > 0 {
-		msg := oaResp.Choices[0].Message
-		// Text content
-		if msg.Content != "" {
-			anthropicResp.Content = append(anthropicResp.Content, AnthropicContent{
-				Type: "text",
-				Text: msg.Content,
-			})
-		}
-		// Tool calls are not directly modelled in AnthropicContent struct,
-		// but we handle them via the raw JSON marshaling path in ConvertResponse
-	}
-
-	return anthropicResp
-}
-
 func mapStopReason(reason string) string {
 	switch reason {
 	case "end_turn", "end":
@@ -178,25 +47,65 @@ func ConvertRequest(body []byte, fromFormat, toFormat string) ([]byte, error) {
 		return body, nil
 	}
 
-	if fromFormat == "openai" && toFormat == "anthropic" {
-		var oaReq OpenAIRequest
-		if err := json.Unmarshal(body, &oaReq); err != nil {
-			return nil, fmt.Errorf("unmarshal openai request: %w", err)
-		}
-		anthropicReq := OpenAIRequestToAnthropic(oaReq)
-		return json.Marshal(anthropicReq)
+	var raw map[string]interface{}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, fmt.Errorf("unmarshal request: %w", err)
 	}
 
-	if fromFormat == "anthropic" && toFormat == "openai" {
-		var anthropicReq AnthropicRequest
-		if err := json.Unmarshal(body, &anthropicReq); err != nil {
-			return nil, fmt.Errorf("unmarshal anthropic request: %w", err)
+	switch {
+	case fromFormat == "openai" && toFormat == "anthropic":
+		// Extract system message from messages and set as top-level "system"
+		if msgs, ok := raw["messages"].([]interface{}); ok {
+			var filtered []interface{}
+			for _, m := range msgs {
+				msg, ok := m.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				if role, _ := msg["role"].(string); role == "system" {
+					if content, _ := msg["content"].(string); content != "" {
+						raw["system"] = content
+					}
+					continue // drop from messages
+				}
+				filtered = append(filtered, msg)
+			}
+			raw["messages"] = filtered
 		}
-		oaReq := AnthropicRequestToOpenAI(anthropicReq)
-		return json.Marshal(oaReq)
+		// Rename stop → stop_sequences
+		if stop, ok := raw["stop"]; ok {
+			raw["stop_sequences"] = stop
+			delete(raw, "stop")
+		}
+		// max_tokens stays the same name in both formats
+
+	case fromFormat == "anthropic" && toFormat == "openai":
+		// Prepend system as a system message
+		if sys, ok := raw["system"]; ok {
+			if sysStr, ok := sys.(string); ok && sysStr != "" {
+				var msgs []interface{}
+				msgs = append(msgs, map[string]interface{}{
+					"role":    "system",
+					"content": sysStr,
+				})
+				if existing, ok := raw["messages"].([]interface{}); ok {
+					msgs = append(msgs, existing...)
+				}
+				raw["messages"] = msgs
+			}
+			delete(raw, "system")
+		}
+		// Rename stop_sequences → stop
+		if ss, ok := raw["stop_sequences"]; ok {
+			raw["stop"] = ss
+			delete(raw, "stop_sequences")
+		}
+
+	default:
+		return nil, fmt.Errorf("unsupported format conversion: %s -> %s", fromFormat, toFormat)
 	}
 
-	return nil, fmt.Errorf("unsupported format conversion: %s -> %s", fromFormat, toFormat)
+	return json.Marshal(raw)
 }
 
 func ConvertResponse(body []byte, fromFormat, toFormat, model string) ([]byte, error) {
@@ -393,7 +302,7 @@ func StreamConvertResponse(src io.Reader, dst io.Writer, fromFormat, toFormat st
 // ─────────────────────────────────────────────────────────────
 
 type blockTracker struct {
-	index int
+	index int    // OpenAI tool_call index (not Anthropic block index)
 	typ   string // "text", "tool_use", "thinking"
 }
 
@@ -461,12 +370,9 @@ func convertAnthropicSSEToOpenAI(src io.Reader, dst io.Writer) error {
 			}
 			json.Unmarshal(block.ContentBlock, &header)
 
-			blocks[block.Index] = blockTracker{index: block.Index, typ: header.Type}
-
 			switch header.Type {
 			case "text":
-				// Text blocks start with empty content, actual text comes via content_block_delta
-				// Nothing to emit here
+				blocks[block.Index] = blockTracker{index: -1, typ: header.Type}
 
 			case "tool_use":
 				var toolBlock struct {
@@ -477,6 +383,8 @@ func convertAnthropicSSEToOpenAI(src io.Reader, dst io.Writer) error {
 
 				tcIdx := nextToolIdx
 				nextToolIdx++
+				// Store the OpenAI tool call index, NOT the Anthropic block index
+				blocks[block.Index] = blockTracker{index: tcIdx, typ: header.Type}
 
 				oaChunk := map[string]interface{}{
 					"choices": []map[string]interface{}{
@@ -682,7 +590,11 @@ func convertOpenAISSETOAnthropic(src io.Reader, dst io.Writer) error {
 					continue
 				}
 
-				tcIdx := int(tcMap["index"].(float64))
+				tcIdxFloat, ok := tcMap["index"].(float64)
+			if !ok {
+				continue
+			}
+			tcIdx := int(tcIdxFloat)
 
 				// Find or create accumulator for this tool call index
 				var acc *toolCallAcc
@@ -816,6 +728,9 @@ type toolCallAcc struct {
 //  SSE write helpers
 // ─────────────────────────────────────────────────────────────
 
+// writeSSEData writes a "data:" SSE line. Write errors are intentionally
+// ignored — client disconnects are detected via streamCtx cancellation
+// in the idleTimeoutReader, which stops the upstream read loop.
 func writeSSEData(w io.Writer, data interface{}) {
 	b, _ := json.Marshal(data)
 	fmt.Fprintf(w, "data: %s\n\n", string(b))

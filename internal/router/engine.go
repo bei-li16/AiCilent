@@ -24,6 +24,14 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// maxStreamDuration caps total streaming duration to prevent indefinitely
+// slow upstream streams from holding connections forever.
+const maxStreamDuration = 3 * time.Minute
+
+// maxRequestBodySize limits the request body to prevent OOM from malicious
+// payloads. 10MB is generous for chat completions with long conversation history.
+const maxRequestBodySize = 10 << 20 // 10 MB
+
 type Engine struct {
 	cfg              *config.Config
 	configPath       string
@@ -51,10 +59,13 @@ type Engine struct {
 	reloadMu         sync.RWMutex
 
 	// Shared HTTP transport for connection reuse
-	transport        *http.Transport
+	transport *http.Transport
 
-	logWriter        io.Writer
-	stats            *stats.Collector
+	// File write mutex for CB state persistence (prevents concurrent write corruption)
+	fileMu sync.Mutex
+
+	logWriter io.Writer
+	stats     *stats.Collector
 }
 
 func NewEngine(cfg *config.Config, configPath string, logWriter io.Writer, stats *stats.Collector) *Engine {
@@ -193,9 +204,11 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 		return
 	}
 
+	// Limit request body to 10MB to prevent OOM from malicious large payloads.
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxRequestBodySize)
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot read request body"})
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request body too large or unreadable"})
 		return
 	}
 	c.Request.Body = io.NopCloser(bytes.NewBuffer(body))
@@ -326,8 +339,8 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 					tr.LogAttempt(provider.Name, priority, attempt, maxRetries+1, true, "", latency)
 					e.closeCircuitBreaker(priority, modelName, tr,
 			cfg.Global.CBThreshold, cfg.Global.CBCooldown, cfg.Global.CBSkipRequests)
-					tr.LogResult(true, provider.Name, startIdx)
-					tr.LogQueue(priority, "released", startIdx, len(group))
+					tr.LogResult(true, provider.Name, idx)
+					tr.LogQueue(priority, "released", idx, len(group))
 					e.releaseProvider(provider.Name)
 					fmt.Fprint(e.logWriter, tr.Dump())
 					completed = true
@@ -339,8 +352,8 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 				lastErr = fwdErr
 
 				if c.Writer.Written() {
-					tr.LogQueue(priority, "released (stream written)", startIdx, len(group))
-					tr.LogResult(false, provider.Name, startIdx)
+					tr.LogQueue(priority, "released (stream written)", idx, len(group))
+					tr.LogResult(false, provider.Name, idx)
 					e.releaseProvider(provider.Name)
 					e.recordGroupFailure(modelName, priority, tr,
 		cfg.Global.CBThreshold, cfg.Global.CBCooldown, cfg.Global.CBSkipRequests)
@@ -559,9 +572,9 @@ func (e *Engine) forwardRequest(c *gin.Context, body []byte, requestFormat strin
 	body = setModelInBody(body, provider.ModelID)
 
 	if provider.Format == "openai" {
-		respBody, err = adapter.CallOpenAIRaw(provider.BaseURL, provider.APIKey, body, provider.Timeout)
+		respBody, err = adapter.CallOpenAIRaw(provider.BaseURL, provider.APIKey, body, provider.Timeout, e.transport)
 	} else {
-		respBody, err = adapter.CallAnthropicRaw(provider.BaseURL, provider.APIKey, body, provider.Timeout)
+		respBody, err = adapter.CallAnthropicRaw(provider.BaseURL, provider.APIKey, body, provider.Timeout, e.transport)
 	}
 
 	if err != nil {
@@ -596,7 +609,13 @@ func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat
 	}
 	url := provider.BaseURL + path
 
-	httpReq, err := http.NewRequestWithContext(c.Request.Context(), "POST", url, bytes.NewReader(body))
+	// Overall stream duration cap: 3 minutes. The idleTimeoutReader handles
+	// per-gap stalls, but a stream that trickles data forever would never
+	// trigger it. This context acts as a hard safety net.
+	streamCtx, streamCancel := context.WithTimeout(c.Request.Context(), maxStreamDuration)
+	defer streamCancel()
+
+	httpReq, err := http.NewRequestWithContext(streamCtx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
@@ -639,6 +658,7 @@ func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat
 
 	timeout := time.Duration(provider.Timeout) * time.Second
 	idleReader := newIdleTimeoutReader(resp.Body, timeout)
+	defer idleReader.Close()
 
 	fw := &flushWriter{w: c.Writer}
 	if requestFormat != provider.Format {
@@ -647,7 +667,23 @@ func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat
 		_, err = io.Copy(fw, idleReader)
 	}
 
-	idleReader.Close()
+	// If the stream failed mid-way (headers already written), inject an
+	// SSE error event so the client knows the stream was truncated.
+	if err != nil && c.Writer.Written() {
+		errMsg := err.Error()
+		if len(errMsg) > 500 {
+			errMsg = errMsg[:500] + "..."
+		}
+		if requestFormat == "anthropic" {
+			fmt.Fprintf(c.Writer, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"stream interrupted: %s\"}}\n\n", errMsg)
+		} else {
+			fmt.Fprintf(c.Writer, "data: {\"error\":{\"message\":\"stream interrupted: %s\"}}\n\n", errMsg)
+		}
+		if f, ok := c.Writer.(http.Flusher); ok {
+			f.Flush()
+		}
+	}
+
 	return err
 }
 
@@ -661,22 +697,25 @@ type flushWriter struct {
 
 func (fw *flushWriter) Write(p []byte) (int, error) {
 	n, err := fw.w.Write(p)
-	if f, ok := fw.w.(http.Flusher); ok {
-		f.Flush()
+	if err == nil {
+		if f, ok := fw.w.(http.Flusher); ok {
+			f.Flush()
+		}
 	}
 	return n, err
 }
 
 type idleTimeoutReader struct {
-	r       io.ReadCloser
-	timeout time.Duration
-	done    chan struct{}
-	timer   *time.Timer
+	r         io.ReadCloser
+	timeout   time.Duration
+	done      chan struct{}
+	timer     *time.Timer
+	closeOnce sync.Once
 }
 
 // newIdleTimeoutReader wraps an io.ReadCloser with an idle timeout.
 // If no data arrives within timeout, reads return an error.
-// Uses a single goroutine per stream (not per read).
+// Close is safe to call multiple times (sync.Once).
 func newIdleTimeoutReader(r io.ReadCloser, timeout time.Duration) *idleTimeoutReader {
 	return &idleTimeoutReader{
 		r:       r,
@@ -693,20 +732,29 @@ func (r *idleTimeoutReader) Read(p []byte) (int, error) {
 	}
 	resultCh := make(chan readResult, 1)
 
-	// Reset the timer on each successful read
+	// Drain any stale timer value before resetting (per time.Timer docs).
+	if !r.timer.Stop() {
+		select {
+		case <-r.timer.C:
+		default:
+		}
+	}
 	r.timer.Reset(r.timeout)
 
+	// Use an internal buffer to avoid data race: the goroutine may write to p
+	// after Read returns (on timeout). Copy to caller's buffer only on success.
+	buf := make([]byte, len(p))
 	go func() {
-		n, err := r.r.Read(p)
+		n, err := r.r.Read(buf)
 		select {
 		case resultCh <- readResult{n, err}:
 		case <-r.done:
-			// stream closed, discard result
 		}
 	}()
 
 	select {
 	case result := <-resultCh:
+		copy(p, buf[:result.n])
 		return result.n, result.err
 	case <-r.timer.C:
 		return 0, fmt.Errorf("idle timeout after %v", r.timeout)
@@ -716,9 +764,13 @@ func (r *idleTimeoutReader) Read(p []byte) (int, error) {
 }
 
 func (r *idleTimeoutReader) Close() error {
-	close(r.done)
-	r.timer.Stop()
-	return r.r.Close()
+	var err error
+	r.closeOnce.Do(func() {
+		close(r.done)
+		r.timer.Stop()
+		err = r.r.Close()
+	})
+	return err
 }
 
 func (e *Engine) getOrderedProviders(modelName string) []*config.Provider {
@@ -945,12 +997,20 @@ func (e *Engine) saveCBState() {
 	state := e.captureCBState()
 	e.cbMu.Unlock()
 
-	// Write outside the lock to minimize hold time
+	// Write outside the CB lock to minimize hold time.
+	// Use temp file + rename for atomic write (prevents concurrent write corruption).
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return
 	}
-	os.WriteFile(e.cbStatePath(), data, 0644)
+	e.fileMu.Lock()
+	defer e.fileMu.Unlock()
+	path := e.cbStatePath()
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return
+	}
+	os.Rename(tmpPath, path)
 }
 
 // captureCBState must be called with e.cbMu held.

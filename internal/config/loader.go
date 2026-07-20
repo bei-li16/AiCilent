@@ -63,19 +63,25 @@ func (cfg *Config) validate() error {
 		if p.Format != "openai" && p.Format != "anthropic" {
 			return fmt.Errorf("provider %s: format must be 'openai' or 'anthropic'", p.Name)
 		}
+		if p.Retry.MaxRetries < 0 {
+			return fmt.Errorf("provider %s: max_retries cannot be negative", p.Name)
+		}
+		if p.Retry.RetryInterval < 0 {
+			return fmt.Errorf("provider %s: retry_interval cannot be negative", p.Name)
+		}
+		if p.Retry.BackoffFactor < 0 {
+			return fmt.Errorf("provider %s: backoff_factor cannot be negative", p.Name)
+		}
+		if p.Timeout < 0 {
+			return fmt.Errorf("provider %s: timeout cannot be negative", p.Name)
+		}
 	}
 	return nil
 }
 
 func (cfg *Config) applyDefaults() {
-	if cfg.Global.DefaultFormat == "" {
-		cfg.Global.DefaultFormat = "openai"
-	}
 	if cfg.Global.ListenAddr == "" {
 		cfg.Global.ListenAddr = ":8080"
-	}
-	if cfg.Global.HealthCheckInterval <= 0 {
-		cfg.Global.HealthCheckInterval = 30
 	}
 	if cfg.Global.CBThreshold <= 0 {
 		cfg.Global.CBThreshold = 2

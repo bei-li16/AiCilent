@@ -37,8 +37,10 @@ func main() {
 
 	// Start server in background
 	httpServer := &http.Server{
-		Addr:    cfg.Global.ListenAddr,
-		Handler: srv,
+		Addr:              cfg.Global.ListenAddr,
+		Handler:           srv,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	go func() {
@@ -59,6 +61,9 @@ func main() {
 	if err := httpServer.Shutdown(ctx); err != nil {
 		log.Fatalf("Shutdown error: %v", err)
 	}
+
+	// Stop config watcher goroutine
+	srv.StopWatcher()
 
 	// Close log rotator
 	if srv.Rot != nil {

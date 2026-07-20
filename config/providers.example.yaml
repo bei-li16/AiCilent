@@ -1,7 +1,6 @@
 # Example configuration — copy to providers.yaml and fill in your credentials
 global:
   listen_addr: ":8080"
-  default_format: openai
   log_file: proxy.log
   cb_threshold: 2
   cb_cooldown: 30
@@ -19,7 +18,6 @@ providers:
 
   # ════════ Priority 1 ════════
   - name: glm-5.2
-    vendor: openai
     model_id: glm-5.2
     api_key: YOUR_API_KEY_HERE
     base_url: https://api.example.com/v1
@@ -33,7 +31,6 @@ providers:
 
   # ════════ Priority 2 ════════
   - name: deepseek-v4-flash
-    vendor: openai
     model_id: deepseek-v4-flash
     api_key: YOUR_API_KEY_HERE
     base_url: https://api.example.com/v1
@@ -47,7 +44,6 @@ providers:
 
   # ════════ Priority 3 ════════
   - name: u1-fast
-    vendor: openai
     model_id: sensenova-u1-fast
     api_key: YOUR_API_KEY_HERE
     base_url: https://api.example.com/v1
