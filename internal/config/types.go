@@ -35,6 +35,7 @@ type Provider struct {
 	Retry     RetryConfig     `yaml:"retry" json:"retry"`
 	Timeout   int             `yaml:"timeout" json:"timeout"`
 	Format    string          `yaml:"format" json:"format"`
+	AuthType  string          `yaml:"auth_type" json:"auth_type"` // "bearer" or "x-api-key"; auto-detect from format if empty
 	RateLimit RateLimitConfig `yaml:"rate_limit" json:"rate_limit"`
 }
 

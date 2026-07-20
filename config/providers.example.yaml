@@ -42,13 +42,14 @@ providers:
       retry_interval: 2
       backoff_factor: 2
 
-  # ════════ Priority 3 ════════
+  # ════════ Priority 3 (Anthropic format example) ════════
   - name: u1-fast
     model_id: sensenova-u1-fast
     api_key: YOUR_API_KEY_HERE
-    base_url: https://api.example.com/v1
+    base_url: https://api.example.com
     priority: 3
-    format: openai
+    format: anthropic
+    auth_type: bearer         # "bearer" (Authorization) or "x-api-key" (default for anthropic)
     timeout: 60
     retry:
       max_retries: 3

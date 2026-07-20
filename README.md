@@ -151,11 +151,11 @@ OPEN（熔断，请求直接跳过该组）
 
 | 转换方向 | 处理内容 |
 |----------|---------|
-| 请求体 | system 消息提取/注入、`stop` ↔ `stop_sequences` 重命名、其余字段原样保留 |
+| 请求体 | system 消息提取/注入、`stop` ↔ `stop_sequences` 重命名、`tools` 格式转换（`input_schema` ↔ `parameters`）、`tool_choice` 格式转换 |
 | 响应体（同步） | content blocks 转换、tool_use ↔ tool_calls、stop_reason ↔ finish_reason 映射 |
 | 响应体（流式） | SSE 事件逐条转换，含 tool_use/tool_calls 状态追踪 |
 
-使用通用 JSON map 操作，保留 `tools`、`tool_choice`、`response_format` 等未知字段。
+使用通用 JSON map 操作，保留 `response_format`、`seed` 等未知字段原样透传。
 
 ---
 
@@ -217,9 +217,10 @@ model_routes:
 | `name` | 是 | — | 供应商唯一标识 |
 | `model_id` | 是 | — | 实际调用的模型 ID |
 | `api_key` | 是 | — | API Key |
-| `base_url` | 是 | — | API 地址 |
+| `base_url` | 是 | — | API 地址（OpenAI 格式含 `/v1`，Anthropic 格式不含 `/v1`，代码自动拼接 `/v1/messages`） |
 | `priority` | 是 | — | 优先级（越小越优先） |
 | `format` | 是 | — | `openai` 或 `anthropic` |
+| `auth_type` | 否 | 自动 | `bearer`（Authorization: Bearer）或 `x-api-key`（+ anthropic-version）；为空时按 format 自动选择：openai→bearer，anthropic→x-api-key |
 | `timeout` | 否 | 60 | 请求超时（秒，不能为负） |
 | `retry.max_retries` | 否 | 3 | 最大重试次数（不能为负） |
 | `retry.retry_interval` | 否 | 2 | 首次重试间隔（秒，不能为负） |

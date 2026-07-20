@@ -49,18 +49,22 @@ type AnthropicUsage struct {
 	OutputTokens int `json:"output_tokens"`
 }
 
-func CallAnthropicRaw(baseURL, apiKey string, body []byte, timeout int, transport http.RoundTripper) ([]byte, error) {
-	return postAnthropic(baseURL+"/messages", apiKey, body, timeout, transport)
+func CallAnthropicRaw(baseURL, apiKey, authType string, body []byte, timeout int, transport http.RoundTripper) ([]byte, error) {
+	return postAnthropic(baseURL+"/v1/messages", apiKey, authType, body, timeout, transport)
 }
 
-func postAnthropic(url, apiKey string, body []byte, timeout int, transport http.RoundTripper) ([]byte, error) {
+func postAnthropic(url, apiKey, authType string, body []byte, timeout int, transport http.RoundTripper) ([]byte, error) {
 	httpReq, err := http.NewRequest("POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-api-key", apiKey)
-	httpReq.Header.Set("anthropic-version", "2023-06-01")
+	if authType == "bearer" {
+		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	} else {
+		httpReq.Header.Set("x-api-key", apiKey)
+		httpReq.Header.Set("anthropic-version", "2023-06-01")
+	}
 
 	client := &http.Client{
 		Timeout:   time.Duration(timeout) * time.Second,

@@ -574,7 +574,7 @@ func (e *Engine) forwardRequest(c *gin.Context, body []byte, requestFormat strin
 	if provider.Format == "openai" {
 		respBody, err = adapter.CallOpenAIRaw(provider.BaseURL, provider.APIKey, body, provider.Timeout, e.transport)
 	} else {
-		respBody, err = adapter.CallAnthropicRaw(provider.BaseURL, provider.APIKey, body, provider.Timeout, e.transport)
+		respBody, err = adapter.CallAnthropicRaw(provider.BaseURL, provider.APIKey, provider.AuthType, body, provider.Timeout, e.transport)
 	}
 
 	if err != nil {
@@ -605,7 +605,7 @@ func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat
 
 	path := "/chat/completions"
 	if provider.Format == "anthropic" {
-		path = "/messages"
+		path = "/v1/messages"
 	}
 	url := provider.BaseURL + path
 
@@ -621,6 +621,8 @@ func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	if provider.Format == "openai" {
+		httpReq.Header.Set("Authorization", "Bearer "+provider.APIKey)
+	} else if provider.AuthType == "bearer" {
 		httpReq.Header.Set("Authorization", "Bearer "+provider.APIKey)
 	} else {
 		httpReq.Header.Set("x-api-key", provider.APIKey)

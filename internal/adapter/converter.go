@@ -77,7 +77,8 @@ func ConvertRequest(body []byte, fromFormat, toFormat string) ([]byte, error) {
 			raw["stop_sequences"] = stop
 			delete(raw, "stop")
 		}
-		// max_tokens stays the same name in both formats
+		// Convert tools: OpenAI [{type:"function",function:{name,parameters}}] → Anthropic [{name,input_schema}]
+		convertOpenAIToolsToAnthropic(raw)
 
 	case fromFormat == "anthropic" && toFormat == "openai":
 		// Prepend system as a system message
@@ -100,12 +101,118 @@ func ConvertRequest(body []byte, fromFormat, toFormat string) ([]byte, error) {
 			raw["stop"] = ss
 			delete(raw, "stop_sequences")
 		}
+		// Convert tools: Anthropic [{name,input_schema}] → OpenAI [{type:"function",function:{name,parameters}}]
+		convertAnthropicToolsToOpenAI(raw)
 
 	default:
 		return nil, fmt.Errorf("unsupported format conversion: %s -> %s", fromFormat, toFormat)
 	}
 
 	return json.Marshal(raw)
+}
+
+// convertOpenAIToolsToAnthropic converts tools array in-place:
+// OpenAI: [{type:"function", function:{name, description, parameters}}]
+// Anthropic: [{name, description, input_schema}]
+func convertOpenAIToolsToAnthropic(raw map[string]interface{}) {
+	tools, ok := raw["tools"].([]interface{})
+	if !ok || len(tools) == 0 {
+		return
+	}
+	converted := make([]interface{}, 0, len(tools))
+	for _, t := range tools {
+		tool, ok := t.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		fn, ok := tool["function"].(map[string]interface{})
+		if !ok {
+			// Already in Anthropic format or unknown structure, keep as-is
+			converted = append(converted, tool)
+			continue
+		}
+		entry := map[string]interface{}{}
+		if name, ok := fn["name"]; ok {
+			entry["name"] = name
+		}
+		if desc, ok := fn["description"]; ok {
+			entry["description"] = desc
+		}
+		if params, ok := fn["parameters"]; ok {
+			entry["input_schema"] = params
+		}
+		converted = append(converted, entry)
+	}
+	raw["tools"] = converted
+
+	// Convert tool_choice
+	// OpenAI: {"type":"function","function":{"name":"..."}}
+	// Anthropic: {"type":"tool","name":"..."}
+	if tc, ok := raw["tool_choice"].(map[string]interface{}); ok {
+		if tcType, _ := tc["type"].(string); tcType == "function" {
+			if fn, ok := tc["function"].(map[string]interface{}); ok {
+				if name, ok := fn["name"].(string); ok {
+					raw["tool_choice"] = map[string]interface{}{
+						"type": "tool",
+						"name": name,
+					}
+				}
+			}
+		}
+	}
+}
+
+// convertAnthropicToolsToOpenAI converts tools array in-place:
+// Anthropic: [{name, description, input_schema}]
+// OpenAI: [{type:"function", function:{name, description, parameters}}]
+func convertAnthropicToolsToOpenAI(raw map[string]interface{}) {
+	tools, ok := raw["tools"].([]interface{})
+	if !ok || len(tools) == 0 {
+		return
+	}
+	converted := make([]interface{}, 0, len(tools))
+	for _, t := range tools {
+		tool, ok := t.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		// Already in OpenAI format?
+		if _, hasType := tool["type"]; hasType {
+			converted = append(converted, tool)
+			continue
+		}
+		fn := map[string]interface{}{}
+		if name, ok := tool["name"]; ok {
+			fn["name"] = name
+		}
+		if desc, ok := tool["description"]; ok {
+			fn["description"] = desc
+		}
+		if schema, ok := tool["input_schema"]; ok {
+			fn["parameters"] = schema
+		}
+		converted = append(converted, map[string]interface{}{
+			"type":     "function",
+			"function": fn,
+		})
+	}
+	raw["tools"] = converted
+
+	// Convert tool_choice
+	// Anthropic: {"type":"tool","name":"..."}
+	// OpenAI: {"type":"function","function":{"name":"..."}}
+	if tc, ok := raw["tool_choice"].(map[string]interface{}); ok {
+		if tcType, _ := tc["type"].(string); tcType == "tool" {
+			if name, ok := tc["name"].(string); ok {
+				raw["tool_choice"] = map[string]interface{}{
+					"type": "function",
+					"function": map[string]interface{}{
+						"name": name,
+					},
+				}
+			}
+		}
+	}
 }
 
 func ConvertResponse(body []byte, fromFormat, toFormat, model string) ([]byte, error) {

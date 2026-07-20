@@ -105,6 +105,14 @@ func (cfg *Config) applyDefaults() {
 		if cfg.Providers[i].Timeout <= 0 {
 			cfg.Providers[i].Timeout = 60
 		}
+		// Auto-detect auth type from format if not explicitly set
+		if cfg.Providers[i].AuthType == "" {
+			if cfg.Providers[i].Format == "anthropic" {
+				cfg.Providers[i].AuthType = "x-api-key"
+			} else {
+				cfg.Providers[i].AuthType = "bearer"
+			}
+		}
 		if cfg.Providers[i].RateLimit.RPM <= 0 {
 			cfg.Providers[i].RateLimit.RPM = 60 // default 60 RPM
 		}
