@@ -3,9 +3,11 @@ global:
   listen_addr: ":8080"          # 监听地址，代理服务器在此端口接收请求
   default_format: openai         # 默认请求格式，客户端未指定时使用
   log_file: proxy.log            # 日志文件路径
+  log_request_body: snippet      # 请求内容日志级别：off=不打印 | snippet=仅打印首条消息前80字符 | full=打印完整请求结构(model/messages/role/stream/tools 等)，full 整段 body 仅落盘不进 SSE
   cb_threshold: 3                # 熔断阈值，同一优先级组连续失败次数达到此值后熔断
   cb_cooldown: 10                # 熔断冷却时间（秒），熔断后等待此时间后尝试恢复
   cb_skip_requests: 1            # 熔断恢复后跳过的请求数，用于探测后端是否恢复
+  control_allow_remote: false    # 控制台启停开关(/api/control)是否允许远程访问，默认仅 loopback(127.0.0.1/::1)可调用；true 才允许远程管理（不支持热重载）
 
 model_routes:                    # 模型路由别名映射，将别名映射到实际 provider
   - alias: gpt-4o                # 对外暴露的模型别名

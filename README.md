@@ -253,47 +253,12 @@ make build-linux-arm64
 # 上传到树莓派
 scp ai-proxy-linux-arm64 pi@raspberrypi:~/ai-proxy
 scp config/providers.yaml pi@raspberrypi:~/config/providers.yaml
+
+# 运行（或配置 systemd 自启）
+~/ai-proxy --config ~/config/providers.yaml
 ```
 
-创建 systemd 服务 `/etc/systemd/system/ai-proxy.service`：
-
-```ini
-[Unit]
-Description=AI Proxy
-After=network.target
-
-[Service]
-Type=simple
-User=pi
-WorkingDirectory=/home/pi
-ExecStart=/home/pi/ai-proxy --config /home/pi/config/providers.yaml
-Restart=always
-RestartSec=5
-StandardOutput=append:/home/pi/proxy.log
-StandardError=inherit
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable ai-proxy
-sudo systemctl start ai-proxy
-
-# 验证
-~/ai-proxy --version
-curl http://localhost:8080/health
-```
-
-更新版本：
-
-```bash
-scp ai-proxy-linux-arm64 pi@raspberrypi:~/ai-proxy-new
-sudo systemctl stop ai-proxy
-mv ~/ai-proxy-new ~/ai-proxy && chmod +x ~/ai-proxy
-sudo systemctl start ai-proxy
-```
+> 如需从局域网其他设备通过监控面板控制代理启停，需将 `global.control_allow_remote` 设为 `true`，否则 `/api/control` 仅允许本机访问。
 
 ### 跨平台编译
 

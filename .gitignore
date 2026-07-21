@@ -6,7 +6,9 @@
 *.dylib
 *.test
 *.out
-ai-proxy*
+
+# Cross-compiled binaries
+ai-proxy-linux-arm64
 
 # Logs
 *.log
@@ -40,5 +42,8 @@ providers.json
 # Temp
 old/
 
-# Circuit breaker state (auto-generated)
+# Runtime state (auto-generated)
 .cb_state.json
+.cb_state.json.tmp
+.stats.json
+.stats.json.tmp
