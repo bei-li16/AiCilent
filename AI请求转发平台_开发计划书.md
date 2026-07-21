@@ -2,7 +2,7 @@
 
 ## 1. 项目概述
 
-构建一个轻量级 AI 请求转发网关，统一管理多个 AI 供应商（当前实际使用：腾讯云 sensenova），提供单一入口供本地 Agent 工具（OpenCode、Claude Desktop、OpenClaw 等）接入。核心能力包括**优先级路由**、**故障转移**、**指数退避重试**（含 429 限流重试）、**断路器保护**（状态持久化、原子写入）、**SSE 流式传输**（3min 硬超时 + idleTimeoutReader + 中途错误事件注入）、**OpenAI ↔ Anthropic 协议自动转换**（含 tool_use/tool_calls/thinking，通用 JSON map 保留未知字段），以及**监控面板**、**实时日志 SSE**、**启用/停用控制**、**请求限流**（per-provider Token Bucket）、**日志自动轮转**、**配置热加载**、**版本号注入**。
+构建一个轻量级 AI 请求转发网关，统一管理多个 AI 供应商（当前实际使用：腾讯云 sensenova），提供单一入口供本地 Agent 工具（OpenCode、Claude Desktop、OpenClaw 等）接入。核心能力包括**优先级路由**、**故障转移**、**指数退避重试**（含 429 限流重试）、**断路器保护**（状态持久化、原子写入）、**SSE 流式传输**（3min 硬超时 + idleTimeoutReader + 中途错误事件注入）、**OpenAI ↔ Anthropic 协议自动转换**（含 tool_use/tool_calls/thinking，通用 JSON map 保留未知字段），以及**监控面板**（含命中率曲线、熔断器状态条、连续失败/错误类型/平均延迟列）、**实时日志 SSE**（含子串过滤、离线指示）、**请求内容日志分级**（`log_request_body`：off/snippet/full，full 仅落盘不进 SSE）、**统计持久化**（`.stats.json`）、**启用/停用控制**（loopback 鉴权）、**请求限流**（per-provider Token Bucket）、**日志自动轮转**、**配置热加载**、**版本号注入**。
 
 ### 关键设计原则
 
@@ -469,28 +469,52 @@ transport: &http.Transport{
 
 ```go
 type ProviderStats struct {
-    Name     string
-    ModelID  string
-    Priority int
-    Total    int64
-    Success  int64
-    Fail     int64
-    Rate     float64    // Success/Total * 100
+    Name            string
+    ModelID         string
+    Priority        int
+    Total           int64
+    Success         int64
+    Fail            int64
+    Rate            float64    // Success/Total * 100
+    ConsecutiveFail int64      // 当前连续失败数，成功后归零
+    LastErrType     string    // 最近错误类型（ClassifyError 归类）
+    LastErr         string    // 最近错误简述（截断 120 字符）
+    LatencySumMs    float64   // 累计延迟(ms)
+    LatencyCount    int64
+    LatencyAvgMs    float64   // 平均延迟(ms)
+    LastLatencyMs   float64
+}
+
+type CBState struct {        // 只读熔断器快照，供 /api/stats
+    Priority, Open, Failures, CooldownSec, CooldownRemSec, SkipRemaining
+}
+
+type HitRateCurve struct {   // 命中率曲线一条
+    Priority int       // 0 = 全部请求
+    Points   []float64 // 每个=最近 hitWindowSize(50) 次尝试的成功率(%)
 }
 
 type Collector struct {
-    mu           sync.Mutex
-    providers    map[string]*ProviderStats
-    totalReq     atomic.Int64
-    totalSuccess atomic.Int64
-    totalFail    atomic.Int64
-    running      atomic.Bool     // 代理启用/停用
+    mu            sync.Mutex
+    providers     map[string]*ProviderStats
+    totalReq      atomic.Int64   // 上游尝试次数（含重试/降级）
+    totalClient   atomic.Int64   // 客户端请求数
+    totalSuccess  atomic.Int64
+    totalFail     atomic.Int64
+    running       atomic.Bool
+    overallWin    rollingHit       // 全局滚动 50 窗口
+    prioWin       map[int]*rollingHit // per-priority 滚动窗口
+    overallSeries []float64        // 全局曲线点序列（≤240）
+    prioSeries    map[int][]float64 // per-priority 曲线序列
 }
 ```
 
-- `Record(name, modelID, priority, success)` — 每次 provider 尝试后调用（engine.go:176,187）
-- `Snapshot()` — 返回包含所有 provider 统计、全局汇总、运行状态、运行时间的快照
+- `Record(name, modelID, priority, success, statusCode, errMsg, latency)` — 每次 provider 尝试后调用；分类错误、维护连续失败、累计延迟，并 push 进对应滚动窗口/曲线序列
+- `RecordClientRequest()` — 每入站请求一次（engine 在确认有可用 provider 后调用）
+- `Snapshot()` — 返回 providers 统计、全局汇总（含 total_client_req）、运行状态、运行时间、`CB`、`Curves`
+- `ClassifyError(statusCode, msg)` — 429→tpm_limit/rpm_exhausted/plan_exhausted、404→not_found、401/403→auth_error、408/504→timeout、≥500→upstream_error、0→network_error
 - `SetRunning(v)` / `IsRunning()` — atomic.Bool 控制代理开关
+- `Save()` / `load()` / `StartAutoSave(stop, interval)` — 持久化到 `.stats.json`（仅累计计数；连续性/窗口/曲线为运行态，重启归零）
 
 ### 9.3 SSE Hub（internal/sse/hub.go）
 
@@ -512,13 +536,15 @@ func (h *Hub) ServeHTTP(w, r)               // SSE 端点，每客户端一个 g
 ### 9.4 前端（internal/server/web/）
 
 - 通过 `//go:embed web/*` 编译进二进制，无需外部静态文件
-- `index.html`：布局分为标题栏（状态 + 开关）、汇总卡片、供应商表格、实时日志区
-- `style.css`：深色主题，简洁 UI
+- `index.html` 面板顺序：标题栏（实时连接徽标 + 状态 + 开关 + 运行时间）→ 汇总卡片（客户端请求/上游尝试/成功/失败/成功率）→ **命中率曲线**（SVG 多折线）→ **熔断器状态条** → 供应商表格（连续失败/平均延迟/最近错误列）→ 实时日志区（过滤输入框 + 暂停/清空）
+- `style.css`：深色主题，优先级色码（P1 橙/P2 蓝/P3 灰），成功率三色阈值，CB 状态条/曲线图例/徽标三态
 - `app.js`：
-  - `fetchStats()`：每 2s `GET /api/stats` 更新汇总卡片和供应商表格
-  - `toggleProxy()`：`POST /api/control` 切换代理开关
-  - `EventSource('/api/logs')`：SSE 实时日志，颜色编码（绿色=OK、红色=FAIL、蓝色=CB/QUEUE、灰色=SUMMARY）
-  - 日志上限 500 行，自动滚动
+  - `fetchStats()`：每 2s `GET /api/stats` 更新汇总卡片、供应商表格、CB 状态条、命中率曲线
+  - `renderChart(curves)`：SVG 多折线，右对齐（最新点对到右边缘），Y 轴 0/50/100%
+  - `toggleProxy()`：乐观更新 UI + 失败回退 + 防抖
+  - `EventSource('/api/logs')`：SSE 实时日志，颜色编码（绿=OK、红=FAIL、蓝=INBOUND/CB/QUEUE/ROUTER、灰=ACCESS/SUMMARY），`onopen/onerror` 驱动实时徽标
+  - 日志子串过滤（大小写不敏感，存量+新行）+ 暂停冻结 + 500 行 DOM 上限自动滚动
+  - `fetchStats` 连续失败 ≥2 → 显示"统计中断"
 
 ---
 
@@ -533,9 +559,9 @@ func (h *Hub) ServeHTTP(w, r)               // SSE 端点，每客户端一个 g
 | `GET` | `/` | Dashboard 页面（嵌入 HTML） | Logger / DetectFormat 均执行 |
 | `GET` | `/style.css` | Dashboard 样式表 | 同上 |
 | `GET` | `/app.js` | Dashboard JavaScript | 同上 |
-| `GET` | `/api/stats` | 统计快照 JSON（每 2s 轮询） | `/api/` 路径：Logger 不记录、DetectFormat 不解析 body |
-| `GET` | `/api/logs` | SSE 实时日志流 | 同上 |
-| `POST` | `/api/control` | 启用/停用代理 `{"running":bool}` | 同上 |
+| `GET` | `/api/stats` | 统计快照 JSON（每 2s 轮询）：providers + 全局汇总(含 total_client_req) + `cb`(熔断快照) + `curves`(命中率曲线) | `/api/` 路径：Logger 不记录、DetectFormat 不解析 body |
+| `GET` | `/api/logs` | SSE 实时日志流（combined writer：短行；full body 不进此流） | 同上 |
+| `POST` | `/api/control` | 启用/停用代理 `{"running":bool}`；`control_allow_remote=false` 时仅 loopback 可调用（403 拒绝远程） | 同上 |
 
 系统自动检测请求体格式，无需手动指定端点协议。
 
@@ -545,9 +571,22 @@ func (h *Hub) ServeHTTP(w, r)               // SSE 端点，每客户端一个 g
 
 ### 11.1 配置结构
 
-完整配置参见 `config/providers.yaml`，当前包含 8 个供应商，2 个 API Key：
+完整配置参见 `config/providers.yaml`（gitignored，含真实 key）。当前包含 24 个供应商（12 openai + 12 anthropic，3 个 API Key，`sensenovalyh2-*` 一组覆盖 P1/P2/P3 两种格式）。
 
-| 字段 | 类型 | 必填 | 说明 |
+**global 段**：
+
+| 字段 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `listen_addr` | string | `:8080` | 监听地址 |
+| `default_format` | string | `openai` | （已废弃，探测以 URL/body 为准） |
+| `log_file` | string | — | 日志文件路径 |
+| `log_request_body` | string | `snippet` | 请求内容日志级别：off / snippet / full（full 整段 body 仅落盘不进 SSE；热重载） |
+| `cb_threshold` | int | 3 | 熔断阈值 |
+| `cb_cooldown` | int | 10 | 熔断冷却秒数 |
+| `cb_skip_requests` | int | 1 | 熔断恢复跳过请求数 |
+| `control_allow_remote` | bool | false | `/api/control` 是否允许远程访问，默认仅 loopback（**不支持热重载**） |
+
+**provider 段**：
 |------|------|------|------|
 | `name` | string | 是 | 供应商唯一标识名 |
 | `model_id` | string | 是 | 实际调用的模型名 |
@@ -731,22 +770,20 @@ type idleTimeoutReader struct {
 ### 14.1 日志架构
 
 ```
-tracer.Log*() → fmt.Fprint(e.logWriter, ...)
-                    │
-                    ▼
-              gin.DefaultWriter
-                    │
-                    ▼
-          io.MultiWriter(logW, sseHub)
-              │               │
-              ▼               ▼
-        os.Stdout +     sse.Hub.Write()
-        proxy.log        (扇出给 Web 面板)
+tracer.Log*() → fmt.Fprint(...)
+                   │
+       combinedW ◄──┘  (gin.DefaultWriter = io.MultiWriter(fileW, sseHub))
+            │                          │
+            ▼                          ▼
+        proxy.log                  sse.Hub.Write()
+   (rotator 轮转)                 (扇出给 Web 面板，仅短行)
+
+full body（log_request_body=full）→ fmt.Fprint(fileWriter, ...)  → 仅 proxy.log，不进 SSE
 ```
 
-- `gin.DefaultWriter` 被重设为 `io.MultiWriter(logW, sseHub)`（server.go:28）
-- `logWriter()`：`log_file` 为空 → 仅 stdout；有值 → stdout + 文件
+- `gin.DefaultWriter` 被重设为 `io.MultiWriter(fileW, sseHub)`（server.go）：`fileW` 为 rotator（`log_file` 非空）或 stdout
 - SSE Hub 实现 `io.Writer`，每收到一行日志就非阻塞扇出给所有 SSE 客户端
+- `full` 模式整段请求体只写 `fileW`（仅文件），header+占位行进 combined（SSE 可见），避免大 body 冲垮控制台
 - 所有 tracer 输出和 gin 日志走同一通道，确保日志顺序
 
 ### 14.2 tracer.Recorder 结构化追踪
@@ -755,7 +792,8 @@ tracer.Log*() → fmt.Fprint(e.logWriter, ...)
 
 | 日志标签 | 触发时机 | 内容 |
 |----------|----------|------|
-| `REQUEST` | 请求进入 | 方法、路径、模型、格式、消息摘要 |
+| `INBOUND` | 请求进入 | 方法、路径、模型、格式、请求内容（off/snippet/full 三档；full 整段 body 仅落盘不进 SSE） |
+| `ACCESS` | 请求结束（middleware） | 方法、路径、状态码、耗时、格式（与 INBOUND 区分，避免双 REQUEST 同流冲突） |
 | `ROUTER` | 路由决策 | 过滤模式、匹配供应商列表、降级、跳过 |
 | `PROVIDER` | 每次供应商调用 | 优先级、尝试次数、供应商名、延迟、错误信息 |
 | `CB` | 断路器操作 | 熔断/跳过/自动关闭/成功关闭/配置 |
@@ -768,17 +806,13 @@ tracer.Log*() → fmt.Fprint(e.logWriter, ...)
 ### 14.3 日志输出示例
 
 ```
-[2026-07-14 11:53:25.123] REQUEST  | POST /v1/chat/completions | model=Medium | format=openai | msg=user: 你好
-[2026-07-14 11:53:25.124] ROUTER   | mode=Medium filter="all priorities" matched=[sensenova-glm-5.2[P1], ...]
-[2026-07-14 11:53:25.202] PROVIDER | [P1][1/4] sensenova-glm-5.2 | FAIL | 78ms | API error (status 429): ...
-[2026-07-14 11:53:25.202] ROUTER   | 4xx non-retryable, skip to next provider | sensenova-glm-5.2 [P1]
-[2026-07-14 11:53:25.280] PROVIDER | [P1][1/4] sensenovalyh-glm-5.2 | FAIL | 78ms | API error (status 429): ...
-[2026-07-14 11:53:25.280] QUEUE    | [P1] | released (all failed)
-[2026-07-14 11:53:25.280] ROUTER   | degrade to priority group | P2
-[2026-07-14 11:53:25.280] QUEUE    | [P2] | rr start=0 (group size=2)
-[2026-07-14 11:53:28.417] TTFB     | sensenovalyh-deepseek-v4-flash[P2] | upstream header=2.28s | status=200
-[2026-07-14 11:53:28.418] PROVIDER | [P2][1/4] sensenovalyh-deepseek-v4-flash | OK | stream | 3.137s
-[2026-07-14 11:53:28.418] SUMMARY  | model=Medium | format=openai | result=SUCCESS | provider=sensenovalyh-deepseek-v4-flash | rr=1 | total=3.295s
+[2026-07-21 21:15:52.900] INBOUND  | POST /v1/messages | model=Max | format=anthropic | body=<full logged to file>
+[2026-07-21 21:15:52.900] ROUTER   | mode=Max filter="highest priority only" matched=[sensenova-glm-5.2-anthropic[P1], ...]
+[2026-07-21 21:12:14.219] PROVIDER | [P1][1/5] sensenovalyh-glm-5.2-anthropic | FAIL | 677.6642ms | API error (status 429): ...TPM limit 5000000...
+[2026-07-21 21:12:21.640] PROVIDER | [P1][1/5] sensenovalyh2-glm-5.2-anthropic | FAIL | 767.3346ms | API error (status 429): ...rpm exhausted
+[2026-07-21 21:13:21.856] PROVIDER | [P1][5/5] sensenova-glm-5.2-anthropic | OK | 46.5643112s
+[2026-07-21 21:13:21.857] SUMMARY  | model=Max | format=anthropic | result=SUCCESS | provider=sensenova-glm-5.2-anthropic | rr=2 | total=46.7s
+[2026-07-21 21:13:21.857] ACCESS   | POST /v1/messages | 200 | 46.7s | format=anthropic
 ```
 
 ### 14.4 中间件日志静默
@@ -821,10 +855,12 @@ ai-proxy.exe --config config/providers.yaml
 ### 15.3 监控面板
 
 启动后在浏览器访问 `http://<host>:8080/`：
-- 顶部：代理运行状态 + 启用/停用开关 + 运行时间
-- 汇总卡片：总请求 / 成功 / 失败 / 成功率
-- 供应商表格：每个供应商的请求数、成功/失败、成功率（颜色编码）
-- 实时日志：SSE 流式日志，自动更新
+- 顶部：实时连接徽标 + 代理运行状态 + 启用/停用开关 + 运行时间
+- 汇总卡片：客户端请求 / 上游尝试 / 成功 / 失败 / 成功率
+- 命中率曲线：滚动 50 次平均成功率，全部 + 各优先级多曲线（右对齐）
+- 熔断器状态条：每优先级 open/正常 + 剩余冷却
+- 供应商表格：尝试/成功/失败/成功率/连续失败/平均延迟/最近错误类型
+- 实时日志：SSE 流式日志（子串过滤 + 暂停 + 离线指示），自动更新
 
 ### 15.4 Agent 配置
 
@@ -1120,12 +1156,90 @@ model: Flash
 
 ---
 
-## 22. 扩展性考虑
+## 22. 已修复问题记录（第六阶段 — 控制台与日志增强）
+
+本阶段围绕"请求内容可控打印"与"控制台可观测性"做了一次集中增强，跨 10 个文件。按功能分组记录如下。
+
+### 22.1 [FEATURE] 请求内容日志分级（`log_request_body`）
+- **新增**：`GlobalConfig.LogRequestBody`（yaml `log_request_body`），三档：
+  - `off` — REQUEST 行不含请求内容
+  - `snippet`（默认）— `msg=` 首条消息前 80 字符（保持旧行为）
+  - `full` — 打印完整请求结构（model/messages/role/stream/tools 等全部字段），pretty-printed
+- **实现**：`engine.go` 读 `cfg.Global.LogRequestBody`（带 `reloadMu` RLock，兼容热重载，默认 `snippet`），经新增 `buildRequestBodyLog(body, level)`（`full` 用 `json.Indent` 美化）交给 `tracer.LogRequest`。
+- **热重载**：改完无需重启，下一次 30s 轮询生效（日志已观测 ~30s 后切换）。
+
+### 22.2 [BUG] 双 "REQUEST" 日志源同流冲突
+- **问题**：`middleware/logger.go`（access 日志）与 `tracer.LogRequest`（入站日志）都用 `REQUEST` 前缀，但 schema 不同（一个带 status+latency，一个带 model+format+body），在同一 SSE 流/文件中交错，前端无法区分。
+- **修复**：tracer 入站行前缀 `REQUEST` → `INBOUND`；middleware access 行前缀 `REQUEST` → `ACCESS`。`app.js` `logLineClass` 适配：`INBOUND`→info(蓝)，`ACCESS`→muted(灰)。
+
+### 22.3 [FEATURE] `full` 模式 body 不进 SSE 流
+- **问题**：`full` 模式整段 pretty JSON（含完整系统提示+历史+tools，单条可达数十 KB）经 `gin.DefaultWriter`（= MultiWriter(file, sseHub)）同时推给所有浏览器，会冲垮控制台，且 500 行 DOM 上限按节点数算、一个大 body 只算 1 节点，无法及时淘汰。
+- **修复**：拆分双 writer —— `fileW`（仅文件，rotator）、`combinedW`（文件+SSE）。`gin.DefaultWriter = combinedW`（短行仍进 SSE）；`NewEngine` 增 `fileWriter` 参数，`tracer.New` 接受 `(logWriter, fileWriter)`。`LogRequest` 的 `full` 分支：header+占位行 `body=<full logged to file>` 进 combined（SSE 可见），整段 body 只写 `fileWriter`（不进 SSE）。
+
+### 22.4 [SECURITY] `/api/control` 启停开关鉴权
+- **问题**：kill switch 裸奔，任何能访问 :8080 的来源都能 POST 停掉代理。
+- **修复**：`GlobalConfig.ControlAllowRemote`（yaml `control_allow_remote`，默认 `false`）。`/api/control` handler 在 `ControlAllowRemote=false` 时仅允许 loopback（`127.0.0.1/::1`，新增 `isLoopback` helper 基于 `net.SplitHostPort`+`net.ParseIP().IsLoopback()`），否则 403。设 `true` 才允许远程管理。
+- **限制**：该字段是启动期安全设置，闭包捕获启动时 `cfg`，**不支持热重载**（其余 global 项仍走热重载）。
+
+### 22.5 [FEATURE] 统计持久化（`.stats.json`）
+- **问题**：CB 状态持久化（`.cb_state.json`）但 stats 全在内存，重启后累计计数丢失，不一致。
+- **修复**：`stats.Collector` 增 `statsPath`，新增 `Save()`/`load()`（原子写 temp+rename，复用 `.stats.json`）。`New(statsPath)` 启动时 load；`StartAutoSave(stop, 30s)` goroutine 每 30s 存盘并在 stop 关闭时做最后一次 Save。`server.go` 计算路径 `filepath.Join(dir, ".stats.json")` 并启动 auto-save；`main.go` 优雅关闭流程加 `srv.SaveStats()`。`Instance` 暴露 `SaveStats()` + `statsStop` channel。
+- **保留语义**：只持久化累计计数（total/success/fail/latency），`ConsecutiveFail`/`LastErr*`/rolling 窗口与曲线为纯运行态，重启归零（连续性无法跨重启推断）。
+
+### 22.6 [FEATURE] 客户端请求数 vs 上游尝试数
+- **问题**：`Record()` 按 provider 尝试计数，一个客户端请求重试 5 次 + 降级 2 个 provider 会计 7 次，UI 写"总请求"误导。
+- **修复**：`Collector` 增 `totalClient atomic.Int64` + `RecordClientRequest()`；`engine.go` 在确认有可用 provider 后调一次（每入站请求一次）。`Snapshot` 增 `TotalClientReq`。前端摘要卡 4→5：拆出"客户端请求"+"上游尝试"。
+
+### 22.7 [FEATURE] 连续失败数 + 最近错误类型
+- **问题**：stats 表只有成功/失败数，无法一眼看出哪些 provider 100% 失败（如 `*-u1-fast-anthropic` 全 404），需手动读日志。
+- **修复**：`Record` 签名扩展为 `(name, modelID, priority, success, statusCode, errMsg, latency)`。`ProviderStats` 增 `ConsecutiveFail`（成功归零）、`LastErrType`、`LastErr`（截断 120 字符）。新增 `ClassifyError(statusCode, msg)`：429→`tpm_limit`/`rpm_exhausted`/`plan_exhausted`、404→`not_found`、401/403→`auth_error`、408/504→`timeout`、≥500→`upstream_error`、0→`network_error`、其余 `http_<code>`。`engine.go` 新增 `errorDetail(fwdErr)` 从 `*adapter.APIError` 取 StatusCode+Message（非 APIError 返回 0 + err.Error()），成功传 `200,""`。前端表格加"连续失败""最近错误"两列。
+
+### 22.8 [FEATURE] 熔断器状态可视化
+- **问题**：CB 的 open/cooldown/skip 逻辑丰富但只埋在日志里，控制台看不到当前态。
+- **修复**：stats 包定义 `CBState{Priority,Open,Failures,CooldownSec,CooldownRemSec,SkipRemaining}`；`Engine.CBSnapshot()` 只读（`reloadMu` RLock 取 `CBCooldown` + `cbMu` 锁内算 `cooldown_remaining`，镜像 `shouldSkipGroup` 的 cooldown 数学但不改状态），按 priority 升序排序。`/api/stats` handler 合并 `snap.CB = engine.CBSnapshot()`（单次轮询）。前端新增"熔断器状态"区，按熔断中(红)/正常(绿)渲染状态条 + 剩余冷却秒数。
+
+### 22.9 [FEATURE] 延迟指标
+- **问题**：stats 只有计数无延迟，选优先级最该看延迟却看不到。
+- **修复**：`Record` 带 `latency time.Duration`（engine 在 `latency := time.Since(start)` 后传入）。`ProviderStats` 增 `LatencySumMs`/`LatencyCount`/`LatencyAvgMs`/`LastLatencyMs`。前端表格加"平均延迟"列，`fmtLatency` 自适应 ms/s。
+
+### 22.10 [FEATURE] 命中率曲线（滚动 50 次平均）
+- **需求**：在"请求数面板之后、供应商统计之前"加命中率曲线；每个点=当前请求往前 50 次命中情况的平均数，不足有多少算多少；包含每个优先级一条 + 全部请求一条。
+- **实现**：
+  - stats 包：`HitRateCurve{Priority int(0=全部), Points []float64}`，常量 `hitWindowSize=50`/`hitSeriesCap=240`。`rollingHit` 固定 50 槽环形缓冲 + O(1) 成功计数 → `rate()` 即"最近 50 次成功率"（分母为实际长度，不足 50 按实际算）。`pushSeries` 满 240 后左移覆写（有界数组，无泄漏）。
+  - `Collector` 增 `overallWin`/`prioWin map`/`overallSeries`/`prioSeries map`。`Record()` 末尾在 `c.mu` 下 push 进对应优先级窗口 + 全局窗口，把当前 rolling-50 成功率作为一点追加进对应序列。
+  - `Snapshot.Curves`：Priority 0(全部) 在前，其余按优先级升序；序列浅拷贝返回避免竞态。
+  - 前端 `renderChart(curves)`：SVG 多折线，Y 轴 0/50/100% 网格，**右对齐**（各曲线最新点都对到右边缘，不同点数在时间上对齐），颜色与优先级表一致（全部=绿、P1=橙、P2=蓝、P3=灰），动态图例。接入 `fetchStats` 2s 轮询。
+- **粒度说明**：点按"上游尝试"粒度（含重试/降级），因成功/失败只在 `Record` 时可知，且能反映重试导致的抖动。曲线不持久化，重启后从空开始随新请求建立。
+
+### 22.11 [FEATURE] 日志面板过滤/搜索
+- **实现**：前端日志头加过滤输入框 + 暂停/清空按钮。客户端子串过滤（大小写不敏感），对存量行 `display` 切换 + 对新到达行按当前过滤词预先 `display:none`。新增"暂停"按钮冻结追加（`paused` 标志）。
+
+### 22.12 [FEATURE] 离线指示
+- **实现**：新增 `live-badge`。SSE `onopen`→"● 实时"(绿)，`onerror`→"● 重连中"(黄)；`fetchStats` 连续失败 ≥2→"统计中断"(红)。`toggleProxy` 失败时复用徽标闪现"操作失败（已回退）"2s。
+
+### 22.13 [FEATURE] toggle 乐观反馈
+- **问题**：原 `toggleProxy` fire-and-forget，失败时开关状态错位直到下次轮询。
+- **修复**：乐观更新 UI（立即反映状态），`toggleBusy` 防抖防重复触发，`.then` 校验 HTTP 状态，`.catch` 回退开关+状态+闪现提示，`.finally` 释放 busy。轮询时若 `toggleBusy` 进行中则不覆盖乐观态。
+
+### 22.14 [REFACTOR] writer 拆分与签名变更
+- `server.go`：`fileW`(仅文件) / `combinedW`(文件+SSE) 双 writer；`gin.DefaultWriter = combinedW`；`NewEngine(cfg, configPath, combinedW, fileW, statsCollector)`。
+- `engine.go`：`Engine` 增 `fileWriter` 字段；`tracer.New(model, format, e.logWriter, e.fileWriter)`。
+- `tracer.go`：`Recorder` 增 `fileWriter`；`New(model, format, logWriter, fileWriter)`。
+- 这些是内部 wiring 的破坏性签名变更（仅 `server.go` 调用，无第三方影响）。
+
+### 22.15 配置/数据文件变更汇总
+- `config/providers.yaml`（gitignored）：`global` 段新增 `log_request_body: snippet` 与 `control_allow_remote: false`。供应商由 8 个扩展到 24 个（12 openai + 12 anthropic，3 个 API Key，新增 `sensenovalyh2-*` 一组覆盖 P1/P2/P3 两种格式）。
+- 新增运行态文件 `.stats.json`（与 `.cb_state.json` 同目录，gitignored）。
+
+---
+
+## 23. 扩展性考虑
 
 - **共享 TPM 池感知限流**：当前限流器以 provider name 为 key，同账号多供应商各自独立桶。可增加 `account`/`quota_group` 字段让限流跨供应商共享
-- **单元测试**：当前无 `*_test.go` 文件。converter.go（753 行复杂状态机）、retry manager、token bucket、CB 持久化为优先测试目标
-- **`/api/*` 端点认证**：当前监控面板和 control 端点无认证，暴露到公网时需加 API key middleware
+- **单元测试**：当前无 `*_test.go` 文件。converter.go（复杂状态机）、retry manager、token bucket、CB 持久化、stats 持久化/rollingHit 为优先测试目标
+- **`/api/*` 端点认证**：`/api/control` 已加 loopback 守卫（`control_allow_remote`），但 `/api/stats`、`/api/logs` 仍只读无认证。暴露到公网时需加 API key middleware，并让 `control_allow_remote` 支持热重载
+- **命中率曲线持久化**：当前 rolling 窗口/曲线为运行态，重启归零。可持久化最近 50 次原始结果以在重启后立即恢复曲线
 - **插件化供应商适配器**：新增供应商只需实现统一接口（当前已抽象 adapter 层）
-- **健康检查自动下线**：定期检测供应商可用性，自动移除不可用供应商
+- **健康检查自动下线**：定期检测供应商可用性，自动移除不可用供应商（如 `*-u1-fast-anthropic` 全 404 的死 provider）
 - **Dashboard 增强**：历史图表、链路耗时分布、手动降级控制
 - **热加载 CB/RR 状态清理**：热加载更换 priority 供应商后，旧 priority 的 CB 计数和 RR 索引仍残留（当前为设计意图，CB 按 priority 粒度隔离）

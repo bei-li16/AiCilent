@@ -14,26 +14,48 @@
       <span class="uptime" id="uptime"></span>
     </div>
     <div class="header-right">
+      <span class="live-badge" id="liveBadge" title="实时日志连接状态">● 实时</span>
       <span class="status" id="status">● 运行中</span>
       <label class="switch">
-        <input type="checkbox" id="toggle" checked onchange="toggleProxy()">
+        <input type="checkbox" id="toggle" checked>
         <span class="slider"></span>
       </label>
     </div>
   </header>
 
   <section class="summary" id="summary">
-    <div class="card"><div class="card-label">总请求</div><div class="card-value" id="totalReq">0</div></div>
+    <div class="card"><div class="card-label">客户端请求</div><div class="card-value" id="totalClient">0</div></div>
+    <div class="card"><div class="card-label">上游尝试</div><div class="card-value" id="totalReq">0</div></div>
     <div class="card success"><div class="card-label">成功</div><div class="card-value" id="totalSuccess">0</div></div>
     <div class="card fail"><div class="card-label">失败</div><div class="card-value" id="totalFail">0</div></div>
     <div class="card"><div class="card-label">成功率</div><div class="card-value" id="totalRate">—</div></div>
+  </section>
+
+  <section class="chart-section">
+    <div class="chart-header">
+      <h2>命中率曲线（最近50次滚动平均）</h2>
+      <div class="chart-legend" id="chartLegend"></div>
+    </div>
+    <div class="chart-container" id="chartContainer">
+      <svg id="hitChart" viewBox="0 0 1000 200" preserveAspectRatio="none"></svg>
+      <span class="muted chart-empty" id="chartEmpty">暂无数据</span>
+    </div>
+  </section>
+
+  <section class="cb-section">
+    <h2>熔断器状态</h2>
+    <div class="cb-container" id="cb-container"><span class="muted">暂无熔断记录</span></div>
   </section>
 
   <section class="table-section">
     <h2>供应商统计</h2>
     <table id="stats-table">
       <thead>
-        <tr><th>优先级</th><th>供应商</th><th>模型</th><th>请求</th><th>成功</th><th>失败</th><th>成功率</th></tr>
+        <tr>
+          <th>优先级</th><th>供应商</th><th>模型</th>
+          <th>尝试</th><th>成功</th><th>失败</th><th>成功率</th>
+          <th>连续失败</th><th>平均延迟</th><th>最近错误</th>
+        </tr>
       </thead>
       <tbody id="stats-body"></tbody>
     </table>
@@ -42,7 +64,11 @@
   <section class="log-section">
     <div class="log-header">
       <h2>实时日志</h2>
-      <button class="btn-small" onclick="clearLog()">清空</button>
+      <div class="log-controls">
+        <input type="text" id="logFilter" class="filter-input" placeholder="按子串过滤（provider/状态/模型...）" autocomplete="off">
+        <button class="btn-small" id="pauseBtn" onclick="togglePause()">暂停</button>
+        <button class="btn-small" onclick="clearLog()">清空</button>
+      </div>
     </div>
     <div class="log-container" id="log-container"></div>
   </section>

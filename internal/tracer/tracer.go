@@ -11,7 +11,8 @@ import (
 
 type Recorder struct {
 	mu           sync.Mutex
-	logWriter    io.Writer
+	logWriter    io.Writer // combined writer (file + SSE)
+	fileWriter   io.Writer // file-only writer (full request bodies land here, never SSE)
 	model        string
 	format       string
 	startTime    time.Time
@@ -20,15 +21,22 @@ type Recorder struct {
 	resultRR     int
 }
 
-func New(model, format string, logWriter io.Writer) *Recorder {
+// New builds a Recorder. logWriter receives every log line (file + SSE).
+// fileWriter is the file-only sink used for full request bodies so that large
+// bodies are persisted without flooding the live SSE log stream.
+func New(model, format string, logWriter, fileWriter io.Writer) *Recorder {
 	if logWriter == nil {
 		logWriter = os.Stdout
 	}
+	if fileWriter == nil {
+		fileWriter = logWriter
+	}
 	return &Recorder{
-		model:     model,
-		format:    format,
-		startTime: time.Now(),
-		logWriter: logWriter,
+		model:      model,
+		format:     format,
+		startTime:  time.Now(),
+		logWriter:  logWriter,
+		fileWriter: fileWriter,
 	}
 }
 
@@ -40,20 +48,26 @@ func timestamp() string {
 // is rendered:
 //   "off"     — body omitted entirely
 //   "snippet" — body is a short single-line snippet (printed as msg=<snippet>)
-//   "full"    — body is the full pretty-printed request structure, printed on
-//               subsequent lines after the REQUEST header
+//   "full"    — the full pretty-printed request structure is written to the
+//               file-only sink (NOT the SSE stream, to avoid flooding the live
+//               console with potentially huge bodies). The SSE/header line gets
+//               a placeholder so the live console still shows a request arrived.
 func (r *Recorder) LogRequest(method, path, level, body string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	header := fmt.Sprintf("[%s] REQUEST  | %s %s | model=%s | format=%s",
+	// Prefix is "INBOUND" to distinguish from the gin access log's "REQUEST" line.
+	header := fmt.Sprintf("[%s] INBOUND  | %s %s | model=%s | format=%s",
 		timestamp(), method, path, r.model, r.format)
 
 	switch level {
 	case "off":
 		fmt.Fprintf(r.logWriter, "%s\n", header)
 	case "full":
-		fmt.Fprintf(r.logWriter, "%s | body:\n%s\n", header, body)
+		// Header + placeholder go to the combined stream (visible live).
+		fmt.Fprintf(r.logWriter, "%s | body=<full logged to file>\n", header)
+		// The full body goes to the file only — never the SSE stream.
+		fmt.Fprintf(r.fileWriter, "%s | body:\n%s\n", header, body)
 	default: // "snippet"
 		fmt.Fprintf(r.logWriter, "%s | msg=%s\n", header, body)
 	}

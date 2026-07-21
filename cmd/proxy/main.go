@@ -65,6 +65,9 @@ func main() {
 	// Stop config watcher goroutine
 	srv.StopWatcher()
 
+	// Flush stats to disk
+	srv.SaveStats()
+
 	// Close log rotator
 	if srv.Rot != nil {
 		srv.Rot.Close()

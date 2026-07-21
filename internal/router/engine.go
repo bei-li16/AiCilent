@@ -65,12 +65,16 @@ type Engine struct {
 	fileMu sync.Mutex
 
 	logWriter io.Writer
+	fileWriter io.Writer
 	stats     *stats.Collector
 }
 
-func NewEngine(cfg *config.Config, configPath string, logWriter io.Writer, stats *stats.Collector) *Engine {
+func NewEngine(cfg *config.Config, configPath string, logWriter, fileWriter io.Writer, stats *stats.Collector) *Engine {
 	if logWriter == nil {
 		logWriter = os.Stdout
+	}
+	if fileWriter == nil {
+		fileWriter = logWriter
 	}
 
 	rl := make(map[string]*ratelimit.TokenBucket, len(cfg.Providers))
@@ -96,8 +100,9 @@ func NewEngine(cfg *config.Config, configPath string, logWriter io.Writer, stats
 			MaxIdleConnsPerHost: 10,
 			IdleConnTimeout:     90 * time.Second,
 		},
-		logWriter: logWriter,
-		stats:    stats,
+		logWriter:  logWriter,
+		fileWriter: fileWriter,
+		stats:      stats,
 	}
 	e.loadCBState()
 	return e
@@ -229,7 +234,7 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 
 	streaming := hasStream(body)
 
-	tr := tracer.New(modelName, requestFormat, e.logWriter)
+	tr := tracer.New(modelName, requestFormat, e.logWriter, e.fileWriter)
 
 	// Request-body log level is read from config (off|snippet|full).
 	e.reloadMu.RLock()
@@ -261,6 +266,9 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no available provider"})
 		return
 	}
+	// Count this as one client-side request (distinct from upstream attempts,
+	// which include retries and cross-provider degradation).
+	e.stats.RecordClientRequest()
 
 	{
 		names := make([]string, len(providers))
@@ -352,7 +360,7 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 				latency := time.Since(start)
 
 				if fwdErr == nil {
-					e.stats.Record(provider.Name, provider.ModelID, priority, true)
+					e.stats.Record(provider.Name, provider.ModelID, priority, true, http.StatusOK, "", latency)
 					tr.LogAttempt(provider.Name, priority, attempt, maxRetries+1, true, "", latency)
 					e.closeCircuitBreaker(priority, modelName, tr,
 			cfg.Global.CBThreshold, cfg.Global.CBCooldown, cfg.Global.CBSkipRequests)
@@ -364,7 +372,8 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 					break
 				}
 
-				e.stats.Record(provider.Name, provider.ModelID, priority, false)
+				statusCode, errMsg := errorDetail(fwdErr)
+				e.stats.Record(provider.Name, provider.ModelID, priority, false, statusCode, errMsg, latency)
 					tr.LogAttempt(provider.Name, priority, attempt, maxRetries+1, false, fwdErr.Error(), latency)
 				lastErr = fwdErr
 
@@ -1020,6 +1029,71 @@ type cbStateJSON struct {
 	FailureCount     map[int]int    `json:"failure_count"`
 	SkipRemaining    map[int]int    `json:"skip_remaining"`
 	CircuitsOpen     map[int]string `json:"circuits_open"` // priority → RFC3339 timestamp
+}
+
+// errorDetail extracts an HTTP status code and message from a forwarding error.
+// Non-API errors (network/timeout) return statusCode=0 with the error string.
+func errorDetail(err error) (int, string) {
+	if err == nil {
+		return 0, ""
+	}
+	if apiErr, ok := err.(*adapter.APIError); ok {
+		return apiErr.StatusCode, apiErr.Message
+	}
+	return 0, err.Error()
+}
+
+// CBSnapshot returns a read-only view of every priority's circuit-breaker
+// state for the control console. It mirrors shouldSkipGroup's cooldown math
+// but never mutates state.
+func (e *Engine) CBSnapshot() []stats.CBState {
+	e.reloadMu.RLock()
+	cooldownSec := e.cfg.Global.CBCooldown
+	e.reloadMu.RUnlock()
+	cooldown := time.Duration(cooldownSec) * time.Second
+
+	e.cbMu.Lock()
+	defer e.cbMu.Unlock()
+
+	// Collect priorities seen across all CB maps.
+	seen := make(map[int]struct{})
+	for p := range e.failureCount {
+		seen[p] = struct{}{}
+	}
+	for p := range e.circuitOpenSince {
+		seen[p] = struct{}{}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+
+	out := make([]stats.CBState, 0, len(seen))
+	for p := range seen {
+		openSince := e.circuitOpenSince[p]
+		open := openSince != nil && *openSince != (time.Time{})
+		rem := 0
+		if open {
+			elapsed := time.Since(*openSince)
+			if left := cooldown - elapsed; left > 0 {
+				rem = int(left.Round(time.Second).Seconds())
+			}
+		}
+		out = append(out, stats.CBState{
+			Priority:       p,
+			Open:           open,
+			Failures:       e.failureCount[p],
+			CooldownSec:    cooldownSec,
+			CooldownRemSec: rem,
+			SkipRemaining:  e.skipRemaining[p],
+		})
+	}
+	// Sort by priority ascending for stable UI ordering.
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j-1].Priority > out[j].Priority; j-- {
+			out[j-1], out[j] = out[j], out[j-1]
+		}
+	}
+	return out
 }
 
 func (e *Engine) cbStatePath() string {

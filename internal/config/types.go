@@ -17,6 +17,10 @@ type GlobalConfig struct {
 	CBThreshold    int    `yaml:"cb_threshold" json:"cb_threshold"`
 	CBCooldown     int    `yaml:"cb_cooldown" json:"cb_cooldown"`
 	CBSkipRequests int    `yaml:"cb_skip_requests" json:"cb_skip_requests"`
+	// ControlAllowRemote 控制台启停开关 (/api/control) 是否允许远程访问。
+	// 默认 false：仅允许 loopback (127.0.0.1/::1) 调用，防止远程他人停掉代理。
+	// 设为 true 才允许任意来源（如需远程管理时开启）。
+	ControlAllowRemote bool `yaml:"control_allow_remote" json:"control_allow_remote"`
 }
 
 type RetryConfig struct {
