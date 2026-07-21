@@ -9,6 +9,11 @@ type Config struct {
 type GlobalConfig struct {
 	ListenAddr     string `yaml:"listen_addr" json:"listen_addr"`
 	LogFile        string `yaml:"log_file" json:"log_file"`
+	// LogRequestBody 控制请求内容日志级别：
+	//   "off"     不打印请求内容
+	//   "snippet" 仅打印 messages[0] 的前 80 字符（默认）
+	//   "full"   打印完整请求结构（model / messages / role / stream / tools 等全部字段）
+	LogRequestBody string `yaml:"log_request_body" json:"log_request_body"`
 	CBThreshold    int    `yaml:"cb_threshold" json:"cb_threshold"`
 	CBCooldown     int    `yaml:"cb_cooldown" json:"cb_cooldown"`
 	CBSkipRequests int    `yaml:"cb_skip_requests" json:"cb_skip_requests"`

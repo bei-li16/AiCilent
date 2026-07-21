@@ -128,9 +128,11 @@ func (e *Engine) StartWatcher(ctx context.Context, interval time.Duration) {
 				if fi.ModTime().After(lastMod) {
 					lastMod = fi.ModTime()
 					if err := e.reloadConfig(); err != nil {
-						fmt.Fprintf(e.logWriter, "[CONFIG] hot-reload failed: %v\n", err)
+						fmt.Fprintf(e.logWriter, "[%s] CONFIG   | hot-reload failed: %v\n",
+							time.Now().Format("2006-01-02 15:04:05.000"), err)
 					} else {
-						fmt.Fprintf(e.logWriter, "[CONFIG] hot-reloaded from %s\n", e.configPath)
+						fmt.Fprintf(e.logWriter, "[%s] CONFIG   | hot-reloaded from %s\n",
+							time.Now().Format("2006-01-02 15:04:05.000"), e.configPath)
 					}
 				}
 			case <-ctx.Done():
@@ -229,8 +231,14 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 
 	tr := tracer.New(modelName, requestFormat, e.logWriter)
 
-	bodySnippet := extractBodySnippet(body)
-	tr.LogRequest(c.Request.Method, c.Request.URL.Path, bodySnippet)
+	// Request-body log level is read from config (off|snippet|full).
+	e.reloadMu.RLock()
+	logLevel := e.cfg.Global.LogRequestBody
+	e.reloadMu.RUnlock()
+	if logLevel == "" {
+		logLevel = "snippet"
+	}
+	tr.LogRequest(c.Request.Method, c.Request.URL.Path, logLevel, buildRequestBodyLog(body, logLevel))
 
 	// Capture config pointer under read lock for consistency.
 	// Once captured, the pointed-to struct is never mutated by reloadConfig.
@@ -902,6 +910,25 @@ func extractModel(body []byte) string {
 		return model
 	}
 	return ""
+}
+
+// buildRequestBodyLog renders the request body for logging according to level:
+//   "off"     → "" (no content)
+//   "snippet" → first message's content, truncated to 80 chars
+//   "full"    → the entire request body, pretty-printed (model/messages/role/stream/tools/...)
+func buildRequestBodyLog(body []byte, level string) string {
+	switch level {
+	case "off":
+		return ""
+	case "full":
+		var pretty bytes.Buffer
+		if err := json.Indent(&pretty, body, "", "  "); err != nil {
+			return string(body) // fall back to raw if not valid JSON
+		}
+		return pretty.String()
+	default: // "snippet"
+		return extractBodySnippet(body)
+	}
 }
 
 func hasStream(body []byte) bool {

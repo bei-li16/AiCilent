@@ -36,12 +36,27 @@ func timestamp() string {
 	return time.Now().Format("2006-01-02 15:04:05.000")
 }
 
-func (r *Recorder) LogRequest(method, path string, bodySnippet string) {
+// LogRequest logs the inbound request line. The level controls how the body
+// is rendered:
+//   "off"     — body omitted entirely
+//   "snippet" — body is a short single-line snippet (printed as msg=<snippet>)
+//   "full"    — body is the full pretty-printed request structure, printed on
+//               subsequent lines after the REQUEST header
+func (r *Recorder) LogRequest(method, path, level, body string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	msg := fmt.Sprintf("[%s] REQUEST  | %s %s | model=%s | format=%s | msg=%s\n",
-		timestamp(), method, path, r.model, r.format, bodySnippet)
-	fmt.Fprint(r.logWriter, msg)
+
+	header := fmt.Sprintf("[%s] REQUEST  | %s %s | model=%s | format=%s",
+		timestamp(), method, path, r.model, r.format)
+
+	switch level {
+	case "off":
+		fmt.Fprintf(r.logWriter, "%s\n", header)
+	case "full":
+		fmt.Fprintf(r.logWriter, "%s | body:\n%s\n", header, body)
+	default: // "snippet"
+		fmt.Fprintf(r.logWriter, "%s | msg=%s\n", header, body)
+	}
 }
 
 func (r *Recorder) LogRoute(mode string, filter string, matched []string) {
