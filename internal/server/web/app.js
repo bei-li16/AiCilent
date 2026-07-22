@@ -77,7 +77,7 @@ function fetchStats() {
       }).join('');
 
       renderCB(data.cb || []);
-      renderChart(data.curves || []);
+      renderChart(data.curves || [], data.latency_curve || []);
     })
     .catch(() => {
       fetchFails++;
@@ -109,11 +109,13 @@ function escapeAttr(s) {
   return String(s).replace(/"/g, '&quot;').replace(/</g, '&lt;');
 }
 
-// renderChart draws the rolling-50 hit-rate curves as right-aligned SVG
-// polylines. Y axis 0–100%, X axis = most recent point at the right edge so
-// curves with different lengths align in time.
-function renderChart(curves) {
-  const W = 1000, H = 200, padTop = 8, padBottom = 8, padLeft = 4, padRight = 4;
+// renderChart draws the rolling-50 hit-rate curves plus a hit-latency curve
+// (seconds, right axis). All series are right-aligned: the most recent point
+// lands at the right edge so curves with different lengths align in time.
+//   - hit-rate: left axis 0–100%
+//   - latency:  right axis 0–maxLat seconds (only successful attempts)
+function renderChart(curves, latencyCurve) {
+  const W = 1000, H = 200, padTop = 8, padBottom = 8, padLeft = 4, padRight = 36;
   const plotH = H - padTop - padBottom;
   const plotW = W - padLeft - padRight;
 
@@ -121,6 +123,12 @@ function renderChart(curves) {
   let anyData = false;
   for (const c of curves) {
     if (c.points && c.points.length) { anyData = true; maxLen = Math.max(maxLen, c.points.length); }
+  }
+  let maxLat = 0;
+  if (latencyCurve && latencyCurve.length) {
+    anyData = true;
+    maxLen = Math.max(maxLen, latencyCurve.length);
+    for (const v of latencyCurve) { if (v > maxLat) maxLat = v; }
   }
   if (!anyData) {
     hitChart.innerHTML = '';
@@ -130,38 +138,60 @@ function renderChart(curves) {
   }
   chartEmpty.style.display = 'none';
 
-  // Right-align: last point of each series lands at x = plotW (right edge).
-  function xy(series) {
+  // Right-align a series of length n across the full width; map each value
+  // to a y coordinate via valY(v).
+  function xy(series, valY) {
     const n = series.length;
-    const start = maxLen - n; // index offset so the latest aligns to the right
+    const start = maxLen - n; // offset so the latest point aligns to the right edge
     const pts = [];
     for (let j = 0; j < n; j++) {
       const xi = padLeft + plotW * (start + j) / (maxLen - 1 || 1);
-      const yi = padTop + plotH - (series[j] / 100) * plotH;
+      const yi = valY(series[j]);
       pts.push(xi.toFixed(1) + ',' + yi.toFixed(1));
     }
     return pts.join(' ');
   }
+  const rateY = v => padTop + plotH - (v / 100) * plotH;
+  const latY = v => padTop + plotH - (maxLat > 0 ? (v / maxLat) * plotH : 0);
 
   let svg = '';
-  // Gridlines + Y labels at 0/50/100.
+  // Left-axis gridlines + labels (hit-rate %).
   for (const v of [0, 50, 100]) {
-    const y = padTop + plotH - (v / 100) * plotH;
+    const y = rateY(v);
     svg += `<line x1="${padLeft}" y1="${y}" x2="${W - padRight}" y2="${y}" stroke="#21262d" stroke-width="1"/>`;
     svg += `<text x="${padLeft + 2}" y="${y - 2}" fill="#8b949e" font-size="9">${v}%</text>`;
   }
-  // Curves.
+  // Right-axis labels (latency seconds): 0 / mid / max.
+  if (maxLat > 0) {
+    const latColor = '#d2a8ff';
+    for (const v of [0, maxLat / 2, maxLat]) {
+      const y = latY(v);
+      svg += `<text x="${W - padRight + 2}" y="${y + 3}" fill="${latColor}" font-size="9" text-anchor="start">${fmtSec(v)}</text>`;
+    }
+    svg += `<polyline points="${xy(latencyCurve, latY)}" fill="none" stroke="${latColor}" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="3 2"/>`;
+  }
+  // Hit-rate curves.
   for (const c of curves) {
     if (!c.points || !c.points.length) continue;
     const col = prioColor(c.priority);
-    svg += `<polyline points="${xy(c.points)}" fill="none" stroke="${col}" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>`;
+    svg += `<polyline points="${xy(c.points, rateY)}" fill="none" stroke="${col}" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>`;
   }
   hitChart.innerHTML = svg;
 
-  // Legend.
-  chartLegend.innerHTML = curves.filter(c => c.points && c.points.length).map(c =>
+  // Legend: hit-rate curves + latency.
+  let legend = curves.filter(c => c.points && c.points.length).map(c =>
     `<span class="legend-item"><span class="legend-dot" style="background:${prioColor(c.priority)}"></span>${prioLabel(c.priority)}</span>`
   ).join('');
+  if (maxLat > 0) {
+    legend += `<span class="legend-item"><span class="legend-dot dash" style="background:#d2a8ff"></span>命中耗时(s)</span>`;
+  }
+  chartLegend.innerHTML = legend;
+}
+
+function fmtSec(v) {
+  if (v <= 0) return '0s';
+  if (v < 10) return v.toFixed(1) + 's';
+  return v.toFixed(0) + 's';
 }
 
 let toggleBusy = false;

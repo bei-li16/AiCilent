@@ -2,7 +2,7 @@
 
 ## 1. 项目概述
 
-构建一个轻量级 AI 请求转发网关，统一管理多个 AI 供应商（当前实际使用：腾讯云 sensenova），提供单一入口供本地 Agent 工具（OpenCode、Claude Desktop、OpenClaw 等）接入。核心能力包括**优先级路由**、**故障转移**、**指数退避重试**（含 429 限流重试）、**断路器保护**（状态持久化、原子写入）、**SSE 流式传输**（3min 硬超时 + idleTimeoutReader + 中途错误事件注入）、**OpenAI ↔ Anthropic 协议自动转换**（含 tool_use/tool_calls/thinking，通用 JSON map 保留未知字段），以及**监控面板**（含命中率曲线、熔断器状态条、连续失败/错误类型/平均延迟列）、**实时日志 SSE**（含子串过滤、离线指示）、**请求内容日志分级**（`log_request_body`：off/snippet/full，full 仅落盘不进 SSE）、**统计持久化**（`.stats.json`）、**启用/停用控制**（loopback 鉴权）、**请求限流**（per-provider Token Bucket）、**日志自动轮转**、**配置热加载**、**版本号注入**。
+构建一个轻量级 AI 请求转发网关，统一管理多个 AI 供应商（当前实际使用：腾讯云 sensenova），提供单一入口供本地 Agent 工具（OpenCode、Claude Desktop、OpenClaw 等）接入。核心能力包括**优先级路由**、**故障转移**、**指数退避重试**（含 429 限流重试）、**断路器保护**（状态持久化、原子写入）、**SSE 流式传输**（3min 硬超时 + idleTimeoutReader + 中途错误事件注入）、**OpenAI ↔ Anthropic 协议自动转换**（含 tool_use/tool_calls/thinking，通用 JSON map 保留未知字段），以及**监控面板**（含命中率/命中耗时曲线、熔断器状态条、连续失败/错误类型/平均延迟列）、**实时日志 SSE**（含子串过滤、离线指示）、**请求内容日志分级**（`log_request_body`：off/snippet/full，full 仅落盘不进 SSE）、**统计持久化**（`.stats.json`）、**启用/停用控制**（loopback 鉴权）、**请求限流**（per-provider Token Bucket）、**日志自动轮转**、**配置热加载**、**版本号注入**。
 
 ### 关键设计原则
 
@@ -504,14 +504,20 @@ type Collector struct {
     running       atomic.Bool
     overallWin    rollingHit       // 全局滚动 50 窗口
     prioWin       map[int]*rollingHit // per-priority 滚动窗口
-    overallSeries []float64        // 全局曲线点序列（≤240）
-    prioSeries    map[int][]float64 // per-priority 曲线序列
+    overallSeries []float64        // 全局命中率曲线点序列（≤240）
+    prioSeries    map[int][]float64 // per-priority 命中率曲线序列
+    latencySeries []float64        // 命中耗时曲线序列（秒，≤240，仅成功记录）
 }
+
+// Snapshot 额外字段：
+//   CB   []CBState        — per-priority 熔断快照
+//   Curves []HitRateCurve — 命中率曲线（priority 0 在前）
+//   LatencyCurve []float64 — 命中耗时曲线（秒）
 ```
 
-- `Record(name, modelID, priority, success, statusCode, errMsg, latency)` — 每次 provider 尝试后调用；分类错误、维护连续失败、累计延迟，并 push 进对应滚动窗口/曲线序列
+- `Record(name, modelID, priority, success, statusCode, errMsg, latency)` — 每次 provider 尝试后调用；分类错误、维护连续失败、累计延迟，并 push 进对应滚动窗口/曲线序列；成功时额外把 `latency.Seconds()` 记入 `latencySeries`
 - `RecordClientRequest()` — 每入站请求一次（engine 在确认有可用 provider 后调用）
-- `Snapshot()` — 返回 providers 统计、全局汇总（含 total_client_req）、运行状态、运行时间、`CB`、`Curves`
+- `Snapshot()` — 返回 providers 统计、全局汇总（含 total_client_req）、运行状态、运行时间、`CB`、`Curves`、`LatencyCurve`；曲线/耗时序列在 `c.mu` 锁内浅拷贝（避免与 Record 的并发写竞争）
 - `ClassifyError(statusCode, msg)` — 429→tpm_limit/rpm_exhausted/plan_exhausted、404→not_found、401/403→auth_error、408/504→timeout、≥500→upstream_error、0→network_error
 - `SetRunning(v)` / `IsRunning()` — atomic.Bool 控制代理开关
 - `Save()` / `load()` / `StartAutoSave(stop, interval)` — 持久化到 `.stats.json`（仅累计计数；连续性/窗口/曲线为运行态，重启归零）
@@ -536,11 +542,11 @@ func (h *Hub) ServeHTTP(w, r)               // SSE 端点，每客户端一个 g
 ### 9.4 前端（internal/server/web/）
 
 - 通过 `//go:embed web/*` 编译进二进制，无需外部静态文件
-- `index.html` 面板顺序：标题栏（实时连接徽标 + 状态 + 开关 + 运行时间）→ 汇总卡片（客户端请求/上游尝试/成功/失败/成功率）→ **命中率曲线**（SVG 多折线）→ **熔断器状态条** → 供应商表格（连续失败/平均延迟/最近错误列）→ 实时日志区（过滤输入框 + 暂停/清空）
+- `index.html` 面板顺序：标题栏（实时连接徽标 + 状态 + 开关 + 运行时间）→ 汇总卡片（客户端请求/上游尝试/成功/失败/成功率）→ **命中率/命中耗时曲线**（SVG 双 Y 轴：左命中率%、右耗时秒）→ **熔断器状态条** → 供应商表格（连续失败/平均延迟/最近错误列）→ 实时日志区（过滤输入框 + 暂停/清空）
 - `style.css`：深色主题，优先级色码（P1 橙/P2 蓝/P3 灰），成功率三色阈值，CB 状态条/曲线图例/徽标三态
 - `app.js`：
-  - `fetchStats()`：每 2s `GET /api/stats` 更新汇总卡片、供应商表格、CB 状态条、命中率曲线
-  - `renderChart(curves)`：SVG 多折线，右对齐（最新点对到右边缘），Y 轴 0/50/100%
+  - `fetchStats()`：每 2s `GET /api/stats` 更新汇总卡片、供应商表格、CB 状态条、曲线面板
+  - `renderChart(curves, latencyCurve)`：同一 SVG 双 Y 轴——左轴命中率 0/50/100%（实线，各优先级+全部），右轴命中耗时秒（紫色虚线，自动缩放到 maxLat，右边缘标 0/mid/max 秒）；所有序列右对齐
   - `toggleProxy()`：乐观更新 UI + 失败回退 + 防抖
   - `EventSource('/api/logs')`：SSE 实时日志，颜色编码（绿=OK、红=FAIL、蓝=INBOUND/CB/QUEUE/ROUTER、灰=ACCESS/SUMMARY），`onopen/onerror` 驱动实时徽标
   - 日志子串过滤（大小写不敏感，存量+新行）+ 暂停冻结 + 500 行 DOM 上限自动滚动
@@ -559,7 +565,7 @@ func (h *Hub) ServeHTTP(w, r)               // SSE 端点，每客户端一个 g
 | `GET` | `/` | Dashboard 页面（嵌入 HTML） | Logger / DetectFormat 均执行 |
 | `GET` | `/style.css` | Dashboard 样式表 | 同上 |
 | `GET` | `/app.js` | Dashboard JavaScript | 同上 |
-| `GET` | `/api/stats` | 统计快照 JSON（每 2s 轮询）：providers + 全局汇总(含 total_client_req) + `cb`(熔断快照) + `curves`(命中率曲线) | `/api/` 路径：Logger 不记录、DetectFormat 不解析 body |
+| `GET` | `/api/stats` | 统计快照 JSON（每 2s 轮询）：providers + 全局汇总(含 total_client_req) + `cb`(熔断快照) + `curves`(命中率曲线) + `latency_curve`(命中耗时秒) | `/api/` 路径：Logger 不记录、DetectFormat 不解析 body |
 | `GET` | `/api/logs` | SSE 实时日志流（combined writer：短行；full body 不进此流） | 同上 |
 | `POST` | `/api/control` | 启用/停用代理 `{"running":bool}`；`control_allow_remote=false` 时仅 loopback 可调用（403 拒绝远程） | 同上 |
 
@@ -857,7 +863,7 @@ ai-proxy.exe --config config/providers.yaml
 启动后在浏览器访问 `http://<host>:8080/`：
 - 顶部：实时连接徽标 + 代理运行状态 + 启用/停用开关 + 运行时间
 - 汇总卡片：客户端请求 / 上游尝试 / 成功 / 失败 / 成功率
-- 命中率曲线：滚动 50 次平均成功率，全部 + 各优先级多曲线（右对齐）
+- 命中率/命中耗时曲线：滚动 50 次平均成功率（左轴%）+ 命中耗时秒（右轴，紫虚线），全部 + 各优先级多曲线（右对齐）
 - 熔断器状态条：每优先级 open/正常 + 剩余冷却
 - 供应商表格：尝试/成功/失败/成功率/连续失败/平均延迟/最近错误类型
 - 实时日志：SSE 流式日志（子串过滤 + 暂停 + 离线指示），自动更新
@@ -1202,14 +1208,18 @@ model: Flash
 - **问题**：stats 只有计数无延迟，选优先级最该看延迟却看不到。
 - **修复**：`Record` 带 `latency time.Duration`（engine 在 `latency := time.Since(start)` 后传入）。`ProviderStats` 增 `LatencySumMs`/`LatencyCount`/`LatencyAvgMs`/`LastLatencyMs`。前端表格加"平均延迟"列，`fmtLatency` 自适应 ms/s。
 
-### 22.10 [FEATURE] 命中率曲线（滚动 50 次平均）
-- **需求**：在"请求数面板之后、供应商统计之前"加命中率曲线；每个点=当前请求往前 50 次命中情况的平均数，不足有多少算多少；包含每个优先级一条 + 全部请求一条。
-- **实现**：
+### 22.10 [FEATURE] 命中率曲线 + 命中耗时曲线（滚动 50 次平均）
+- **需求**：在"请求数面板之后、供应商统计之前"加曲线面板；命中率每个点=当前请求往前 50 次命中情况的平均数，不足有多少算多少；包含每个优先级一条 + 全部请求一条。后追加"命中耗时"曲线（秒，右侧轴，与命中率曲线同图）。
+- **命中率曲线实现**：
   - stats 包：`HitRateCurve{Priority int(0=全部), Points []float64}`，常量 `hitWindowSize=50`/`hitSeriesCap=240`。`rollingHit` 固定 50 槽环形缓冲 + O(1) 成功计数 → `rate()` 即"最近 50 次成功率"（分母为实际长度，不足 50 按实际算）。`pushSeries` 满 240 后左移覆写（有界数组，无泄漏）。
   - `Collector` 增 `overallWin`/`prioWin map`/`overallSeries`/`prioSeries map`。`Record()` 末尾在 `c.mu` 下 push 进对应优先级窗口 + 全局窗口，把当前 rolling-50 成功率作为一点追加进对应序列。
   - `Snapshot.Curves`：Priority 0(全部) 在前，其余按优先级升序；序列浅拷贝返回避免竞态。
-  - 前端 `renderChart(curves)`：SVG 多折线，Y 轴 0/50/100% 网格，**右对齐**（各曲线最新点都对到右边缘，不同点数在时间上对齐），颜色与优先级表一致（全部=绿、P1=橙、P2=蓝、P3=灰），动态图例。接入 `fetchStats` 2s 轮询。
-- **粒度说明**：点按"上游尝试"粒度（含重试/降级），因成功/失败只在 `Record` 时可知，且能反映重试导致的抖动。曲线不持久化，重启后从空开始随新请求建立。
+- **命中耗时曲线实现**（后增）：
+  - stats：`Snapshot.LatencyCurve []float64`（秒）+ `Collector.latencySeries []float64`（≤240）。`Record()` 仅在 `success=true`（命中）时把 `latency.Seconds()` 作为一点追加进 `latencySeries`（失败/重试不记）。
+  - 前端 `renderChart(curves, latencyCurve)`：同一 SVG 内**双 Y 轴**——左轴命中率 0/50/100%（实线，各优先级 + 全部，颜色同表格 P1 橙/P2 蓝/P3 灰/全部 绿），右轴命中耗时秒（**紫色虚线** `#d2a8ff` + `stroke-dasharray`），右轴自动缩放到序列最大值 `maxLat`，右边缘标 0/mid/max 秒（`fmtSec`）。所有序列右对齐（最新点对到右边缘）。图例加"命中耗时(s)"。`padRight` 增到 36 给右轴标签留位。
+  - 数据自洽：`latency_curve` 点数 = `total_success`；末点秒值与 `PROVIDER ... OK | Xs` 日志、`last_latency_ms` 三处一致。
+- **粒度说明**：点按"上游尝试"粒度（含重试/降级），因成功/失败只在 `Record` 时可知，且能反映重试导致的抖动。命中率曲线与耗时曲线均不持久化，重启后从空开始随新请求建立（耗时曲线仅随成功逐步建立，初期点稀疏属正常）。
+- **实测**：Max 模式只路由 P1，故 P1 曲线与"全部"曲线重合（非 bug）；切 Flash/Medium 后 P2/P3 曲线分叉。
 
 ### 22.11 [FEATURE] 日志面板过滤/搜索
 - **实现**：前端日志头加过滤输入框 + 暂停/清空按钮。客户端子串过滤（大小写不敏感），对存量行 `display` 切换 + 对新到达行按当前过滤词预先 `display:none`。新增"暂停"按钮冻结追加（`paused` 标志）。
@@ -1230,6 +1240,10 @@ model: Flash
 ### 22.15 配置/数据文件变更汇总
 - `config/providers.yaml`（gitignored）：`global` 段新增 `log_request_body: snippet` 与 `control_allow_remote: false`。供应商由 8 个扩展到 24 个（12 openai + 12 anthropic，3 个 API Key，新增 `sensenovalyh2-*` 一组覆盖 P1/P2/P3 两种格式）。
 - 新增运行态文件 `.stats.json`（与 `.cb_state.json` 同目录，gitignored）。
+
+### 22.16 [BUG] Snapshot 读曲线序列的数据竞争（collector.go）
+- **问题**：`Snapshot()` 在释放 `c.mu` 后才读 `c.overallSeries`/`c.prioSeries` 构建曲线，而 `Record()` 在锁内写这些切片——`go test -race` 下会报 data race，且 `fetchStats` 轮询与请求处理并发时可能读到半写状态。
+- **修复**：把曲线序列构建（含命中率曲线、命中耗时序列）整体移进 `c.mu` 锁内，浅拷贝出 `latencyCurve`/`curves` 后再 unlock；全局 atomic 计数器的读取仍在锁外（无共享状态）。`.cb_state.json` 的 `captureCBState` 已是同样"锁内捕获快照、锁外使用"模式，此处对齐。
 
 ---
 
