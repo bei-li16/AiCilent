@@ -1,5 +1,6 @@
 # Binaries
 *.exe
+!ai-proxy.exe
 *.exe~
 *.dll
 *.so
