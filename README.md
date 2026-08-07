@@ -246,17 +246,70 @@ providers:
 
 ### 树莓派（Linux ARM64）
 
+#### 1. 交叉编译
+
 ```bash
-# 交叉编译
 make build-linux-arm64
-
-# 上传到树莓派
-scp ai-proxy-linux-arm64 pi@raspberrypi:~/ai-proxy
-scp config/providers.yaml pi@raspberrypi:~/config/providers.yaml
-
-# 运行（或配置 systemd 自启）
-~/ai-proxy --config ~/config/providers.yaml
 ```
+
+#### 2. 上传到树莓派
+
+```bash
+scp ai-proxy-linux-arm64 pi@raspberrypi:~/ai-proxy
+scp config/providers.yaml    pi@raspberrypi:~/config/providers.yaml
+ssh pi@raspberrypi 'chmod +x ~/ai-proxy'
+```
+
+#### 3. 配置 systemd 服务
+
+> 不配置 systemd 时直接在 SSH 终端运行 `~/ai-proxy`，关闭 SSH 后进程会被 `SIGHUP` 杀掉。systemd 可实现开机自启、断连不挂、崩溃自动重启。
+
+创建服务文件：
+
+```bash
+sudo nano /etc/systemd/system/ai-proxy.service
+```
+
+写入以下内容：
+
+```ini
+[Unit]
+Description=AI Proxy — AI 请求转发平台
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi
+ExecStart=/home/pi/ai-proxy --config /home/pi/config/providers.yaml
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+```
+
+#### 4. 启用并启动
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now ai-proxy    # 开机自启 + 立即启动
+sudo systemctl status ai-proxy          # 查看运行状态
+curl http://localhost:8080/health       # 验证服务
+```
+
+#### 5. 日常管理
+
+```bash
+sudo systemctl restart ai-proxy         # 重启（更新二进制后）
+sudo systemctl stop ai-proxy            # 停止
+sudo systemctl start ai-proxy           # 启动
+journalctl -u ai-proxy -f               # 查看实时日志
+```
+
+#### 6. 客户端配置
+
+局域网其他设备将 `base_url` 指向 `http://<树莓派IP>:8080`（如 `http://192.168.1.5:8080`）。`listen_addr: ":8080"` 默认绑定所有网卡，无需额外配置。
 
 > 如需从局域网其他设备通过监控面板控制代理启停，需将 `global.control_allow_remote` 设为 `true`，否则 `/api/control` 仅允许本机访问。
 
