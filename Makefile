@@ -1,19 +1,27 @@
-.PHONY: build run clean test vet
+.PHONY: build build-cli build-gui run clean test vet
 
 APP_NAME = ai-proxy
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "unknown")
 LDFLAGS  = -ldflags "-X ai-proxy/internal/version.Version=$(VERSION) -X ai-proxy/internal/version.Commit=$(COMMIT) -X ai-proxy/internal/version.BuildDate=$(DATE)"
+GUI_LDFLAGS = -ldflags "-H=windowsgui -X ai-proxy/internal/version.Version=$(VERSION) -X ai-proxy/internal/version.Commit=$(COMMIT) -X ai-proxy/internal/version.BuildDate=$(DATE)"
 
-build:
+# CLI build — pure Go, no CGO, no GUI dependencies
+build: build-cli
+build-cli:
 	go build $(LDFLAGS) -o $(APP_NAME).exe ./cmd/proxy/
+
+# GUI build — requires CGO + Fyne (Windows: needs MinGW-w64)
+build-gui:
+	go build $(GUI_LDFLAGS) -tags gui -o $(APP_NAME)-gui.exe ./cmd/launcher/
 
 run:
 	go run $(LDFLAGS) ./cmd/proxy/ --config config/providers.yaml
 
 clean:
 	rm -f $(APP_NAME).exe
+	rm -f $(APP_NAME)-gui.exe
 	rm -f $(APP_NAME)-linux
 	rm -f $(APP_NAME)-macos
 	rm -f $(APP_NAME)-macos-arm64

@@ -1,6 +1,6 @@
 # AI Proxy — AI 请求转发平台
 
-统一管理多个 AI 供应商，提供单一入口供 OpenCode、Claude Desktop、OpenClaw 等 Agent 工具接入。支持优先级路由、故障转移、指数退避重试（含 429 限流重试）、断路器保护（状态持久化）、SSE 流式传输、OpenAI ↔ Anthropic 协议自动转换（含 tool_use/tool_calls/thinking），以及内建监控面板、请求限流、日志轮转、配置热加载。
+统一管理多个 AI 供应商，提供单一入口供 OpenCode、Claude Desktop、OpenClaw 等 Agent 工具接入。支持优先级路由、故障转移、指数退避重试（含 429 限流重试）、断路器保护（状态持久化）、SSE 流式传输、OpenAI ↔ Anthropic 协议自动转换（含 tool_use/tool_calls/thinking），以及内建监控面板、GUI 启动器、请求限流、日志轮转、配置热加载。
 
 ---
 
@@ -9,16 +9,34 @@
 ### 编译
 
 ```bash
-# 推荐：使用 make（自动注入版本号、commit、build date）
-make build
-
+# CLI 版本（纯 Go，无 CGO 依赖）
+make build-cli
 # 或手动编译（版本号显示为 dev）
 go build -o ai-proxy.exe ./cmd/proxy/
+
+# GUI 版本（需要 CGO + MinGW-w64，Windows 下需安装 GCC）
+make build-gui
+# 或手动编译
+go build -ldflags "-H=windowsgui" -tags gui -o ai-proxy-gui.exe ./cmd/launcher/
 ```
+
+| 产物 | 说明 | 大小 |
+|------|------|------|
+| `ai-proxy.exe` | CLI 版本，命令行启动，适合服务器/无头环境 | ~13 MB |
+| `ai-proxy-gui.exe` | GUI 版本，含系统托盘、配置编辑器、实时日志，适合桌面 | ~59 MB |
 
 ### 配置
 
-复制 `config/providers.example.yaml` 为 `config/providers.yaml`，填入 API Key：
+GUI 版本可直接发布单个 `ai-proxy-gui.exe`。首次启动会以 exe 所在目录为根目录自动创建：
+
+```text
+config/providers.yaml
+proxy.log
+```
+
+默认配置已嵌入 exe；首次启动后通过“编辑配置”填写供应商 API Key。升级启动时，GUI 会为已有 YAML 补充新版本缺失的配置字段，但不会覆盖已有供应商、API Key 或已明确设置的值。日志路径也不依赖启动时的工作目录。
+
+CLI 版本仍需复制 `config/providers.example.yaml` 为 `config/providers.yaml`，填入 API Key：
 
 ```yaml
 global:
@@ -62,6 +80,72 @@ ai-proxy.exe --version    # 查看版本信息
 也可直接填真实模型名（如 `gpt-4o`），通过 `model_routes` 映射到指定供应商。
 
 ---
+
+## GUI 启动器
+
+`ai-proxy-gui.exe` 提供完整的桌面图形管理界面，无需命令行即可控制代理服务。基于 [Fyne](https://fyne.io) v2.8 构建。
+
+### 启动
+
+双击 `ai-proxy-gui.exe` 即可。程序启动后：
+
+- 自动在 exe 所在目录下创建 `config/providers.yaml`（首次运行）或迁移旧配置（升级）
+- 自动启动代理服务并最小化到系统托盘
+- 关闭窗口不会退出程序，仅隐藏到托盘；右键托盘菜单选择"退出"才会停止服务
+
+### 主界面
+
+```
+┌─────────────────────────────────────────┐
+│ ● 运行中   监听 :8080   已运行 2h 15m   3 个供应商 │
+├─────────────────────────────────────────┤
+│ [▶ 启动] [⏹ 停止] [↻ 重启] [📊 打开面板] [⚙ 编辑配置] │
+├─────────────────────────────────────────┤
+│ 快速设置                                  │
+│  监听地址: [:8080        ]   日志级别: [snippet▼]    │
+│  远程控制: [☑]              熔断阈值: [2         ]   │
+│  冷却(秒): [30        ]     探测请求: [10        ]   │
+│  默认路由: [sensenova-glm-5.2▼]                      │
+│  [保存并重启]                                         │
+├─────────────────────────────────────────┤
+│ 最近日志                    [☑ 自动跟随] [清空]     │
+│ ┌─────────────────────────────────────┐ │
+│ │ [reqID] 200 ← sensenova-glm-5.2     │ │
+│ │ [reqID] 429 ← sensenovalyh (retry)  │ │
+│ │ ...                                  │ │
+│ └─────────────────────────────────────┘ │
+└─────────────────────────────────────────┘
+```
+
+| 区域 | 功能 |
+|------|------|
+| **状态栏** | 实时显示运行状态、监听地址、运行时长、供应商数量 |
+| **控制按钮** | 启动 / 停止 / 重启代理服务；打开浏览器监控面板；打开配置编辑器 |
+| **快速设置** | 修改监听地址、日志级别（off/snippet/full）、远程控制开关、断路器参数、默认路由目标，保存后自动重启 |
+| **日志窗口** | SSE 实时日志流（最近 200 行），支持自动跟随滚动和清空 |
+
+### 配置编辑器
+
+点击"⚙ 编辑配置"打开独立窗口，可可视化管理供应商：
+
+- **供应商列表**：显示每个供应商的优先级、名称、模型 ID、格式，支持编辑和删除
+- **添加/编辑表单**：填写名称、模型 ID、API Key、Base URL、格式（openai/anthropic）、优先级、超时
+- **保存并重启**：写入 `config/providers.yaml` 并立即重启服务
+- **打开 YAML**：用系统记事本直接编辑原始 YAML 文件
+
+### 系统托盘
+
+GUI 版本在系统托盘显示图标，右键菜单：
+
+- 启动 / 停止 / 重启服务
+- 打开监控面板 / 编辑配置
+- 显示窗口 / 退出
+
+### 首次运行与配置迁移
+
+- **首次运行**：以 exe 所在目录为根目录自动创建 `config/providers.yaml`，内嵌默认配置模板，弹出提示引导填写 API Key
+- **升级迁移**：检测到旧版配置缺少新字段时自动补充默认值（如 `default_format`、`log_file`、`auth_type`、`rate_limit` 等），不覆盖已有供应商和 API Key
+- **日志路径**：相对路径以 `config/providers.yaml` 所在目录为基准解析
 
 ## 架构概览
 
@@ -167,6 +251,7 @@ OPEN（熔断，请求直接跳过该组）
 - **汇总卡片** — 总请求 / 成功 / 失败 / 成功率
 - **供应商表格** — 按 priority 显示每个供应商的请求数、成功率
 - **实时日志** — SSE 流式日志，自动更新
+- **最近上游尝试** — 显示请求 ID、重试/降级结果和耗时，可与日志中的同一 ID 关联
 
 ---
 
@@ -180,6 +265,7 @@ OPEN（熔断，请求直接跳过该组）
 | `GET` | `/health` | 健康检查 `{"status":"ok"}` |
 | `GET` | `/` | 监控面板 |
 | `GET` | `/api/stats` | 统计快照 JSON |
+| `GET` | `/api/version` | 当前版本、commit 和编译时间 |
 | `GET` | `/api/logs` | SSE 实时日志流 |
 | `POST` | `/api/control` | 启用/停用代理 `{"running":bool}` |
 
@@ -208,6 +294,19 @@ model_routes:
     target: sensenova-glm-5.2
   - alias: default          # 特殊键：未匹配任何别名时的兜底
     target: deepseek-v4-flash
+```
+
+### model_rules（可选）
+
+按客户端模型名补充请求参数。已有字段不会被覆盖；`timeout` 是代理到上游的超时时间（秒），不会作为未知字段转发给上游：
+
+```yaml
+model_rules:
+  - model: gpt-4o
+    defaults:
+      temperature: 0.2
+      max_tokens: 4096
+      timeout: 45
 ```
 
 ### providers
@@ -316,10 +415,12 @@ journalctl -u ai-proxy -f               # 查看实时日志
 ### 跨平台编译
 
 ```bash
-make build-all          # 全平台
-make build-linux-arm64  # 树莓派
+make build-cli          # Windows CLI（= make build）
+make build-gui          # Windows GUI（需 CGO + GCC）
+make build-linux-arm64  # 树莓派 / Linux ARM64
 make build-linux        # Linux amd64
 make build-macos-arm64  # macOS Apple Silicon
+make build-all          # 全平台 CLI
 make build VERSION=v1.0.0  # 指定版本号
 ```
 

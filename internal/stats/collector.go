@@ -112,7 +112,21 @@ type Snapshot struct {
 	CB             []CBState       `json:"cb"`
 	Curves         []HitRateCurve  `json:"curves"`
 	LatencyCurve   []float64       `json:"latency_curve"` // 命中成功耗时序列（秒），每个点=一次成功尝试的耗时
+	RecentAttempts []AttemptStats  `json:"recent_attempts"`
 }
+
+type AttemptStats struct {
+	RequestID  string    `json:"request_id"`
+	Provider   string    `json:"provider"`
+	ModelID    string    `json:"model_id"`
+	Priority   int       `json:"priority"`
+	Success    bool      `json:"success"`
+	StatusCode int       `json:"status_code"`
+	LatencyMs  float64   `json:"latency_ms"`
+	Timestamp  time.Time `json:"timestamp"`
+}
+
+const recentAttemptsCap = 200
 
 type Collector struct {
 	mu           sync.Mutex
@@ -127,11 +141,12 @@ type Collector struct {
 	fileMu       sync.Mutex
 	// Hit-rate rolling windows (last hitWindowSize outcomes) + time series of
 	// rolling success rates. priority 0 = overall.
-	overallWin    rollingHit
-	prioWin       map[int]*rollingHit
-	overallSeries []float64
-	prioSeries    map[int][]float64
-	latencySeries []float64 // 成功命中耗时序列（秒，≤240）
+	overallWin     rollingHit
+	prioWin        map[int]*rollingHit
+	overallSeries  []float64
+	prioSeries     map[int][]float64
+	latencySeries  []float64 // 成功命中耗时序列（秒，≤240）
+	recentAttempts []AttemptStats
 }
 
 func New(statsPath string) *Collector {
@@ -177,7 +192,7 @@ func ClassifyError(statusCode int, msg string) string {
 // Record records one upstream attempt outcome (success or failure).
 // statusCode is the upstream HTTP status (0 for network errors); errMsg is the
 // raw error message (used to classify the failure type); latency is the attempt duration.
-func (c *Collector) Record(name string, modelID string, priority int, success bool, statusCode int, errMsg string, latency time.Duration) {
+func (c *Collector) Record(requestID, name, modelID string, priority int, success bool, statusCode int, errMsg string, latency time.Duration) {
 	c.mu.Lock()
 	ps, ok := c.providers[name]
 	if !ok {
@@ -209,6 +224,14 @@ func (c *Collector) Record(name string, modelID string, priority int, success bo
 	}
 	if ps.Total > 0 {
 		ps.Rate = float64(ps.Success) / float64(ps.Total) * 100
+	}
+	c.recentAttempts = append(c.recentAttempts, AttemptStats{
+		RequestID: requestID, Provider: name, ModelID: modelID, Priority: priority,
+		Success: success, StatusCode: statusCode, LatencyMs: latMs, Timestamp: time.Now(),
+	})
+	if len(c.recentAttempts) > recentAttemptsCap {
+		copy(c.recentAttempts, c.recentAttempts[len(c.recentAttempts)-recentAttemptsCap:])
+		c.recentAttempts = c.recentAttempts[:recentAttemptsCap]
 	}
 	c.mu.Unlock()
 
@@ -267,6 +290,7 @@ func (c *Collector) Snapshot() Snapshot {
 		curves = append(curves, HitRateCurve{Priority: p, Points: copySeries(c.prioSeries[p])})
 	}
 	latencyCurve := copySeries(c.latencySeries)
+	recentAttempts := append([]AttemptStats(nil), c.recentAttempts...)
 	c.mu.Unlock()
 
 	totalReq := c.totalReq.Load()
@@ -292,6 +316,7 @@ func (c *Collector) Snapshot() Snapshot {
 		Uptime:         uptime,
 		Curves:         curves,
 		LatencyCurve:   latencyCurve,
+		RecentAttempts: recentAttempts,
 	}
 }
 

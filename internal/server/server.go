@@ -16,6 +16,7 @@ import (
 	"ai-proxy/internal/router"
 	"ai-proxy/internal/sse"
 	"ai-proxy/internal/stats"
+	"ai-proxy/internal/version"
 
 	"github.com/gin-gonic/gin"
 )
@@ -25,10 +26,10 @@ var webFS embed.FS
 
 type Instance struct {
 	*gin.Engine
-	Rot             *rotator.Rotator
-	statsCollector  *stats.Collector
-	cancelCtx       context.CancelFunc
-	statsStop       chan struct{}
+	Rot            *rotator.Rotator
+	statsCollector *stats.Collector
+	cancelCtx      context.CancelFunc
+	statsStop      chan struct{}
 }
 
 // New creates and configures the Gin engine with all routes and middleware.
@@ -41,7 +42,7 @@ func New(cfg *config.Config, configPath string) *Instance {
 	// Two sinks:
 	//   fileW      — file only (rotator), used for full request bodies
 	//   combinedW  — file + live SSE console, used for every normal log line
-	rot := logWriter(cfg.Global.LogFile)
+	rot := logWriter(resolveLogPath(cfg.Global.LogFile, configPath))
 	var fileW io.Writer
 	if rot != nil {
 		fileW = rot
@@ -81,6 +82,13 @@ func New(cfg *config.Config, configPath string) *Instance {
 	r.GET("/", serveWeb("web/index.html", "text/html; charset=utf-8"))
 	r.GET("/style.css", serveWeb("web/style.css", "text/css; charset=utf-8"))
 	r.GET("/app.js", serveWeb("web/app.js", "application/javascript; charset=utf-8"))
+	r.GET("/api/version", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"version":    version.Version,
+			"commit":     version.Commit,
+			"build_date": version.BuildDate,
+		})
+	})
 
 	r.GET("/api/stats", func(c *gin.Context) {
 		snap := statsCollector.Snapshot()
@@ -166,6 +174,13 @@ func logWriter(path string) *rotator.Rotator {
 		return nil
 	}
 	return rotator.New(path, rotator.DefaultMaxSize, rotator.DefaultMaxBackups)
+}
+
+func resolveLogPath(logPath, configPath string) string {
+	if logPath == "" || filepath.IsAbs(logPath) || configPath == "" {
+		return logPath
+	}
+	return filepath.Join(filepath.Dir(configPath), logPath)
 }
 
 func statsFilePath(configPath string) string {

@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -50,11 +51,15 @@ type AnthropicUsage struct {
 }
 
 func CallAnthropicRaw(baseURL, apiKey, authType string, body []byte, timeout int, transport http.RoundTripper) ([]byte, error) {
-	return postAnthropic(baseURL+"/v1/messages", apiKey, authType, body, timeout, transport)
+	return CallAnthropicRawContext(context.Background(), baseURL, apiKey, authType, body, timeout, "", transport)
 }
 
-func postAnthropic(url, apiKey, authType string, body []byte, timeout int, transport http.RoundTripper) ([]byte, error) {
-	httpReq, err := http.NewRequest("POST", url, bytes.NewReader(body))
+func CallAnthropicRawContext(ctx context.Context, baseURL, apiKey, authType string, body []byte, timeout int, requestID string, transport http.RoundTripper) ([]byte, error) {
+	return postAnthropic(ctx, baseURL+"/v1/messages", apiKey, authType, body, timeout, requestID, transport)
+}
+
+func postAnthropic(ctx context.Context, url, apiKey, authType string, body []byte, timeout int, requestID string, transport http.RoundTripper) ([]byte, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -64,6 +69,9 @@ func postAnthropic(url, apiKey, authType string, body []byte, timeout int, trans
 	} else {
 		httpReq.Header.Set("x-api-key", apiKey)
 		httpReq.Header.Set("anthropic-version", "2023-06-01")
+	}
+	if requestID != "" {
+		httpReq.Header.Set("X-Request-ID", requestID)
 	}
 
 	client := &http.Client{

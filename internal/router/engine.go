@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,9 +34,9 @@ const maxStreamDuration = 3 * time.Minute
 const maxRequestBodySize = 10 << 20 // 10 MB
 
 type Engine struct {
-	cfg              *config.Config
-	configPath       string
-	matcher          *Matcher
+	cfg        *config.Config
+	configPath string
+	matcher    *Matcher
 
 	// Circuit breaker state (cbMu protects)
 	cbMu             sync.Mutex
@@ -44,19 +45,19 @@ type Engine struct {
 	skipRemaining    map[int]int
 
 	// Provider concurrency locks (providerMu protects)
-	providerMu       sync.Mutex
-	providerLocks    map[string]*sync.Mutex
+	providerMu    sync.Mutex
+	providerLocks map[string]*sync.Mutex
 
 	// Rate limiters (rlMu protects)
-	rlMu             sync.Mutex
-	rateLimiters     map[string]*ratelimit.TokenBucket
+	rlMu         sync.Mutex
+	rateLimiters map[string]*ratelimit.TokenBucket
 
 	// Round-robin index (rrMu protects)
-	rrMu             sync.Mutex
-	rrIndex          map[int]int
+	rrMu    sync.Mutex
+	rrIndex map[int]int
 
 	// Config reload guard
-	reloadMu         sync.RWMutex
+	reloadMu sync.RWMutex
 
 	// Shared HTTP transport for connection reuse
 	transport *http.Transport
@@ -64,9 +65,9 @@ type Engine struct {
 	// File write mutex for CB state persistence (prevents concurrent write corruption)
 	fileMu sync.Mutex
 
-	logWriter io.Writer
+	logWriter  io.Writer
 	fileWriter io.Writer
-	stats     *stats.Collector
+	stats      *stats.Collector
 }
 
 func NewEngine(cfg *config.Config, configPath string, logWriter, fileWriter io.Writer, stats *stats.Collector) *Engine {
@@ -146,7 +147,6 @@ func (e *Engine) StartWatcher(ctx context.Context, interval time.Duration) {
 		}
 	}()
 }
-
 
 func (e *Engine) reloadConfig() error {
 	cfg, err := config.Load(e.configPath)
@@ -231,10 +231,21 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot extract model from request"})
 		return
 	}
+	// Count every accepted client request, including requests that later fail
+	// because no provider matches the detected protocol.
+	e.stats.RecordClientRequest()
+
+	// Capture the immutable config snapshot before applying model rules. Reloads
+	// replace the config pointer, so reading it without this lock is a race.
+	e.reloadMu.RLock()
+	cfg := e.cfg
+	allProviders := e.getOrderedProviders(modelName)
+	body, modelTimeout := applyModelDefaults(body, modelName, cfg.ModelRules)
+	e.reloadMu.RUnlock()
 
 	streaming := hasStream(body)
 
-	tr := tracer.New(modelName, requestFormat, e.logWriter, e.fileWriter)
+	tr := tracer.New(modelName, requestFormat, middleware.GetReqID(c), e.logWriter, e.fileWriter)
 
 	// Request-body log level is read from config (off|snippet|full).
 	e.reloadMu.RLock()
@@ -244,13 +255,6 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 		logLevel = "snippet"
 	}
 	tr.LogRequest(c.Request.Method, c.Request.URL.Path, logLevel, buildRequestBodyLog(body, logLevel))
-
-	// Capture config pointer under read lock for consistency.
-	// Once captured, the pointed-to struct is never mutated by reloadConfig.
-	e.reloadMu.RLock()
-	allProviders := e.getOrderedProviders(modelName)
-	cfg := e.cfg
-	e.reloadMu.RUnlock()
 
 	// Filter to only same-format providers — no cross-format degradation.
 	// OpenAI requests route to OpenAI providers only; Anthropic to Anthropic.
@@ -266,10 +270,6 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no available provider"})
 		return
 	}
-	// Count this as one client-side request (distinct from upstream attempts,
-	// which include retries and cross-provider degradation).
-	e.stats.RecordClientRequest()
-
 	{
 		names := make([]string, len(providers))
 		for i, p := range providers {
@@ -313,7 +313,7 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 		}
 
 		if e.shouldSkipGroup(priority, modelName, tr,
-				cfg.Global.CBThreshold, cfg.Global.CBCooldown, cfg.Global.CBSkipRequests) {
+			cfg.Global.CBThreshold, cfg.Global.CBCooldown, cfg.Global.CBSkipRequests) {
 			tr.LogQueue(priority, "skipped (circuit breaker)", 0, len(group))
 			continue
 		}
@@ -352,18 +352,18 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 
 				var fwdErr error
 				if streaming {
-					fwdErr = e.forwardRequestStream(c, body, requestFormat, provider, tr)
+					fwdErr = e.forwardRequestStream(c, body, requestFormat, provider, effectiveTimeout(provider.Timeout, modelTimeout), tr)
 				} else {
-					fwdErr = e.forwardRequest(c, body, requestFormat, provider)
+					fwdErr = e.forwardRequest(c, body, requestFormat, provider, effectiveTimeout(provider.Timeout, modelTimeout), middleware.GetReqID(c))
 				}
 
 				latency := time.Since(start)
 
 				if fwdErr == nil {
-					e.stats.Record(provider.Name, provider.ModelID, priority, true, http.StatusOK, "", latency)
+					e.stats.Record(middleware.GetReqID(c), provider.Name, provider.ModelID, priority, true, http.StatusOK, "", latency)
 					tr.LogAttempt(provider.Name, priority, attempt, maxRetries+1, true, "", latency)
 					e.closeCircuitBreaker(priority, modelName, tr,
-			cfg.Global.CBThreshold, cfg.Global.CBCooldown, cfg.Global.CBSkipRequests)
+						cfg.Global.CBThreshold, cfg.Global.CBCooldown, cfg.Global.CBSkipRequests)
 					tr.LogResult(true, provider.Name, idx)
 					tr.LogQueue(priority, "released", idx, len(group))
 					e.releaseProvider(provider.Name)
@@ -373,8 +373,8 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 				}
 
 				statusCode, errMsg := errorDetail(fwdErr)
-				e.stats.Record(provider.Name, provider.ModelID, priority, false, statusCode, errMsg, latency)
-					tr.LogAttempt(provider.Name, priority, attempt, maxRetries+1, false, fwdErr.Error(), latency)
+				e.stats.Record(middleware.GetReqID(c), provider.Name, provider.ModelID, priority, false, statusCode, errMsg, latency)
+				tr.LogAttempt(provider.Name, priority, attempt, maxRetries+1, false, fwdErr.Error(), latency)
 				lastErr = fwdErr
 
 				if c.Writer.Written() {
@@ -382,7 +382,7 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 					tr.LogResult(false, provider.Name, idx)
 					e.releaseProvider(provider.Name)
 					e.recordGroupFailure(modelName, priority, tr,
-		cfg.Global.CBThreshold, cfg.Global.CBCooldown, cfg.Global.CBSkipRequests)
+						cfg.Global.CBThreshold, cfg.Global.CBCooldown, cfg.Global.CBSkipRequests)
 					fmt.Fprint(e.logWriter, tr.Dump())
 					completed = true
 					break
@@ -424,7 +424,7 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 		if !completed && !c.Writer.Written() {
 			tr.LogQueue(priority, "released (all failed)", startIdx, len(group))
 			e.recordGroupFailure(modelName, priority, tr,
-		cfg.Global.CBThreshold, cfg.Global.CBCooldown, cfg.Global.CBSkipRequests)
+				cfg.Global.CBThreshold, cfg.Global.CBCooldown, cfg.Global.CBSkipRequests)
 		}
 
 		if completed {
@@ -583,7 +583,7 @@ func (e *Engine) advanceRRIndex(priority, groupLen int) int {
 	return idx
 }
 
-func (e *Engine) forwardRequest(c *gin.Context, body []byte, requestFormat string, provider *config.Provider) error {
+func (e *Engine) forwardRequest(c *gin.Context, body []byte, requestFormat string, provider *config.Provider, timeout int, requestID string) error {
 	var respBody []byte
 	var err error
 
@@ -595,12 +595,12 @@ func (e *Engine) forwardRequest(c *gin.Context, body []byte, requestFormat strin
 		body = converted
 	}
 
-	body = setModelInBody(body, provider.ModelID)
+	body = prepareProviderRequest(body, provider)
 
 	if provider.Format == "openai" {
-		respBody, err = adapter.CallOpenAIRaw(provider.BaseURL, provider.APIKey, body, provider.Timeout, e.transport)
+		respBody, err = adapter.CallOpenAIRawContext(c.Request.Context(), provider.BaseURL, provider.APIKey, body, timeout, requestID, e.transport)
 	} else {
-		respBody, err = adapter.CallAnthropicRaw(provider.BaseURL, provider.APIKey, provider.AuthType, body, provider.Timeout, e.transport)
+		respBody, err = adapter.CallAnthropicRawContext(c.Request.Context(), provider.BaseURL, provider.APIKey, provider.AuthType, body, timeout, requestID, e.transport)
 	}
 
 	if err != nil {
@@ -618,7 +618,7 @@ func (e *Engine) forwardRequest(c *gin.Context, body []byte, requestFormat strin
 	return nil
 }
 
-func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat string, provider *config.Provider, tr *tracer.Recorder) error {
+func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat string, provider *config.Provider, timeout int, tr *tracer.Recorder) error {
 	if requestFormat != provider.Format {
 		converted, err := adapter.ConvertRequest(body, requestFormat, provider.Format)
 		if err != nil {
@@ -627,7 +627,7 @@ func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat
 		body = converted
 	}
 
-	body = setModelInBody(body, provider.ModelID)
+	body = prepareProviderRequest(body, provider)
 
 	path := "/chat/completions"
 	if provider.Format == "anthropic" {
@@ -646,6 +646,9 @@ func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat
 		return fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if requestID := middleware.GetReqID(c); requestID != "" {
+		httpReq.Header.Set("X-Request-ID", requestID)
+	}
 	if provider.Format == "openai" {
 		httpReq.Header.Set("Authorization", "Bearer "+provider.APIKey)
 	} else if provider.AuthType == "bearer" {
@@ -655,7 +658,7 @@ func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat
 		httpReq.Header.Set("anthropic-version", "2023-06-01")
 	}
 
-	respHeaderTimeout := time.Duration(provider.Timeout) * time.Second
+	respHeaderTimeout := time.Duration(timeout) * time.Second
 	if respHeaderTimeout > 30*time.Second {
 		respHeaderTimeout = 30 * time.Second // cap at 30s for header wait
 	}
@@ -684,8 +687,7 @@ func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat
 		c.Writer.WriteHeader(http.StatusOK)
 	}
 
-	timeout := time.Duration(provider.Timeout) * time.Second
-	idleReader := newIdleTimeoutReader(resp.Body, timeout)
+	idleReader := newIdleTimeoutReader(resp.Body, time.Duration(timeout)*time.Second)
 	defer idleReader.Close()
 
 	fw := &flushWriter{w: c.Writer}
@@ -910,6 +912,47 @@ func setModelInBody(body []byte, modelID string) []byte {
 	return modified
 }
 
+// prepareProviderRequest applies provider-specific compatibility adjustments
+// after any request-format conversion and model alias replacement.
+func prepareProviderRequest(body []byte, provider *config.Provider) []byte {
+	body = setModelInBody(body, provider.ModelID)
+	if provider.Format == "openai" && isSensenovaProvider(provider.BaseURL) {
+		body = normalizeSensenovaReasoning(body)
+	}
+	return body
+}
+
+func isSensenovaProvider(baseURL string) bool {
+	u, err := url.Parse(baseURL)
+	return err == nil && strings.EqualFold(u.Hostname(), "token.sensenova.cn")
+}
+
+// normalizeSensenovaReasoning adapts OpenAI-compatible reasoning parameters to
+// the Sensenova endpoint. It requires reasoning=true when reasoning_effort is
+// present and accepts max rather than the OpenAI-compatible xhigh value.
+func normalizeSensenovaReasoning(body []byte) []byte {
+	var data map[string]interface{}
+	if err := json.Unmarshal(body, &data); err != nil {
+		return body
+	}
+
+	effort, ok := data["reasoning_effort"].(string)
+	if !ok || strings.TrimSpace(effort) == "" {
+		return body
+	}
+	if strings.EqualFold(strings.TrimSpace(effort), "xhigh") {
+		data["reasoning_effort"] = "max"
+	}
+	// Sensenova rejects reasoning_effort unless reasoning mode is enabled.
+	data["reasoning"] = true
+
+	modified, err := json.Marshal(data)
+	if err != nil {
+		return body
+	}
+	return modified
+}
+
 func extractModel(body []byte) string {
 	var data map[string]interface{}
 	if err := json.Unmarshal(body, &data); err != nil {
@@ -921,10 +964,82 @@ func extractModel(body []byte) string {
 	return ""
 }
 
+func applyModelDefaults(body []byte, modelName string, rules []config.ModelRule) ([]byte, int) {
+	var rule *config.ModelRule
+	for i := range rules {
+		if rules[i].Model == modelName {
+			rule = &rules[i]
+			break
+		}
+	}
+	if rule == nil || len(rule.Defaults) == 0 {
+		return body, 0
+	}
+
+	var data map[string]interface{}
+	if err := json.Unmarshal(body, &data); err != nil {
+		return body, 0
+	}
+
+	changed := false
+	modelTimeout := 0
+	for k, v := range rule.Defaults {
+		if k == "timeout" {
+			if existing, ok := data[k]; ok {
+				if n, valid := configNumberAsInt(existing); valid && n > 0 {
+					modelTimeout = n
+				}
+			} else if n, ok := configNumberAsInt(v); ok && n > 0 {
+				modelTimeout = n
+			}
+			continue
+		}
+		if _, exists := data[k]; !exists {
+			data[k] = v
+			changed = true
+		}
+	}
+
+	if !changed {
+		return body, modelTimeout
+	}
+
+	modified, err := json.Marshal(data)
+	if err != nil {
+		return body, modelTimeout
+	}
+	return modified, modelTimeout
+}
+
+func configNumberAsInt(value interface{}) (int, bool) {
+	switch n := value.(type) {
+	case int:
+		return n, true
+	case int64:
+		return int(n), int64(int(n)) == n
+	case uint64:
+		return int(n), uint64(int(n)) == n
+	case float64:
+		return int(n), float64(int(n)) == n
+	case float32:
+		return int(n), float32(int(n)) == n
+	default:
+		return 0, false
+	}
+}
+
+func effectiveTimeout(providerTimeout, modelTimeout int) int {
+	if modelTimeout > 0 {
+		return modelTimeout
+	}
+	return providerTimeout
+}
+
 // buildRequestBodyLog renders the request body for logging according to level:
-//   "off"     → "" (no content)
-//   "snippet" → first message's content, truncated to 80 chars
-//   "full"    → the entire request body, pretty-printed (model/messages/role/stream/tools/...)
+//
+//	"off"     → "" (no content)
+//	"snippet" → first message's content, truncated to 80 chars
+//	"full"    → the entire request body, pretty-printed (model/messages/role/stream/tools/...)
 func buildRequestBodyLog(body []byte, level string) string {
 	switch level {
 	case "off":
@@ -1026,9 +1141,9 @@ func modeFilter(modelName string) string {
 
 // cbStateJSON is the on-disk format for circuit breaker state.
 type cbStateJSON struct {
-	FailureCount     map[int]int    `json:"failure_count"`
-	SkipRemaining    map[int]int    `json:"skip_remaining"`
-	CircuitsOpen     map[int]string `json:"circuits_open"` // priority → RFC3339 timestamp
+	FailureCount  map[int]int    `json:"failure_count"`
+	SkipRemaining map[int]int    `json:"skip_remaining"`
+	CircuitsOpen  map[int]string `json:"circuits_open"` // priority → RFC3339 timestamp
 }
 
 // errorDetail extracts an HTTP status code and message from a forwarding error.

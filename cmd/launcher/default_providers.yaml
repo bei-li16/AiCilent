@@ -1,0 +1,32 @@
+global:
+  listen_addr: ":8080"
+  default_format: openai
+  log_file: ../proxy.log
+  log_request_body: snippet
+  cb_threshold: 3
+  cb_cooldown: 10
+  cb_skip_requests: 1
+  control_allow_remote: false
+
+model_routes:
+  - alias: default
+    target: default
+
+providers:
+  - name: default
+    vendor: openai
+    model_id: gpt-4o
+    api_key: CHANGE_ME
+    base_url: https://api.openai.com/v1
+    priority: 1
+    format: openai
+    auth_type: bearer
+    timeout: 60
+    retry:
+      max_retries: 3
+      retry_interval: 2
+      backoff_factor: 2
+    rate_limit:
+      enabled: false
+      rpm: 60
+      burst: 10

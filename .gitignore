@@ -1,6 +1,7 @@
 # Binaries
 *.exe
 !ai-proxy.exe
+!ai-proxy-gui.exe
 *.exe~
 *.dll
 *.so
@@ -9,7 +10,6 @@
 *.out
 
 # Cross-compiled binaries
-ai-proxy-linux-arm64
 
 # Logs
 *.log
@@ -42,6 +42,9 @@ providers.json
 
 # Temp
 old/
+
+# Test
+test/
 
 # Runtime state (auto-generated)
 .cb_state.json

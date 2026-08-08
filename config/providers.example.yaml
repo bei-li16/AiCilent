@@ -17,6 +17,13 @@ model_routes:                    # 模型路由别名映射，将别名映射到
   - alias: default               # 默认路由，请求中模型不在路由表时使用
     target: deepseek-v4-flash
 
+model_rules:                      # 模型级默认请求参数（已有请求字段不会覆盖）
+  - model: gpt-4o
+    defaults:
+      temperature: 0.2
+      max_tokens: 4096
+      timeout: 45                  # 代理等待上游的超时时间，不会透传给上游
+
 providers:                       # 供应商列表，按优先级从高到低降级
 
   # ════════ OpenAI 格式示例 ════════

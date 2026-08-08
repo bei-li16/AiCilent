@@ -8,6 +8,7 @@ const totalRateEl = document.getElementById('totalRate');
 const statsBody = document.getElementById('stats-body');
 const logContainer = document.getElementById('log-container');
 const uptimeEl = document.getElementById('uptime');
+const buildInfoEl = document.getElementById('buildInfo');
 const liveBadge = document.getElementById('liveBadge');
 const cbContainer = document.getElementById('cb-container');
 const logFilter = document.getElementById('logFilter');
@@ -15,6 +16,8 @@ const pauseBtn = document.getElementById('pauseBtn');
 const hitChart = document.getElementById('hitChart');
 const chartEmpty = document.getElementById('chartEmpty');
 const chartLegend = document.getElementById('chartLegend');
+const traceBody = document.getElementById('trace-body');
+const RECENT_ATTEMPT_LIMIT = 200;
 
 // Priority → curve color (matches the table's priority accents). 0 = overall.
 const CURVE_COLORS = { 0: '#3fb950', 1: '#f0883e', 2: '#58a6ff', 3: '#8b949e' };
@@ -24,6 +27,10 @@ function prioLabel(p) { return CURVE_LABEL[p] || ('P' + p); }
 
 let paused = false;
 let fetchFails = 0;
+let statsBaseline = null;
+let statsBaselineAt = 0;
+let lastStatsData = null;
+const statsClearBtn = document.getElementById('statsClearBtn');
 
 function colorClass(value) {
   if (value >= 90) return 'rate-high';
@@ -42,42 +49,8 @@ function fetchStats() {
     .then(r => r.json())
     .then(data => {
       fetchFails = 0;
-      totalReqEl.textContent = data.total_req;
-      totalClientEl.textContent = data.total_client_req;
-      totalSuccessEl.textContent = data.total_success;
-      totalFailEl.textContent = data.total_fail;
-      totalRateEl.textContent = data.total_req > 0 ? data.total_rate.toFixed(1) + '%' : '—';
-      totalRateEl.className = data.total_req > 0 ? 'card-value ' + colorClass(data.total_rate) : 'card-value';
-
-      statusEl.textContent = data.running ? '● 运行中' : '● 已停用';
-      statusEl.className = 'status ' + (data.running ? 'running' : 'stopped');
-      // Only reflect server state; don't clobber an optimistic toggle mid-flight.
-      if (!toggleBusy) toggleEl.checked = data.running;
-      uptimeEl.textContent = '运行 ' + data.uptime;
-
-      data.providers.sort((a, b) => a.priority - b.priority || a.name.localeCompare(b.name));
-      statsBody.innerHTML = data.providers.map(p => {
-        const rate = p.total > 0 ? p.rate.toFixed(1) + '%' : '—';
-        const cf = p.consecutive_fail > 0 ? `<span class="cf-bad">${p.consecutive_fail}</span>` : '0';
-        const err = p.last_err_type
-          ? `<span class="err-type" title="${escapeAttr(p.last_err)}">${p.last_err_type}</span>`
-          : '—';
-        return `<tr>
-          <td class="p${p.priority}">P${p.priority}</td>
-          <td>${p.name}</td>
-          <td class="muted">${p.model_id}</td>
-          <td>${p.total}</td>
-          <td class="ok-num">${p.success}</td>
-          <td class="fail-num">${p.fail}</td>
-          <td class="${p.total > 0 ? colorClass(p.rate) : ''}">${rate}</td>
-          <td>${cf}</td>
-          <td class="muted">${fmtLatency(p.latency_avg_ms)}</td>
-          <td>${err}</td>
-        </tr>`;
-      }).join('');
-
-      renderCB(data.cb || []);
-      renderChart(data.curves || [], data.latency_curve || []);
+      lastStatsData = data;
+      renderStats(data);
     })
     .catch(() => {
       fetchFails++;
@@ -86,6 +59,118 @@ function fetchStats() {
         liveBadge.className = 'live-badge offline';
       }
     });
+}
+
+function fetchVersion() {
+  fetch('/api/version')
+    .then(r => r.json())
+    .then(data => {
+      if (!buildInfoEl) return;
+      const version = data.version || 'dev';
+      const buildDate = data.build_date && data.build_date !== 'unknown' ? data.build_date : '编译时间未知';
+      buildInfoEl.textContent = `${version} · ${buildDate}`;
+    })
+    .catch(() => {
+      if (buildInfoEl) buildInfoEl.textContent = '版本信息不可用';
+    });
+}
+
+function clearStats() {
+  if (statsBaseline) {
+    statsBaseline = null;
+    statsBaselineAt = 0;
+    statsClearBtn.textContent = '清零';
+  } else if (lastStatsData) {
+    statsBaseline = {
+      total_req: lastStatsData.total_req,
+      total_client_req: lastStatsData.total_client_req,
+      total_success: lastStatsData.total_success,
+      total_fail: lastStatsData.total_fail,
+      providers: {}
+    };
+    lastStatsData.providers.forEach(p => {
+      statsBaseline.providers[p.name] = { total: p.total, success: p.success, fail: p.fail };
+    });
+    statsBaselineAt = Date.now();
+    statsClearBtn.textContent = '恢复';
+  }
+  if (lastStatsData) renderStats(lastStatsData);
+}
+
+function renderStats(data) {
+  const base = statsBaseline;
+  const apply = base !== null;
+  const delta = (current, previous) => Math.max(0, current - previous);
+
+  const dReq = apply ? delta(data.total_req, base.total_req) : data.total_req;
+  const dClient = apply ? delta(data.total_client_req, base.total_client_req) : data.total_client_req;
+  const dSuccess = apply ? delta(data.total_success, base.total_success) : data.total_success;
+  const dFail = apply ? delta(data.total_fail, base.total_fail) : data.total_fail;
+  const dRate = dReq > 0 ? (dSuccess / dReq * 100) : 0;
+
+  totalReqEl.textContent = dReq;
+  totalClientEl.textContent = dClient;
+  totalSuccessEl.textContent = dSuccess;
+  totalFailEl.textContent = dFail;
+  totalRateEl.textContent = dReq > 0 ? dRate.toFixed(1) + '%' : '—';
+  totalRateEl.className = dReq > 0 ? 'card-value ' + colorClass(dRate) : 'card-value';
+
+  statusEl.textContent = data.running ? '● 运行中' : '● 已停用';
+  statusEl.className = 'status ' + (data.running ? 'running' : 'stopped');
+  if (!toggleBusy) toggleEl.checked = data.running;
+  uptimeEl.textContent = '运行 ' + data.uptime;
+
+  data.providers.sort((a, b) => a.priority - b.priority || a.name.localeCompare(b.name));
+  statsBody.innerHTML = data.providers.map(p => {
+    const bp = (apply && base.providers[p.name]) || { total: 0, success: 0, fail: 0 };
+    const dTotal = apply ? delta(p.total, bp.total) : p.total;
+    const dSucc = apply ? delta(p.success, bp.success) : p.success;
+    const dFl = apply ? delta(p.fail, bp.fail) : p.fail;
+    const rate = dTotal > 0 ? (dSucc / dTotal * 100).toFixed(1) + '%' : '—';
+    const cf = p.consecutive_fail > 0 ? `<span class="cf-bad">${p.consecutive_fail}</span>` : '0';
+    const err = p.last_err_type
+      ? `<span class="err-type" title="${escapeAttr(p.last_err)}">${p.last_err_type}</span>`
+      : '—';
+    return `<tr>
+      <td class="p${p.priority}">P${p.priority}</td>
+      <td>${escapeText(p.name)}</td>
+      <td class="muted">${escapeText(p.model_id)}</td>
+      <td>${dTotal}</td>
+      <td class="ok-num">${dSucc}</td>
+      <td class="fail-num">${dFl}</td>
+      <td class="${dTotal > 0 ? colorClass(dSucc / dTotal * 100) : ''}">${rate}</td>
+      <td>${cf}</td>
+      <td class="muted">${fmtLatency(p.latency_avg_ms)}</td>
+      <td>${err}</td>
+    </tr>`;
+  }).join('');
+
+  renderCB(data.cb || []);
+  renderChart(data.curves || [], data.latency_curve || []);
+  renderRecentAttempts(data.recent_attempts || []);
+}
+
+function escapeText(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function renderRecentAttempts(attempts) {
+  if (!traceBody) return;
+  const recent = attempts.filter(a => !statsBaselineAt || !a.timestamp || Date.parse(a.timestamp) >= statsBaselineAt).slice(-RECENT_ATTEMPT_LIMIT).reverse();
+  traceBody.innerHTML = recent.map(a => {
+    const ok = a.success;
+    const timestamp = a.timestamp ? new Date(a.timestamp).toLocaleTimeString() : '—';
+    return `<tr>
+      <td class="trace-id" title="${escapeText(a.request_id)}">${escapeText(String(a.request_id).slice(0, 12))}</td>
+      <td>${escapeText(a.provider)}</td>
+      <td class="muted">${escapeText(a.model_id)}</td>
+      <td>P${a.priority}</td>
+      <td class="${ok ? 'ok-num' : 'fail-num'}">${ok ? '成功' : '失败'}</td>
+      <td>${a.status_code || '—'}</td>
+      <td class="muted">${fmtLatency(a.latency_ms)}</td>
+      <td class="muted">${escapeText(timestamp)}</td>
+    </tr>`;
+  }).join('');
 }
 
 function renderCB(cb) {
@@ -289,6 +374,7 @@ evtSource.onerror = function() {
 
 // Poll stats every 2s
 fetchStats();
+fetchVersion();
 setInterval(fetchStats, 2000);
 
 toggleEl.addEventListener('change', toggleProxy);

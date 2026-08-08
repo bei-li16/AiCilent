@@ -1,14 +1,16 @@
 package config
 
 type Config struct {
-	Global      GlobalConfig   `yaml:"global" json:"global"`
-	Providers   []Provider     `yaml:"providers" json:"providers"`
-	ModelRoutes []ModelRoute   `yaml:"model_routes" json:"model_routes"`
+	Global      GlobalConfig `yaml:"global" json:"global"`
+	Providers   []Provider   `yaml:"providers" json:"providers"`
+	ModelRoutes []ModelRoute `yaml:"model_routes" json:"model_routes"`
+	ModelRules  []ModelRule  `yaml:"model_rules" json:"model_rules"`
 }
 
 type GlobalConfig struct {
-	ListenAddr     string `yaml:"listen_addr" json:"listen_addr"`
-	LogFile        string `yaml:"log_file" json:"log_file"`
+	ListenAddr    string `yaml:"listen_addr" json:"listen_addr"`
+	DefaultFormat string `yaml:"default_format" json:"default_format"`
+	LogFile       string `yaml:"log_file" json:"log_file"`
 	// LogRequestBody 控制请求内容日志级别：
 	//   "off"     不打印请求内容
 	//   "snippet" 仅打印 messages[0] 的前 80 字符（默认）
@@ -24,19 +26,20 @@ type GlobalConfig struct {
 }
 
 type RetryConfig struct {
-	MaxRetries     int     `yaml:"max_retries" json:"max_retries"`
-	RetryInterval  int     `yaml:"retry_interval" json:"retry_interval"`
-	BackoffFactor  float64 `yaml:"backoff_factor" json:"backoff_factor"`
+	MaxRetries    int     `yaml:"max_retries" json:"max_retries"`
+	RetryInterval int     `yaml:"retry_interval" json:"retry_interval"`
+	BackoffFactor float64 `yaml:"backoff_factor" json:"backoff_factor"`
 }
 
 type RateLimitConfig struct {
 	Enabled bool    `yaml:"enabled" json:"enabled"`
-	RPM     float64 `yaml:"rpm" json:"rpm"`         // requests per minute
-	Burst   int     `yaml:"burst" json:"burst"`     // max burst
+	RPM     float64 `yaml:"rpm" json:"rpm"`     // requests per minute
+	Burst   int     `yaml:"burst" json:"burst"` // max burst
 }
 
 type Provider struct {
 	Name      string          `yaml:"name" json:"name"`
+	Vendor    string          `yaml:"vendor,omitempty" json:"vendor,omitempty"`
 	ModelID   string          `yaml:"model_id" json:"model_id"`
 	APIKey    string          `yaml:"api_key" json:"api_key"`
 	BaseURL   string          `yaml:"base_url" json:"base_url"`
@@ -51,4 +54,9 @@ type Provider struct {
 type ModelRoute struct {
 	Alias  string `yaml:"alias" json:"alias"`
 	Target string `yaml:"target" json:"target"`
+}
+
+type ModelRule struct {
+	Model    string                 `yaml:"model" json:"model"`
+	Defaults map[string]interface{} `yaml:"defaults" json:"defaults"`
 }

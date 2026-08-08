@@ -3,12 +3,16 @@ package sse
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 )
+
+const historyCap = 200
 
 type Hub struct {
 	mu      sync.RWMutex
 	clients map[chan string]bool
+	history []string
 }
 
 func NewHub() *Hub {
@@ -18,14 +22,25 @@ func NewHub() *Hub {
 }
 
 func (h *Hub) Write(p []byte) (int, error) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	for ch := range h.clients {
-		select {
-		case ch <- string(p):
-		default:
+	lines := strings.Split(strings.TrimSuffix(string(p), "\n"), "\n")
+	h.mu.Lock()
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		h.history = append(h.history, line)
+		if len(h.history) > historyCap {
+			copy(h.history, h.history[len(h.history)-historyCap:])
+			h.history = h.history[:historyCap]
+		}
+		for ch := range h.clients {
+			select {
+			case ch <- line:
+			default:
+			}
 		}
 	}
+	h.mu.Unlock()
 	return len(p), nil
 }
 
@@ -44,7 +59,12 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	h.mu.Lock()
 	h.clients[ch] = true
+	history := append([]string(nil), h.history...)
 	h.mu.Unlock()
+	for _, line := range history {
+		fmt.Fprintf(w, "data: %s\n\n", line)
+	}
+	flusher.Flush()
 
 	defer func() {
 		h.mu.Lock()

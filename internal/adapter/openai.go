@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -37,16 +38,23 @@ type OpenAIFunction struct {
 }
 
 func CallOpenAIRaw(baseURL, apiKey string, body []byte, timeout int, transport http.RoundTripper) ([]byte, error) {
-	return postOpenAI(baseURL+"/chat/completions", apiKey, body, timeout, transport)
+	return CallOpenAIRawContext(context.Background(), baseURL, apiKey, body, timeout, "", transport)
 }
 
-func postOpenAI(url, apiKey string, body []byte, timeout int, transport http.RoundTripper) ([]byte, error) {
-	httpReq, err := http.NewRequest("POST", url, bytes.NewReader(body))
+func CallOpenAIRawContext(ctx context.Context, baseURL, apiKey string, body []byte, timeout int, requestID string, transport http.RoundTripper) ([]byte, error) {
+	return postOpenAI(ctx, baseURL+"/chat/completions", apiKey, body, timeout, requestID, transport)
+}
+
+func postOpenAI(ctx context.Context, url, apiKey string, body []byte, timeout int, requestID string, transport http.RoundTripper) ([]byte, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	if requestID != "" {
+		httpReq.Header.Set("X-Request-ID", requestID)
+	}
 
 	client := &http.Client{
 		Timeout:   time.Duration(timeout) * time.Second,
