@@ -11,8 +11,11 @@ func TestAPIErrorRetryable(t *testing.T) {
 	}{
 		{name: "server error", status: 500, retryable: true},
 		{name: "rate limit", status: 429, retryable: true},
-		{name: "request extraction", status: 400, message: `{"error":{"message":"Request extraction failed","code":"BadRequest"}}`, retryable: true},
-		{name: "ordinary bad request", status: 400, message: `{"error":{"message":"invalid model"}}`, retryable: false},
+		{name: "bad request", status: 400, message: `{"error":{"message":"invalid model"}}`, retryable: true},
+		{name: "unauthorized", status: 401, retryable: true},
+		{name: "forbidden", status: 403, retryable: true},
+		{name: "not found", status: 404, retryable: true},
+		{name: "request timeout", status: 408, retryable: true},
 	}
 
 	for _, tt := range tests {
