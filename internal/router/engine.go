@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -807,14 +808,29 @@ func (e *Engine) getOrderedProviders(modelName string) []*config.Provider {
 	switch modelName {
 	case "Max":
 		return e.filterProviders(func(p *config.Provider) bool {
-			return p.Priority == e.cfg.Providers[0].Priority
+			return p.Priority == e.minPriority()
 		})
 	case "Flash":
 		return e.filterProviders(func(p *config.Provider) bool {
-			return p.Priority > e.cfg.Providers[0].Priority
+			return p.Priority > e.minPriority()
 		})
 	case "Medium":
 		return e.allProviders()
+	}
+
+	if pri, mode, ok := parsePriorityKeyword(modelName); ok {
+		minP := e.minPriority()
+		return e.filterProviders(func(p *config.Provider) bool {
+			switch mode {
+			case "only":
+				return p.Priority == pri
+			case "up":
+				return p.Priority >= minP && p.Priority <= pri
+			case "down":
+				return p.Priority >= pri
+			}
+			return false
+		})
 	}
 
 	matched := make(map[string]bool)
@@ -863,6 +879,45 @@ func (e *Engine) allProviders() []*config.Provider {
 		result[i] = &e.cfg.Providers[i]
 	}
 	return result
+}
+
+func (e *Engine) minPriority() int {
+	if len(e.cfg.Providers) == 0 {
+		return 0
+	}
+	return e.cfg.Providers[0].Priority
+}
+
+// parsePriorityKeyword parses priority-based routing keywords:
+// "P2" → priority=2, mode="only"
+// "P2up" → priority=2, mode="up" (P1..P2)
+// "P2down" → priority=2, mode="down" (P2..max)
+func parsePriorityKeyword(s string) (priority int, mode string, ok bool) {
+	if len(s) < 2 || (s[0] != 'P' && s[0] != 'p') {
+		return 0, "", false
+	}
+	i := 1
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	if i == 1 {
+		return 0, "", false
+	}
+	n, err := strconv.Atoi(s[1:i])
+	if err != nil || n <= 0 {
+		return 0, "", false
+	}
+	suffix := strings.ToLower(s[i:])
+	switch suffix {
+	case "":
+		return n, "only", true
+	case "up":
+		return n, "up", true
+	case "down":
+		return n, "down", true
+	default:
+		return 0, "", false
+	}
 }
 
 func (e *Engine) filterProviders(fn func(*config.Provider) bool) []*config.Provider {
@@ -1130,9 +1185,18 @@ func modeFilter(modelName string) string {
 		return "skip priority 1"
 	case "Medium":
 		return "all priorities"
-	default:
-		return "model match"
 	}
+	if pri, mode, ok := parsePriorityKeyword(modelName); ok {
+		switch mode {
+		case "only":
+			return fmt.Sprintf("P%d only", pri)
+		case "up":
+			return fmt.Sprintf("P1..P%d", pri)
+		case "down":
+			return fmt.Sprintf("P%d..max", pri)
+		}
+	}
+	return "model match"
 }
 
 // ─────────────────────────────────────────────────────────────
