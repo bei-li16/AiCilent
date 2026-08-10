@@ -7,6 +7,7 @@ global:
   cb_cooldown: 10
   cb_skip_requests: 1
   control_allow_remote: false
+  max_stream_minutes: 3
 
 model_routes:
   - alias: default

@@ -324,6 +324,9 @@ func initializeConfig(path string) (firstRun bool, err error) {
 		if !yamlHasKey(data, "global", "log_file") {
 			cfg.Global.LogFile = "../proxy.log"
 		}
+		if !yamlHasKey(data, "global", "max_stream_minutes") {
+			cfg.Global.MaxStreamMinutes = 3
+		}
 	}
 	// Older GUI releases resolved proxy.log from the executable working
 	// directory. Preserve that location now that relative paths are resolved
@@ -381,6 +384,7 @@ func configNeedsMigration(data []byte) bool {
 	keys := []string{
 		"listen_addr", "default_format", "log_file", "log_request_body",
 		"cb_threshold", "cb_cooldown", "cb_skip_requests", "control_allow_remote",
+		"max_stream_minutes",
 	}
 	for _, key := range keys {
 		if !yamlHasKey(data, "global", key) {
@@ -507,6 +511,7 @@ func main() {
 	cbThresholdEntry := widget.NewEntry()
 	cbCooldownEntry := widget.NewEntry()
 	cbSkipEntry := widget.NewEntry()
+	maxStreamEntry := widget.NewEntry()
 	defaultRouteSelect := widget.NewSelect(nil, nil)
 
 	loadQuickSettings := func() {
@@ -524,6 +529,7 @@ func main() {
 		cbThresholdEntry.SetText(strconv.Itoa(cfg.Global.CBThreshold))
 		cbCooldownEntry.SetText(strconv.Itoa(cfg.Global.CBCooldown))
 		cbSkipEntry.SetText(strconv.Itoa(cfg.Global.CBSkipRequests))
+		maxStreamEntry.SetText(strconv.Itoa(cfg.Global.MaxStreamMinutes))
 		options := []string{"不设置"}
 		selected := "不设置"
 		for _, p := range cfg.Providers {
@@ -543,8 +549,9 @@ func main() {
 		threshold, err1 := strconv.Atoi(cbThresholdEntry.Text)
 		cooldown, err2 := strconv.Atoi(cbCooldownEntry.Text)
 		skip, err3 := strconv.Atoi(cbSkipEntry.Text)
-		if listenEntry.Text == "" || err1 != nil || err2 != nil || err3 != nil || threshold <= 0 || cooldown <= 0 || skip < 0 {
-			dialog.NewInformation("设置无效", "监听地址不能为空，熔断参数必须是有效数字", w)
+		maxStream, err4 := strconv.Atoi(maxStreamEntry.Text)
+		if listenEntry.Text == "" || err1 != nil || err2 != nil || err3 != nil || err4 != nil || threshold <= 0 || cooldown <= 0 || skip < 0 || maxStream < 0 {
+			dialog.NewInformation("设置无效", "监听地址不能为空，参数必须是有效数字", w)
 			return
 		}
 		cfg := pm.configSnapshot()
@@ -557,6 +564,7 @@ func main() {
 		cfg.Global.CBThreshold = threshold
 		cfg.Global.CBCooldown = cooldown
 		cfg.Global.CBSkipRequests = skip
+		cfg.Global.MaxStreamMinutes = maxStream
 		target := defaultRouteSelect.Selected
 		found := false
 		for i := range cfg.ModelRoutes {
@@ -593,6 +601,7 @@ func main() {
 			widget.NewLabel("熔断阈值"), cbThresholdEntry,
 			widget.NewLabel("冷却(秒)"), cbCooldownEntry,
 			widget.NewLabel("探测请求"), cbSkipEntry,
+			widget.NewLabel("流式时长(分)"), maxStreamEntry,
 			widget.NewLabel("默认路由"), defaultRouteSelect,
 		),
 		saveQuickBtn,

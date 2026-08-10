@@ -23,6 +23,9 @@ type GlobalConfig struct {
 	// 默认 false：仅允许 loopback (127.0.0.1/::1) 调用，防止远程他人停掉代理。
 	// 设为 true 才允许任意来源（如需远程管理时开启）。
 	ControlAllowRemote bool `yaml:"control_allow_remote" json:"control_allow_remote"`
+	// MaxStreamMinutes 流式传输总时长上限（分钟）。超过此时间 context 取消，
+	// 流被中断并注入 SSE error event。默认 3。
+	MaxStreamMinutes int `yaml:"max_stream_minutes" json:"max_stream_minutes"`
 }
 
 type RetryConfig struct {

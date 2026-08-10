@@ -223,7 +223,7 @@ OPEN（熔断，请求直接跳过该组）
 - **自动检测**：请求体含 `"stream": true` 自动启用
 - **SSE 实时下发**：`flushWriter` 每次 Write 后立即 Flush
 - **空闲超时**：`idleTimeoutReader` 在 `provider.Timeout` 秒无数据时返回超时
-- **整体超时**：`maxStreamDuration = 3min` 硬上限，防止无限慢速流
+- **整体超时**：`global.max_stream_minutes` 控制流式总时长上限（默认 3 分钟），超过则中断流并注入 SSE error event
 - **中途错误**：流式失败时注入 SSE error event，通知客户端截断
 - **跨格式转换**：SSE 流逐事件实时转换（Anthropic SSE ↔ OpenAI SSE）
 
@@ -282,6 +282,7 @@ global:
   cb_threshold: 2            # 断路器失败阈值
   cb_cooldown: 30            # 断路器冷却时间（秒）
   cb_skip_requests: 10       # 熔断期间跳过请求数
+  max_stream_minutes: 3       # 流式传输总时长上限（分钟），0 或留空则默认 3
 ```
 
 ### model_routes（可选）

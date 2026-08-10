@@ -26,10 +26,6 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// maxStreamDuration caps total streaming duration to prevent indefinitely
-// slow upstream streams from holding connections forever.
-const maxStreamDuration = 3 * time.Minute
-
 // maxRequestBodySize limits the request body to prevent OOM from malicious
 // payloads. 10MB is generous for chat completions with long conversation history.
 const maxRequestBodySize = 10 << 20 // 10 MB
@@ -636,10 +632,16 @@ func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat
 	}
 	url := provider.BaseURL + path
 
-	// Overall stream duration cap: 3 minutes. The idleTimeoutReader handles
-	// per-gap stalls, but a stream that trickles data forever would never
-	// trigger it. This context acts as a hard safety net.
-	streamCtx, streamCancel := context.WithTimeout(c.Request.Context(), maxStreamDuration)
+	// Overall stream duration cap, configurable via global.max_stream_minutes
+	// (default 3). A stream that trickles data forever would never trigger
+	// the idle timeout, so this context acts as a hard safety net.
+	e.reloadMu.RLock()
+	maxStreamMin := e.cfg.Global.MaxStreamMinutes
+	e.reloadMu.RUnlock()
+	if maxStreamMin <= 0 {
+		maxStreamMin = 3
+	}
+	streamCtx, streamCancel := context.WithTimeout(c.Request.Context(), time.Duration(maxStreamMin)*time.Minute)
 	defer streamCancel()
 
 	httpReq, err := http.NewRequestWithContext(streamCtx, "POST", url, bytes.NewReader(body))

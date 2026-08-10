@@ -149,6 +149,9 @@ func (cfg *Config) applyDefaults() {
 	if cfg.Global.CBSkipRequests <= 0 {
 		cfg.Global.CBSkipRequests = 10
 	}
+	if cfg.Global.MaxStreamMinutes <= 0 {
+		cfg.Global.MaxStreamMinutes = 3
+	}
 	for i := range cfg.Providers {
 		if cfg.Providers[i].Retry.MaxRetries <= 0 {
 			cfg.Providers[i].Retry.MaxRetries = 3
