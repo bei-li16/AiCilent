@@ -6,12 +6,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"ai-proxy/internal/config"
+	"ai-proxy/internal/middleware"
 	"ai-proxy/internal/stats"
 
 	"github.com/gin-gonic/gin"
@@ -97,6 +99,60 @@ func TestForwardRequestEnforcesSharedHostLimit(t *testing.T) {
 	if got := maximum.Load(); got != 2 {
 		t.Fatalf("maximum upstream concurrency = %d, want 2", got)
 	}
+}
+
+func TestHandleRequestAllowsConfiguredProviderConcurrency(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	release := make(chan struct{})
+	started := make(chan struct{}, 2)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started <- struct{}{}
+		<-release
+		_, _ = io.WriteString(w, `{"id":"ok"}`)
+	}))
+	defer upstream.Close()
+
+	cfg := &config.Config{
+		Global: config.GlobalConfig{CBThreshold: 3, CBCooldown: 10, CBSkipRequests: 1},
+		Providers: []config.Provider{{
+			Name:          "concurrent",
+			ModelID:       "m",
+			BaseURL:       upstream.URL + "/v1",
+			Priority:      1,
+			Format:        "openai",
+			Timeout:       5,
+			MaxConcurrent: 2,
+		}},
+	}
+	e := NewEngine(cfg, "", io.Discard, io.Discard, stats.New(""))
+	router := gin.New()
+	router.Use(middleware.DetectFormat())
+	router.POST("/chat/completions", e.HandleRequest)
+
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/chat/completions", strings.NewReader(`{"model":"m"}`))
+			router.ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusOK {
+				t.Errorf("status = %d, body=%s", recorder.Code, recorder.Body.String())
+			}
+		}()
+	}
+
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			close(release)
+			t.Fatal("configured concurrent requests did not both reach the provider")
+		}
+	}
+	close(release)
+	wg.Wait()
 }
 
 func TestHostLimiterBlocksAndHonorsCancellation(t *testing.T) {

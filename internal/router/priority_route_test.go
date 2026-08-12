@@ -105,7 +105,7 @@ func TestModeFilter(t *testing.T) {
 		input, want string
 	}{
 		{"Max", "highest priority only"},
-		{"Flash", "skip priority 1"},
+		{"Flash", "skip highest priority group"},
 		{"Medium", "all priorities"},
 		{"P1", "P1 only"},
 		{"P2", "P2 only"},

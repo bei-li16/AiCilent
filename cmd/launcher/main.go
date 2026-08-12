@@ -312,14 +312,6 @@ func initializeConfig(path string) (firstRun bool, err error) {
 	if err != nil {
 		return firstRun, err
 	}
-	for name := range providerNamesMissingKey(data, "max_concurrent") {
-		for i := range cfg.Providers {
-			if cfg.Providers[i].Name == name {
-				cfg.Providers[i].MaxConcurrent = 2
-			}
-		}
-	}
-
 	updated := configNeedsMigration(data)
 	if updated {
 		// These fields were not part of older templates and are intentionally
@@ -415,28 +407,6 @@ func configNeedsMigration(data []byte) bool {
 		}
 	}
 	return false
-}
-
-func providerNamesMissingKey(data []byte, key string) map[string]struct{} {
-	missing := make(map[string]struct{})
-	var root yaml.Node
-	if err := yaml.Unmarshal(data, &root); err != nil {
-		return missing
-	}
-	providers := yamlMapValue(rootMap(&root), "providers")
-	if providers == nil || providers.Kind != yaml.SequenceNode {
-		return missing
-	}
-	for _, provider := range providers.Content {
-		if yamlMapValue(provider, key) != nil {
-			continue
-		}
-		name := yamlMapValue(provider, "name")
-		if name != nil && name.Value != "" {
-			missing[name.Value] = struct{}{}
-		}
-	}
-	return missing
 }
 
 func yamlHasKey(data []byte, path ...string) bool {

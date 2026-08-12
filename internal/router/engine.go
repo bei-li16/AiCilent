@@ -41,10 +41,6 @@ type Engine struct {
 	circuitOpenSince map[int]*time.Time
 	skipRemaining    map[int]int
 
-	// Provider concurrency locks (providerMu protects)
-	providerMu    sync.Mutex
-	providerLocks map[string]*sync.Mutex
-
 	// Rate limiters (rlMu protects)
 	rlMu         sync.Mutex
 	rateLimiters map[string]*ratelimit.TokenBucket
@@ -96,7 +92,6 @@ func NewEngine(cfg *config.Config, configPath string, logWriter, fileWriter io.W
 		failureCount:     make(map[int]int),
 		circuitOpenSince: make(map[int]*time.Time),
 		skipRemaining:    make(map[int]int),
-		providerLocks:    make(map[string]*sync.Mutex),
 		rrIndex:          make(map[int]int),
 		rateLimiters:     rl,
 		transport: &http.Transport{
@@ -164,23 +159,6 @@ func (e *Engine) reloadConfig() error {
 	e.cfg = cfg
 	e.matcher = NewMatcher(cfg.ModelRoutes)
 	e.reloadMu.Unlock()
-
-	// Keep existing provider locks for stable names
-	oldLocks := make(map[string]*sync.Mutex)
-	e.providerMu.Lock()
-	for k, v := range e.providerLocks {
-		oldLocks[k] = v
-	}
-	newLocks := make(map[string]*sync.Mutex, len(cfg.Providers))
-	for _, p := range cfg.Providers {
-		if old, ok := oldLocks[p.Name]; ok {
-			newLocks[p.Name] = old
-		} else {
-			newLocks[p.Name] = &sync.Mutex{}
-		}
-	}
-	e.providerLocks = newLocks
-	e.providerMu.Unlock()
 
 	// Rebuild rate limiters
 	e.rlMu.Lock()
@@ -330,17 +308,9 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 		startIdx := e.advanceRRIndex(priority, len(group))
 		tr.LogQueue(priority, "trying", startIdx, len(group))
 
-		anyTried := false
-
 		for i := 0; i < len(group); i++ {
 			idx := (startIdx + i) % len(group)
 			provider := group[idx]
-
-			if !e.tryAcquireProvider(provider.Name) {
-				tr.LogQueue(priority, fmt.Sprintf("provider %s busy, skipped", provider.Name), idx, len(group))
-				continue
-			}
-			anyTried = true
 
 			if i > 0 && lastErr != nil {
 				tr.LogDegradeProvider(provider.Name, priority, lastErr.Error())
@@ -349,7 +319,6 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 			// Check rate limit before attempting
 			if rlErr := e.checkRateLimit(provider.Name); rlErr != nil {
 				tr.LogQueue(priority, fmt.Sprintf("provider %s rate limited, skipping", provider.Name), idx, len(group))
-				e.releaseProvider(provider.Name)
 				continue
 			}
 
@@ -375,7 +344,6 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 						cfg.Global.CBThreshold, cfg.Global.CBCooldown, cfg.Global.CBSkipRequests)
 					tr.LogResult(true, provider.Name, idx)
 					tr.LogQueue(priority, "released", idx, len(group))
-					e.releaseProvider(provider.Name)
 					fmt.Fprint(e.logWriter, tr.Dump())
 					completed = true
 					break
@@ -389,7 +357,6 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 				if c.Writer.Written() {
 					tr.LogQueue(priority, "released (stream written)", idx, len(group))
 					tr.LogResult(false, provider.Name, idx)
-					e.releaseProvider(provider.Name)
 					e.recordGroupFailure(modelName, priority, tr,
 						cfg.Global.CBThreshold, cfg.Global.CBCooldown, cfg.Global.CBSkipRequests)
 					fmt.Fprint(e.logWriter, tr.Dump())
@@ -418,16 +385,9 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 				break
 			}
 
-			e.releaseProvider(provider.Name)
-
 			if c.Writer.Written() {
 				break
 			}
-		}
-
-		if !anyTried {
-			tr.LogQueue(priority, "all providers busy", startIdx, len(group))
-			continue
 		}
 
 		if !completed && !c.Writer.Written() {
@@ -544,26 +504,6 @@ func (e *Engine) closeCircuitBreaker(priority int, modelName string, tr *tracer.
 	e.cbMu.Unlock()
 
 	e.saveCBState()
-}
-
-func (e *Engine) tryAcquireProvider(name string) bool {
-	e.providerMu.Lock()
-	mu, ok := e.providerLocks[name]
-	if !ok {
-		mu = &sync.Mutex{}
-		e.providerLocks[name] = mu
-	}
-	e.providerMu.Unlock()
-	return mu.TryLock()
-}
-
-func (e *Engine) releaseProvider(name string) {
-	e.providerMu.Lock()
-	mu, ok := e.providerLocks[name]
-	e.providerMu.Unlock()
-	if ok {
-		mu.Unlock()
-	}
 }
 
 type hostLimiter struct {
@@ -826,7 +766,13 @@ func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat
 		httpReq.Header.Set("anthropic-version", "2023-06-01")
 	}
 
-	limiter, err := e.acquireConnSlot(streamCtx, provider)
+	slotCtx := streamCtx
+	var slotCancel context.CancelFunc
+	if timeout > 0 {
+		slotCtx, slotCancel = context.WithTimeout(streamCtx, time.Duration(timeout)*time.Second)
+		defer slotCancel()
+	}
+	limiter, err := e.acquireConnSlot(slotCtx, provider)
 	if err != nil {
 		return fmt.Errorf("wait for upstream connection slot: %w", err)
 	}
@@ -859,13 +805,13 @@ func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat
 	idleReader := newIdleTimeoutReader(resp.Body, time.Duration(timeout)*time.Second)
 	defer idleReader.Close()
 
-	fw := &flushWriter{w: c.Writer}
+	gate := newSSECommitWriter(c.Writer)
 	if requestFormat != provider.Format {
-		err = adapter.StreamConvertResponse(idleReader, fw, provider.Format, requestFormat)
+		err = adapter.StreamConvertResponse(idleReader, gate, provider.Format, requestFormat)
 	} else {
-		_, err = io.Copy(fw, idleReader)
+		_, err = io.Copy(gate, idleReader)
 	}
-	if err == nil && !c.Writer.Written() {
+	if err == nil && !gate.Committed() {
 		err = fmt.Errorf("upstream stream ended before the first event")
 	}
 
@@ -910,18 +856,98 @@ type startTimeContextKey struct{}
 
 var startTimeKey = startTimeContextKey{}
 
-type flushWriter struct {
-	w http.ResponseWriter
+const maxPendingSSEBytes = 1 << 20
+
+// sseCommitWriter buffers upstream output until it contains one complete SSE
+// event with a data field. This keeps the downstream response uncommitted when
+// an upstream only sends heartbeats, a partial event, or closes immediately,
+// allowing the router to retry or fail over to another provider.
+type sseCommitWriter struct {
+	w         http.ResponseWriter
+	pending   []byte
+	committed bool
 }
 
-func (fw *flushWriter) Write(p []byte) (int, error) {
-	n, err := fw.w.Write(p)
-	if err == nil {
-		if f, ok := fw.w.(http.Flusher); ok {
-			f.Flush()
+func newSSECommitWriter(w http.ResponseWriter) *sseCommitWriter {
+	return &sseCommitWriter{w: w}
+}
+
+func (w *sseCommitWriter) Committed() bool {
+	return w.committed
+}
+
+func (w *sseCommitWriter) Write(p []byte) (int, error) {
+	if w.committed {
+		if err := w.writeAndFlush(p); err != nil {
+			return 0, err
+		}
+		return len(p), nil
+	}
+
+	w.pending = append(w.pending, p...)
+	for {
+		end := sseEventEnd(w.pending)
+		if end < 0 {
+			if len(w.pending) > maxPendingSSEBytes {
+				return 0, fmt.Errorf("first SSE event exceeds %d bytes", maxPendingSSEBytes)
+			}
+			return len(p), nil
+		}
+
+		event := w.pending[:end]
+		if sseEventHasData(event) {
+			w.committed = true
+			if err := w.writeAndFlush(w.pending); err != nil {
+				return 0, err
+			}
+			w.pending = nil
+			return len(p), nil
+		}
+
+		// Pre-data comments are heartbeats. They should not prevent failover and
+		// need not be replayed once a real event arrives.
+		w.pending = w.pending[end:]
+	}
+}
+
+func (w *sseCommitWriter) writeAndFlush(p []byte) error {
+	if len(p) == 0 {
+		return nil
+	}
+	if _, err := w.w.Write(p); err != nil {
+		return err
+	}
+	if f, ok := w.w.(http.Flusher); ok {
+		f.Flush()
+	}
+	return nil
+}
+
+func sseEventEnd(data []byte) int {
+	lf := bytes.Index(data, []byte("\n\n"))
+	crlf := bytes.Index(data, []byte("\r\n\r\n"))
+	switch {
+	case lf < 0 && crlf < 0:
+		return -1
+	case lf < 0:
+		return crlf + 4
+	case crlf < 0:
+		return lf + 2
+	case lf < crlf:
+		return lf + 2
+	default:
+		return crlf + 4
+	}
+}
+
+func sseEventHasData(event []byte) bool {
+	normalized := bytes.ReplaceAll(event, []byte("\r\n"), []byte("\n"))
+	for _, line := range bytes.Split(normalized, []byte("\n")) {
+		if bytes.Equal(line, []byte("data")) || bytes.HasPrefix(line, []byte("data:")) {
+			return true
 		}
 	}
-	return n, err
+	return false
 }
 
 type idleTimeoutReader struct {
@@ -1370,7 +1396,7 @@ func modeFilter(modelName string) string {
 	case "Max":
 		return "highest priority only"
 	case "Flash":
-		return "skip priority 1"
+		return "skip highest priority group"
 	case "Medium":
 		return "all priorities"
 	}

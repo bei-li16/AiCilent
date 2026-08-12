@@ -74,9 +74,9 @@ ai-proxy.exe --version    # 查看版本信息
 
 | 模式 | model 值 | 行为 | 适用场景 |
 |------|----------|------|----------|
-| **Flash**（推荐） | `Flash` | 跳过 P1，直达 P2+ | 日常使用，避免 TPM 限流 |
+| **Flash**（推荐） | `Flash` | 跳过当前最高优先级组 | 日常使用，避免最高优先级组的 TPM 限流 |
 | **Medium** | `Medium` | 全部优先级，自动降级 | 穷尽所有可用供应商 |
-| **Max** | `Max` | 仅最高优先级 P1 | 需要最强模型，不计成本 |
+| **Max** | `Max` | 仅当前最高优先级组 | 需要最强模型，不计成本 |
 
 也可直接填真实模型名（如 `gpt-4o`），通过 `model_routes` 映射到指定供应商。
 
@@ -160,9 +160,9 @@ Agent 请求
        │
        ├─ 按 priority 分组，逐组尝试（P1 → P2 → P3）
        │   ├─ 断路器检查：该组是否熔断？→ 跳过
-       │   ├─ round-robin + per-provider TryLock（同组并发）
+       │   ├─ round-robin + 上游主机并发队列（同组并发）
        │   ├─ token bucket 限流检查
-       │   └─ 指数退避重试（5xx/429 可重试，4xx 跳过）
+       │   └─ 指数退避重试（全部上游 4xx/5xx 按 YAML 重试）
        │       └─ 组内全部失败 → recordGroupFailure → CB 计数+1
        │
        └─ adapter 协议转换（OpenAI ↔ Anthropic）+ 上游调用
@@ -221,11 +221,11 @@ OPEN（熔断，请求直接跳过该组）
 ## 流式传输
 
 - **自动检测**：请求体含 `"stream": true` 自动启用
-- **SSE 实时下发**：`flushWriter` 每次 Write 后立即 Flush
+- **SSE 实时下发**：收到首个完整 `data:` 事件后提交响应，此后每次写入立即 Flush
 - **空闲超时**：`idleTimeoutReader` 在 `provider.Timeout` 秒无数据时返回超时
 - **整体超时**：`global.max_stream_minutes` 控制流式总时长上限（默认 3 分钟），超过则中断流并注入 SSE error event
 - **中途错误**：流式失败时注入 SSE error event，通知客户端截断
-- **首事件前故障转移**：收到上游 200 后延迟提交下游响应头；首个 SSE 事件前断开或空流可继续重试/降级
+- **首事件前故障转移**：收到上游 200 后延迟提交下游响应头；首个完整 `data:` 事件前断开、心跳或空流可继续重试/降级
 - **跨格式转换**：SSE 流逐事件实时转换（Anthropic SSE ↔ OpenAI SSE）
 
 ---
