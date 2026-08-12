@@ -42,6 +42,7 @@ providers.json
 
 # Temp
 old/
+*.bak
 
 # Test
 test/

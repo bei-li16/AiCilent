@@ -81,6 +81,9 @@ func (cfg *Config) validate() error {
 		if p.Timeout < 0 {
 			return fmt.Errorf("provider %s: timeout cannot be negative", p.Name)
 		}
+		if p.MaxConcurrent < 0 {
+			return fmt.Errorf("provider %s: max_concurrent cannot be negative", p.Name)
+		}
 	}
 	ruleNames := make(map[string]bool, len(cfg.ModelRules))
 	for _, rule := range cfg.ModelRules {

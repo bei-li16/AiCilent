@@ -23,6 +23,7 @@ providers:
     format: openai
     auth_type: bearer
     timeout: 60
+    max_concurrent: 2
     retry:
       max_retries: 3
       retry_interval: 2

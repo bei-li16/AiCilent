@@ -84,6 +84,9 @@ providers:
 	if got.Providers[0].AuthType != "bearer" || got.Providers[0].Timeout != 60 {
 		t.Fatalf("provider defaults were not migrated: %#v", got.Providers[0])
 	}
+	if got.Providers[0].MaxConcurrent != 2 {
+		t.Fatalf("max_concurrent = %d, want migrated default 2", got.Providers[0].MaxConcurrent)
+	}
 	if _, err := os.Stat(filepath.Join(filepath.Dir(filepath.Dir(configPath)), "proxy.log")); err != nil {
 		t.Fatalf("migrated config log file was not created: %v", err)
 	}

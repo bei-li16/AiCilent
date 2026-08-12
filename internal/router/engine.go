@@ -57,10 +57,16 @@ type Engine struct {
 	reloadMu sync.RWMutex
 
 	// Shared HTTP transport for connection reuse
-	transport *http.Transport
+	transport        *http.Transport
+	streamMu         sync.Mutex
+	streamTransports map[time.Duration]*http.Transport
 
 	// File write mutex for CB state persistence (prevents concurrent write corruption)
 	fileMu sync.Mutex
+
+	// Per-upstream-origin concurrency limiters (connMu protects the map).
+	connMu       sync.Mutex
+	connLimiters map[string]*hostLimiter
 
 	logWriter  io.Writer
 	fileWriter io.Writer
@@ -97,11 +103,14 @@ func NewEngine(cfg *config.Config, configPath string, logWriter, fileWriter io.W
 			MaxIdleConns:        100,
 			MaxIdleConnsPerHost: 10,
 			IdleConnTimeout:     90 * time.Second,
+			ForceAttemptHTTP2:   true,
 		},
-		logWriter:  logWriter,
-		fileWriter: fileWriter,
-		stats:      stats,
+		streamTransports: make(map[time.Duration]*http.Transport),
+		logWriter:        logWriter,
+		fileWriter:       fileWriter,
+		stats:            stats,
 	}
+	e.rebuildConnLimiters(cfg)
 	e.loadCBState()
 	return e
 }
@@ -189,6 +198,9 @@ func (e *Engine) reloadConfig() error {
 	}
 	e.rateLimiters = newRL
 	e.rlMu.Unlock()
+
+	// Apply host concurrency changes without interrupting active requests.
+	e.rebuildConnLimiters(cfg)
 
 	// Reset RR indexes for any new priority groups
 	e.rrMu.Lock()
@@ -554,6 +566,146 @@ func (e *Engine) releaseProvider(name string) {
 	}
 }
 
+type hostLimiter struct {
+	mu      sync.Mutex
+	limit   int
+	active  int
+	changed chan struct{}
+}
+
+func newHostLimiter(limit int) *hostLimiter {
+	return &hostLimiter{limit: limit, changed: make(chan struct{})}
+}
+
+func (l *hostLimiter) setLimit(limit int) {
+	l.mu.Lock()
+	if l.limit != limit {
+		l.limit = limit
+		close(l.changed)
+		l.changed = make(chan struct{})
+	}
+	l.mu.Unlock()
+}
+
+func (l *hostLimiter) acquire(ctx context.Context) error {
+	for {
+		l.mu.Lock()
+		if l.limit <= 0 || l.active < l.limit {
+			l.active++
+			l.mu.Unlock()
+			return nil
+		}
+		changed := l.changed
+		l.mu.Unlock()
+
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func (l *hostLimiter) release() {
+	l.mu.Lock()
+	if l.active > 0 {
+		l.active--
+	}
+	close(l.changed)
+	l.changed = make(chan struct{})
+	l.mu.Unlock()
+}
+
+// rebuildConnLimiters applies the strictest positive limit configured for all
+// provider entries that point at the same scheme/host/port. Paths such as /v1
+// do not create a second pool for the same upstream server.
+func (e *Engine) rebuildConnLimiters(cfg *config.Config) {
+	desired := make(map[string]int)
+	for i := range cfg.Providers {
+		p := &cfg.Providers[i]
+		if p.MaxConcurrent <= 0 {
+			continue
+		}
+		key := upstreamOrigin(p.BaseURL)
+		if current, ok := desired[key]; !ok || p.MaxConcurrent < current {
+			desired[key] = p.MaxConcurrent
+		}
+	}
+
+	e.connMu.Lock()
+	old := e.connLimiters
+	next := make(map[string]*hostLimiter, len(desired))
+	for key, limit := range desired {
+		limiter := old[key]
+		if limiter == nil {
+			limiter = newHostLimiter(limit)
+		} else {
+			limiter.setLimit(limit)
+		}
+		next[key] = limiter
+	}
+	for key, limiter := range old {
+		if _, ok := next[key]; !ok {
+			limiter.setLimit(0)
+		}
+	}
+	e.connLimiters = next
+	e.connMu.Unlock()
+}
+
+func upstreamOrigin(baseURL string) string {
+	u, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return strings.ToLower(strings.TrimRight(strings.TrimSpace(baseURL), "/"))
+	}
+	scheme := strings.ToLower(u.Scheme)
+	host := strings.ToLower(u.Hostname())
+	port := u.Port()
+	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+		port = ""
+	}
+	if port != "" {
+		host += ":" + port
+	}
+	return scheme + "://" + host
+}
+
+func (e *Engine) acquireConnSlot(ctx context.Context, provider *config.Provider) (*hostLimiter, error) {
+	e.connMu.Lock()
+	limiter := e.connLimiters[upstreamOrigin(provider.BaseURL)]
+	e.connMu.Unlock()
+	if limiter == nil {
+		return nil, nil
+	}
+	if err := limiter.acquire(ctx); err != nil {
+		return nil, err
+	}
+	return limiter, nil
+}
+
+func (e *Engine) releaseConnSlot(limiter *hostLimiter) {
+	if limiter != nil {
+		limiter.release()
+	}
+}
+
+func (e *Engine) streamTransport(timeout int) *http.Transport {
+	headerTimeout := time.Duration(timeout) * time.Second
+	if headerTimeout <= 0 || headerTimeout > 30*time.Second {
+		headerTimeout = 30 * time.Second
+	}
+
+	e.streamMu.Lock()
+	defer e.streamMu.Unlock()
+	if transport := e.streamTransports[headerTimeout]; transport != nil {
+		return transport
+	}
+	transport := e.transport.Clone()
+	transport.ResponseHeaderTimeout = headerTimeout
+	e.streamTransports[headerTimeout] = transport
+	return transport
+}
+
 // checkRateLimit returns nil if the provider is within its rate limit,
 // or an error if rate limited. Always returns nil if rate limiting is disabled.
 func (e *Engine) checkRateLimit(providerName string) error {
@@ -594,10 +746,23 @@ func (e *Engine) forwardRequest(c *gin.Context, body []byte, requestFormat strin
 
 	body = prepareProviderRequest(body, provider)
 
+	requestCtx := c.Request.Context()
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		requestCtx, cancel = context.WithTimeout(requestCtx, time.Duration(timeout)*time.Second)
+		defer cancel()
+	}
+
+	limiter, err := e.acquireConnSlot(requestCtx, provider)
+	if err != nil {
+		return fmt.Errorf("wait for upstream connection slot: %w", err)
+	}
+	defer e.releaseConnSlot(limiter)
+
 	if provider.Format == "openai" {
-		respBody, err = adapter.CallOpenAIRawContext(c.Request.Context(), provider.BaseURL, provider.APIKey, body, timeout, requestID, e.transport)
+		respBody, err = adapter.CallOpenAIRawContext(requestCtx, provider.BaseURL, provider.APIKey, body, timeout, requestID, e.transport)
 	} else {
-		respBody, err = adapter.CallAnthropicRawContext(c.Request.Context(), provider.BaseURL, provider.APIKey, provider.AuthType, body, timeout, requestID, e.transport)
+		respBody, err = adapter.CallAnthropicRawContext(requestCtx, provider.BaseURL, provider.APIKey, provider.AuthType, body, timeout, requestID, e.transport)
 	}
 
 	if err != nil {
@@ -661,13 +826,15 @@ func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat
 		httpReq.Header.Set("anthropic-version", "2023-06-01")
 	}
 
-	respHeaderTimeout := time.Duration(timeout) * time.Second
-	if respHeaderTimeout > 30*time.Second {
-		respHeaderTimeout = 30 * time.Second // cap at 30s for header wait
+	limiter, err := e.acquireConnSlot(streamCtx, provider)
+	if err != nil {
+		return fmt.Errorf("wait for upstream connection slot: %w", err)
 	}
-	clone := e.transport.Clone()
-	clone.ResponseHeaderTimeout = respHeaderTimeout
-	client := &http.Client{Transport: clone}
+	defer e.releaseConnSlot(limiter)
+
+	// A shared transport reuses TLS/HTTP2 connections and avoids leaving one
+	// idle connection pool behind for every completed streaming request.
+	client := &http.Client{Transport: e.streamTransport(timeout)}
 	streamStart := time.Now()
 	resp, err := client.Do(httpReq)
 	if err != nil {
@@ -687,7 +854,6 @@ func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat
 		c.Writer.Header().Set("Content-Type", "text/event-stream")
 		c.Writer.Header().Set("Cache-Control", "no-cache")
 		c.Writer.Header().Set("Connection", "keep-alive")
-		c.Writer.WriteHeader(http.StatusOK)
 	}
 
 	idleReader := newIdleTimeoutReader(resp.Body, time.Duration(timeout)*time.Second)
@@ -699,6 +865,9 @@ func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat
 	} else {
 		_, err = io.Copy(fw, idleReader)
 	}
+	if err == nil && !c.Writer.Written() {
+		err = fmt.Errorf("upstream stream ended before the first event")
+	}
 
 	// If the stream failed mid-way (headers already written), inject an
 	// SSE error event so the client knows the stream was truncated.
@@ -707,10 +876,27 @@ func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat
 		if len(errMsg) > 500 {
 			errMsg = errMsg[:500] + "..."
 		}
+		var payload interface{}
 		if requestFormat == "anthropic" {
-			fmt.Fprintf(c.Writer, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"stream interrupted: %s\"}}\n\n", errMsg)
+			payload = map[string]interface{}{
+				"type": "error",
+				"error": map[string]string{
+					"type":    "api_error",
+					"message": "stream interrupted: " + errMsg,
+				},
+			}
 		} else {
-			fmt.Fprintf(c.Writer, "data: {\"error\":{\"message\":\"stream interrupted: %s\"}}\n\n", errMsg)
+			payload = map[string]interface{}{
+				"error": map[string]string{"message": "stream interrupted: " + errMsg},
+			}
+		}
+		payloadJSON, marshalErr := json.Marshal(payload)
+		if marshalErr == nil {
+			if requestFormat == "anthropic" {
+				fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", payloadJSON)
+			} else {
+				fmt.Fprintf(c.Writer, "data: %s\n\n", payloadJSON)
+			}
 		}
 		if f, ok := c.Writer.(http.Flusher); ok {
 			f.Flush()

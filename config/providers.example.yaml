@@ -36,6 +36,7 @@ providers:                       # 供应商列表，按优先级从高到低降
     priority: 1                  # 优先级（数字越小越优先），失败后降级到下一优先级
     format: openai               # 请求体转换格式，决定如何将客户端请求转为上游格式
     timeout: 60                  # 请求超时时间（秒）
+    max_concurrent: 2            # 同一 scheme/host/port 的最大并发请求数；同主机配置共享最小值（0=不限）
     retry:                       # 重试策略
       max_retries: 3             # 最大重试次数
       retry_interval: 1          # 初始重试间隔（秒）
@@ -51,6 +52,7 @@ providers:                       # 供应商列表，按优先级从高到低降
     format: anthropic             # 请求体按 Anthropic Messages API 格式转换
     auth_type: bearer             # 认证方式，bearer=Authorization 头，x-api-key=X-Api-Key 头
     timeout: 60
+    max_concurrent: 2
     retry:
       max_retries: 3
       retry_interval: 1

@@ -52,6 +52,10 @@ type Provider struct {
 	Format    string          `yaml:"format" json:"format"`
 	AuthType  string          `yaml:"auth_type" json:"auth_type"` // "bearer" or "x-api-key"; auto-detect from format if empty
 	RateLimit RateLimitConfig `yaml:"rate_limit" json:"rate_limit"`
+	// MaxConcurrent limits concurrent requests to the provider's upstream
+	// scheme/host/port. Providers sharing an origin share the strictest limit.
+	// Zero disables the limit.
+	MaxConcurrent int `yaml:"max_concurrent" json:"max_concurrent"`
 }
 
 type ModelRoute struct {

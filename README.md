@@ -54,6 +54,7 @@ providers:
     priority: 1
     format: openai
     timeout: 60
+    max_concurrent: 2
     retry:
       max_retries: 3
       retry_interval: 2
@@ -209,8 +210,7 @@ OPEN（熔断，请求直接跳过该组）
 | 错误类型 | 行为 |
 |----------|------|
 | HTTP 5xx | 可重试，等待退避后重试同一供应商 |
-| HTTP 429 | 可重试，等待退避后重试同一供应商 |
-| HTTP 4xx（除 429） | 不可重试，立即切换下一供应商 |
+| HTTP 4xx（全部状态码） | 可重试，按 YAML 配置的退避时间重试同一供应商 |
 | 超时/取消 | 不可重试，立即切换 |
 | 流式已部分写入 | 停止重试，注入 SSE 错误事件 |
 
@@ -225,6 +225,7 @@ OPEN（熔断，请求直接跳过该组）
 - **空闲超时**：`idleTimeoutReader` 在 `provider.Timeout` 秒无数据时返回超时
 - **整体超时**：`global.max_stream_minutes` 控制流式总时长上限（默认 3 分钟），超过则中断流并注入 SSE error event
 - **中途错误**：流式失败时注入 SSE error event，通知客户端截断
+- **首事件前故障转移**：收到上游 200 后延迟提交下游响应头；首个 SSE 事件前断开或空流可继续重试/降级
 - **跨格式转换**：SSE 流逐事件实时转换（Anthropic SSE ↔ OpenAI SSE）
 
 ---
@@ -322,6 +323,7 @@ model_rules:
 | `format` | 是 | — | `openai` 或 `anthropic` |
 | `auth_type` | 否 | 自动 | `bearer`（Authorization: Bearer）或 `x-api-key`（+ anthropic-version）；为空时按 format 自动选择：openai→bearer，anthropic→x-api-key |
 | `timeout` | 否 | 60 | 请求超时（秒，不能为负） |
+| `max_concurrent` | 否 | 0 | 同一上游 scheme/host/port 的最大并发请求数；共享主机取最小正值，0 表示不限 |
 | `retry.max_retries` | 否 | 3 | 最大重试次数（不能为负） |
 | `retry.retry_interval` | 否 | 2 | 首次重试间隔（秒，不能为负） |
 | `retry.backoff_factor` | 否 | 2 | 退避因子（不能为负） |

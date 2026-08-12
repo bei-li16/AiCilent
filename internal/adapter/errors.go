@@ -1,8 +1,6 @@
 package adapter
 
-import (
-	"fmt"
-)
+import "fmt"
 
 type APIError struct {
 	StatusCode int
@@ -14,11 +12,8 @@ func (e *APIError) Error() string {
 }
 
 func (e *APIError) Retryable() bool {
-	// 5xx server errors are retryable
-	if e.StatusCode >= 500 {
-		return true
-	}
-	// 4xx client errors are retryable (same as 429)
+	// All upstream 4xx and 5xx responses are retryable. The retry count and
+	// backoff schedule are controlled exclusively by the provider YAML.
 	if e.StatusCode >= 400 {
 		return true
 	}

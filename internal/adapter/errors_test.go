@@ -16,6 +16,9 @@ func TestAPIErrorRetryable(t *testing.T) {
 		{name: "forbidden", status: 403, retryable: true},
 		{name: "not found", status: 404, retryable: true},
 		{name: "request timeout", status: 408, retryable: true},
+		{name: "conflict", status: 409, retryable: true},
+		{name: "too early", status: 425, retryable: true},
+		{name: "client closed request", status: 499, retryable: true},
 	}
 
 	for _, tt := range tests {

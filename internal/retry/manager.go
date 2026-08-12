@@ -31,8 +31,12 @@ func (m *Manager) Attempt() int {
 	return m.attempt
 }
 
+func (m *Manager) waitDuration() time.Duration {
+	return time.Duration(float64(m.retryInterval)*math.Pow(m.backoffFactor, float64(m.attempt-1))) * time.Second
+}
+
 func (m *Manager) Wait(ctx context.Context) error {
-	wait := time.Duration(float64(m.retryInterval)*math.Pow(m.backoffFactor, float64(m.attempt-1))) * time.Second
+	wait := m.waitDuration()
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	select {

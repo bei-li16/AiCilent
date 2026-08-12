@@ -312,6 +312,13 @@ func initializeConfig(path string) (firstRun bool, err error) {
 	if err != nil {
 		return firstRun, err
 	}
+	for name := range providerNamesMissingKey(data, "max_concurrent") {
+		for i := range cfg.Providers {
+			if cfg.Providers[i].Name == name {
+				cfg.Providers[i].MaxConcurrent = 2
+			}
+		}
+	}
 
 	updated := configNeedsMigration(data)
 	if updated {
@@ -401,13 +408,35 @@ func configNeedsMigration(data []byte) bool {
 		return false
 	}
 	for _, provider := range providers.Content {
-		for _, key := range []string{"timeout", "retry", "auth_type", "rate_limit"} {
+		for _, key := range []string{"timeout", "max_concurrent", "retry", "auth_type", "rate_limit"} {
 			if yamlMapValue(provider, key) == nil {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+func providerNamesMissingKey(data []byte, key string) map[string]struct{} {
+	missing := make(map[string]struct{})
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return missing
+	}
+	providers := yamlMapValue(rootMap(&root), "providers")
+	if providers == nil || providers.Kind != yaml.SequenceNode {
+		return missing
+	}
+	for _, provider := range providers.Content {
+		if yamlMapValue(provider, key) != nil {
+			continue
+		}
+		name := yamlMapValue(provider, "name")
+		if name != nil && name.Value != "" {
+			missing[name.Value] = struct{}{}
+		}
+	}
+	return missing
 }
 
 func yamlHasKey(data []byte, path ...string) bool {
@@ -682,6 +711,8 @@ func showConfigEditor(a fyne.App, parent fyne.Window, pm *proxyManager) {
 	priorityEntry.SetPlaceHolder("1")
 	timeoutEntry := widget.NewEntry()
 	timeoutEntry.SetPlaceHolder("60")
+	maxConcurrentEntry := widget.NewEntry()
+	maxConcurrentEntry.SetPlaceHolder("2，0 表示不限")
 	editingIndex := -1
 	formTitle := widget.NewLabel("添加供应商")
 	var submitBtn *widget.Button
@@ -694,6 +725,7 @@ func showConfigEditor(a fyne.App, parent fyne.Window, pm *proxyManager) {
 		urlEntry.SetText("")
 		priorityEntry.SetText("")
 		timeoutEntry.SetText("")
+		maxConcurrentEntry.SetText("")
 		formatSelect.SetSelected("openai")
 		formTitle.SetText("添加供应商")
 		if submitBtn != nil {
@@ -719,6 +751,7 @@ func showConfigEditor(a fyne.App, parent fyne.Window, pm *proxyManager) {
 				formatSelect.SetSelected(p.Format)
 				priorityEntry.SetText(strconv.Itoa(p.Priority))
 				timeoutEntry.SetText(strconv.Itoa(p.Timeout))
+				maxConcurrentEntry.SetText(strconv.Itoa(p.MaxConcurrent))
 				formTitle.SetText("编辑供应商: " + p.Name)
 				submitBtn.SetText("保存供应商")
 			})
@@ -751,17 +784,22 @@ func showConfigEditor(a fyne.App, parent fyne.Window, pm *proxyManager) {
 		if n, err := strconv.Atoi(timeoutEntry.Text); err == nil && n > 0 {
 			timeout = n
 		}
+		maxConcurrent := 2
+		if n, err := strconv.Atoi(maxConcurrentEntry.Text); err == nil && n >= 0 {
+			maxConcurrent = n
+		}
 		apiKey := apiKeyEntry.Text
 		provider := config.Provider{
-			Name:     nameEntry.Text,
-			Vendor:   formatSelect.Selected,
-			ModelID:  modelEntry.Text,
-			APIKey:   apiKey,
-			BaseURL:  urlEntry.Text,
-			Format:   formatSelect.Selected,
-			Priority: priority,
-			Timeout:  timeout,
-			Retry:    config.RetryConfig{MaxRetries: 3, RetryInterval: 2, BackoffFactor: 2},
+			Name:          nameEntry.Text,
+			Vendor:        formatSelect.Selected,
+			ModelID:       modelEntry.Text,
+			APIKey:        apiKey,
+			BaseURL:       urlEntry.Text,
+			Format:        formatSelect.Selected,
+			Priority:      priority,
+			Timeout:       timeout,
+			MaxConcurrent: maxConcurrent,
+			Retry:         config.RetryConfig{MaxRetries: 3, RetryInterval: 2, BackoffFactor: 2},
 		}
 		if editingIndex >= 0 {
 			old := cfg.Providers[editingIndex]
@@ -818,6 +856,7 @@ func showConfigEditor(a fyne.App, parent fyne.Window, pm *proxyManager) {
 			widget.NewLabel("格式"), formatSelect,
 			widget.NewLabel("优先级"), priorityEntry,
 			widget.NewLabel("超时(秒)"), timeoutEntry,
+			widget.NewLabel("主机最大并发"), maxConcurrentEntry,
 		),
 		submitBtn,
 		widget.NewSeparator(),
