@@ -264,6 +264,7 @@ OPEN（熔断，请求直接跳过该组）
 | `POST` | `/chat/completions` | 兼容不带 /v1 的路径 |
 | `POST` | `/v1/messages` | Anthropic Messages API |
 | `POST` | `/v1/responses` | OpenAI Responses API，转换到上游 Chat Completions（同步 + 流式） |
+| `POST` | `/responses` | Responses API 兼容路径（部分客户端不带 `/v1`） |
 | `GET` | `/health` | 健康检查 `{"status":"ok"}` |
 | `GET` | `/` | 监控面板 |
 | `GET` | `/api/stats` | 统计快照 JSON |

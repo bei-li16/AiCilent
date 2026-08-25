@@ -79,6 +79,9 @@ func New(cfg *config.Config, configPath string) *Instance {
 	r.POST("/chat/completions", engine.HandleRequest)
 	r.POST("/v1/messages", engine.HandleRequest)
 	r.POST("/v1/responses", engine.HandleRequest)
+	// Some OpenAI-compatible clients (including Codex) append /responses
+	// directly to the configured base URL instead of using the /v1 prefix.
+	r.POST("/responses", engine.HandleRequest)
 
 	r.GET("/", serveWeb("web/index.html", "text/html; charset=utf-8"))
 	r.GET("/style.css", serveWeb("web/style.css", "text/css; charset=utf-8"))

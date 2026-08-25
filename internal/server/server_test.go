@@ -2,8 +2,10 @@ package server
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"ai-proxy/internal/config"
@@ -41,5 +43,45 @@ func TestVersionEndpoint(t *testing.T) {
 	srv.SaveStats()
 	if srv.Rot != nil {
 		_ = srv.Rot.Close()
+	}
+}
+
+func TestResponsesAliasRoute(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Errorf("upstream path = %q, want /v1/chat/completions", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"chatcmpl-alias","model":"gpt-5-codex","choices":[{"message":{"role":"assistant","content":"pong"},"finish_reason":"stop"}]}`)
+	}))
+	defer upstream.Close()
+
+	cfg := &config.Config{
+		Global: config.GlobalConfig{ListenAddr: ":0", CBThreshold: 3, CBCooldown: 10, CBSkipRequests: 1},
+		Providers: []config.Provider{{
+			Name: "test", ModelID: "gpt-5-codex", APIKey: "key",
+			BaseURL: upstream.URL + "/v1", Format: "openai", Priority: 1, Timeout: 5,
+		}},
+	}
+	srv := New(cfg, "")
+	defer func() {
+		srv.SaveStats()
+		if srv.Rot != nil {
+			_ = srv.Rot.Close()
+		}
+	}()
+
+	req := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(`{"model":"gpt-5-codex","input":"ping"}`))
+	res := httptest.NewRecorder()
+	srv.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["object"] != "response" || body["output_text"] != "pong" {
+		t.Fatalf("unexpected Responses response: %#v", body)
 	}
 }
