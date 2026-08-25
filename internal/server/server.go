@@ -78,6 +78,7 @@ func New(cfg *config.Config, configPath string) *Instance {
 	r.POST("/v1/chat/completions", engine.HandleRequest)
 	r.POST("/chat/completions", engine.HandleRequest)
 	r.POST("/v1/messages", engine.HandleRequest)
+	r.POST("/v1/responses", engine.HandleRequest)
 
 	r.GET("/", serveWeb("web/index.html", "text/html; charset=utf-8"))
 	r.GET("/style.css", serveWeb("web/style.css", "text/css; charset=utf-8"))

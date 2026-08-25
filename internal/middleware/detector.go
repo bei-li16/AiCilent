@@ -19,9 +19,14 @@ func DetectFormat() gin.HandlerFunc {
 			return
 		}
 
-		// Detect by URL path: /v1/messages or /messages → anthropic
+		// Detect protocol by URL path before inspecting the body. Responses and
+		// Anthropic both use an input/messages-style payload, so the endpoint is
+		// the unambiguous signal when a client uses the standard API paths.
 		format := ""
 		path := c.Request.URL.Path
+		if path == "/v1/responses" || path == "/responses" || strings.HasSuffix(path, "/responses") {
+			format = "responses"
+		}
 		if path == "/v1/messages" || path == "/messages" || strings.HasSuffix(path, "/messages") {
 			format = "anthropic"
 		}

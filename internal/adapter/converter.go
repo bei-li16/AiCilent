@@ -53,6 +53,9 @@ func ConvertRequest(body []byte, fromFormat, toFormat string) ([]byte, error) {
 	}
 
 	switch {
+	case fromFormat == "responses" && toFormat == "openai":
+		return convertResponsesRequestToOpenAI(raw)
+
 	case fromFormat == "openai" && toFormat == "anthropic":
 		// Extract system message from messages and set as top-level "system"
 		if msgs, ok := raw["messages"].([]interface{}); ok {
@@ -219,6 +222,9 @@ func ConvertResponse(body []byte, fromFormat, toFormat, model string) ([]byte, e
 	if fromFormat == toFormat {
 		return body, nil
 	}
+	if fromFormat == "openai" && toFormat == "responses" {
+		return convertOpenAIResponseToResponses(body, model)
+	}
 
 	if fromFormat == "anthropic" && toFormat == "openai" {
 		// Use generic JSON manipulation to handle tool_use blocks
@@ -306,12 +312,12 @@ func ConvertResponse(body []byte, fromFormat, toFormat, model string) ([]byte, e
 		}
 
 		anthropicResp := map[string]interface{}{
-			"id":           raw["id"],
-			"type":         "message",
-			"role":         "assistant",
-			"model":        model,
-			"content":      []interface{}{},
-			"stop_reason":  "end_turn",
+			"id":            raw["id"],
+			"type":          "message",
+			"role":          "assistant",
+			"model":         model,
+			"content":       []interface{}{},
+			"stop_reason":   "end_turn",
 			"stop_sequence": nil,
 		}
 
@@ -355,9 +361,9 @@ func ConvertResponse(body []byte, fromFormat, toFormat, model string) ([]byte, e
 							json.Unmarshal([]byte(argsStr), &argsJSON)
 
 							content = append(content, map[string]interface{}{
-								"type": "tool_use",
-								"id":   id,
-								"name": name,
+								"type":  "tool_use",
+								"id":    id,
+								"name":  name,
 								"input": argsJSON,
 							})
 						}
@@ -392,6 +398,9 @@ func StreamConvertResponse(src io.Reader, dst io.Writer, fromFormat, toFormat st
 	if fromFormat == toFormat {
 		_, err := io.Copy(dst, src)
 		return err
+	}
+	if fromFormat == "openai" && toFormat == "responses" {
+		return convertOpenAISSEToResponses(src, dst)
 	}
 
 	if fromFormat == "anthropic" && toFormat == "openai" {
@@ -698,10 +707,10 @@ func convertOpenAISSETOAnthropic(src io.Reader, dst io.Writer) error {
 				}
 
 				tcIdxFloat, ok := tcMap["index"].(float64)
-			if !ok {
-				continue
-			}
-			tcIdx := int(tcIdxFloat)
+				if !ok {
+					continue
+				}
+				tcIdx := int(tcIdxFloat)
 
 				// Find or create accumulator for this tool call index
 				var acc *toolCallAcc
@@ -742,9 +751,9 @@ func convertOpenAISSETOAnthropic(src io.Reader, dst io.Writer) error {
 						"type":  "content_block_start",
 						"index": acc.blockIndex,
 						"content_block": map[string]interface{}{
-							"type": "tool_use",
-							"id":   acc.id,
-							"name": acc.name,
+							"type":  "tool_use",
+							"id":    acc.id,
+							"name":  acc.name,
 							"input": map[string]interface{}{},
 						},
 					})

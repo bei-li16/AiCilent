@@ -243,11 +243,13 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 	}
 	tr.LogRequest(c.Request.Method, c.Request.URL.Path, logLevel, buildRequestBodyLog(body, logLevel))
 
-	// Filter to only same-format providers — no cross-format degradation.
-	// OpenAI requests route to OpenAI providers only; Anthropic to Anthropic.
+	// Filter to providers that speak the upstream protocol needed by this
+	// request. Responses is an OpenAI client protocol that is adapted to the
+	// provider's Chat Completions endpoint, so it uses OpenAI providers.
+	providerFormat := upstreamFormat(requestFormat)
 	providers := make([]*config.Provider, 0, len(allProviders))
 	for _, p := range allProviders {
-		if p.Format == requestFormat {
+		if p.Format == providerFormat {
 			providers = append(providers, p)
 		}
 	}
@@ -718,6 +720,13 @@ func (e *Engine) forwardRequest(c *gin.Context, body []byte, requestFormat strin
 
 	c.Data(http.StatusOK, "application/json", respBody)
 	return nil
+}
+
+func upstreamFormat(requestFormat string) string {
+	if requestFormat == "responses" {
+		return "openai"
+	}
+	return requestFormat
 }
 
 func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat string, provider *config.Provider, timeout int, tr *tracer.Recorder) error {

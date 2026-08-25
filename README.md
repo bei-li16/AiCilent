@@ -1,6 +1,6 @@
 # AI Proxy — AI 请求转发平台
 
-统一管理多个 AI 供应商，提供单一入口供 OpenCode、Claude Desktop、OpenClaw 等 Agent 工具接入。支持优先级路由、故障转移、指数退避重试（含 429 限流重试）、断路器保护（状态持久化）、SSE 流式传输、OpenAI ↔ Anthropic 协议自动转换（含 tool_use/tool_calls/thinking），以及内建监控面板、GUI 启动器、请求限流、日志轮转、配置热加载。
+统一管理多个 AI 供应商，提供单一入口供 OpenCode、Claude Desktop、OpenClaw、Codex 等 Agent 工具接入。支持优先级路由、故障转移、指数退避重试（含 429 限流重试）、断路器保护（状态持久化）、SSE 流式传输、OpenAI Chat Completions / Responses、Anthropic Messages 协议转换（含 tool_use/tool_calls/thinking），以及内建监控面板、GUI 启动器、请求限流、日志轮转、配置热加载。
 
 ---
 
@@ -226,13 +226,13 @@ OPEN（熔断，请求直接跳过该组）
 - **整体超时**：`global.max_stream_minutes` 控制流式总时长上限（默认 3 分钟），超过则中断流并注入 SSE error event
 - **中途错误**：流式失败时注入 SSE error event，通知客户端截断
 - **首事件前故障转移**：收到上游 200 后延迟提交下游响应头；首个完整 `data:` 事件前断开、心跳或空流可继续重试/降级
-- **跨格式转换**：SSE 流逐事件实时转换（Anthropic SSE ↔ OpenAI SSE）
+- **跨格式转换**：SSE 流逐事件实时转换（Anthropic SSE ↔ OpenAI SSE，Responses SSE ↔ Chat Completions SSE）
 
 ---
 
 ## 协议转换
 
-自动检测请求格式（按 URL 路径 + body 字段），支持 OpenAI ↔ Anthropic 双向转换：
+自动检测请求格式（按 URL 路径 + body 字段），支持 OpenAI Chat Completions、OpenAI Responses 和 Anthropic Messages：
 
 | 转换方向 | 处理内容 |
 |----------|---------|
@@ -263,6 +263,7 @@ OPEN（熔断，请求直接跳过该组）
 | `POST` | `/v1/chat/completions` | Chat Completions（同步 + 流式） |
 | `POST` | `/chat/completions` | 兼容不带 /v1 的路径 |
 | `POST` | `/v1/messages` | Anthropic Messages API |
+| `POST` | `/v1/responses` | OpenAI Responses API，转换到上游 Chat Completions（同步 + 流式） |
 | `GET` | `/health` | 健康检查 `{"status":"ok"}` |
 | `GET` | `/` | 监控面板 |
 | `GET` | `/api/stats` | 统计快照 JSON |
