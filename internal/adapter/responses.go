@@ -156,11 +156,8 @@ func responsesContentToChatContent(content interface{}) interface{} {
 				text, _ := part["text"].(string)
 				parts = append(parts, map[string]interface{}{"type": "text", "text": text})
 			case "input_image":
-				if imageURL, ok := part["image_url"].(string); ok && imageURL != "" {
-					parts = append(parts, map[string]interface{}{
-						"type":      "image_url",
-						"image_url": map[string]interface{}{"url": imageURL},
-					})
+				if img := inputImageToChatImage(part); img != nil {
+					parts = append(parts, img)
 				}
 			}
 		}
@@ -172,6 +169,32 @@ func responsesContentToChatContent(content interface{}) interface{} {
 		return parts
 	default:
 		return fmt.Sprint(value)
+	}
+}
+
+// inputImageToChatImage converts a Responses input_image part into the Chat
+// Completions image_url shape. image_url arrives as a plain string from most
+// Responses clients but as an object {"url": ...} from some Chat-style ones;
+// both are accepted, and detail is preserved when present. Returns nil when
+// the part carries no usable URL.
+func inputImageToChatImage(part map[string]interface{}) map[string]interface{} {
+	var imageURL string
+	switch v := part["image_url"].(type) {
+	case string:
+		imageURL = v
+	case map[string]interface{}:
+		imageURL, _ = v["url"].(string)
+	}
+	if imageURL == "" {
+		return nil
+	}
+	image := map[string]interface{}{"url": imageURL}
+	if detail, ok := part["detail"].(string); ok && detail != "" {
+		image["detail"] = detail
+	}
+	return map[string]interface{}{
+		"type":      "image_url",
+		"image_url": image,
 	}
 }
 

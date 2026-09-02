@@ -22,8 +22,8 @@ func TestPrepareProviderRequestNormalizesSensenovaReasoning(t *testing.T) {
 	if body["model"] != "glm-5.2" {
 		t.Fatalf("model = %#v, want glm-5.2", body["model"])
 	}
-	if body["reasoning_effort"] != "max" {
-		t.Fatalf("reasoning_effort = %#v, want max", body["reasoning_effort"])
+	if body["reasoning_effort"] != "xhigh" {
+		t.Fatalf("reasoning_effort = %#v, want xhigh (xhigh must not be remapped; models that reject max would 400)", body["reasoning_effort"])
 	}
 	if body["reasoning"] != true {
 		t.Fatalf("reasoning = %#v, want true", body["reasoning"])

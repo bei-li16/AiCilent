@@ -43,6 +43,48 @@ func TestResponsesRequestConvertsToChatCompletions(t *testing.T) {
 	}
 }
 
+func TestResponsesRequestConvertsInputImage(t *testing.T) {
+	// image_url arrives as a plain string from Responses clients and as an
+	// object {"url": ...} from Chat-style ones; both must survive conversion.
+	body := []byte(`{"model":"gpt-5-codex","input":[{"role":"user","content":[{"type":"input_text","text":"what is this"},{"type":"input_image","image_url":"data:image/png;base64,AAAA","detail":"high"},{"type":"input_image","image_url":{"url":"https://example.com/pic.png"}}]}]}`)
+	converted, err := ConvertRequest(body, "responses", "openai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatal(err)
+	}
+	messages, _ := got["messages"].([]interface{})
+	if len(messages) != 1 {
+		t.Fatalf("messages length = %d, want 1", len(messages))
+	}
+	content, _ := messages[0].(map[string]interface{})["content"].([]interface{})
+	if len(content) != 3 {
+		t.Fatalf("content parts = %d, want 3 (text must not swallow images)", len(content))
+	}
+	text, _ := content[0].(map[string]interface{})["text"].(string)
+	if text != "what is this" {
+		t.Fatalf("text part = %#v", content[0])
+	}
+	first, _ := content[1].(map[string]interface{})
+	if first["type"] != "image_url" {
+		t.Fatalf("part 1 type = %#v, want image_url", first["type"])
+	}
+	image := first["image_url"].(map[string]interface{})
+	if image["url"] != "data:image/png;base64,AAAA" || image["detail"] != "high" {
+		t.Fatalf("string-form image conversion = %#v", image)
+	}
+	second, _ := content[2].(map[string]interface{})
+	if second["type"] != "image_url" {
+		t.Fatalf("part 2 type = %#v, want image_url", second["type"])
+	}
+	objectImage := second["image_url"].(map[string]interface{})
+	if objectImage["url"] != "https://example.com/pic.png" {
+		t.Fatalf("object-form image conversion = %#v", objectImage)
+	}
+}
+
 func TestChatCompletionsResponseConvertsToResponses(t *testing.T) {
 	body := []byte(`{"id":"chatcmpl-1","created":1700000000,"model":"gpt-5-codex","choices":[{"message":{"role":"assistant","content":"hello","tool_calls":[{"id":"call-1","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"x\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":4,"completion_tokens":5,"total_tokens":9}}`)
 	converted, err := ConvertResponse(body, "openai", "responses", "gpt-5-codex")

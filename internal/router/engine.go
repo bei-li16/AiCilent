@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,8 +28,10 @@ import (
 )
 
 // maxRequestBodySize limits the request body to prevent OOM from malicious
-// payloads. 10MB is generous for chat completions with long conversation history.
-const maxRequestBodySize = 10 << 20 // 10 MB
+// payloads. 50MB leaves room for multimodal requests: a single base64 image
+// attachment alone can reach ~5MB, and coding agents attach them on top of
+// large conversation history.
+const maxRequestBodySize = 50 << 20 // 50 MB
 
 type Engine struct {
 	cfg        *config.Config
@@ -1207,7 +1210,9 @@ func isSensenovaProvider(baseURL string) bool {
 
 // normalizeSensenovaReasoning adapts OpenAI-compatible reasoning parameters to
 // the Sensenova endpoint. It requires reasoning=true when reasoning_effort is
-// present and accepts max rather than the OpenAI-compatible xhigh value.
+// present. The valid values are: low, medium, high, xhigh, none. Some models
+// (glm-5.2, deepseek-v4-pro, kimi-k3) also accept max; xhigh is universally
+// accepted and is NOT remapped to avoid 400 errors on models that reject max.
 func normalizeSensenovaReasoning(body []byte) []byte {
 	var data map[string]interface{}
 	if err := json.Unmarshal(body, &data); err != nil {
@@ -1217,9 +1222,6 @@ func normalizeSensenovaReasoning(body []byte) []byte {
 	effort, ok := data["reasoning_effort"].(string)
 	if !ok || strings.TrimSpace(effort) == "" {
 		return body
-	}
-	if strings.EqualFold(strings.TrimSpace(effort), "xhigh") {
-		data["reasoning_effort"] = "max"
 	}
 	// Sensenova rejects reasoning_effort unless reasoning mode is enabled.
 	data["reasoning"] = true
@@ -1313,11 +1315,27 @@ func effectiveTimeout(providerTimeout, modelTimeout int) int {
 	return providerTimeout
 }
 
+// dataURLPattern matches data: URLs carrying base64 payloads (images attached
+// by clients). Logged bodies keep a short prefix so the attachment is still
+// visible in traces without inflating the log file by megabytes per request.
+var dataURLPattern = regexp.MustCompile(`data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+`)
+
+func truncateDataURLs(s string) string {
+	return dataURLPattern.ReplaceAllStringFunc(s, func(m string) string {
+		const keep = 64
+		if len(m) <= keep+32 {
+			return m
+		}
+		return fmt.Sprintf("%s...[base64 truncated, total %d KB]", m[:keep], len(m)/1024)
+	})
+}
+
 // buildRequestBodyLog renders the request body for logging according to level:
 //
 //	"off"     → "" (no content)
 //	"snippet" → first message's content, truncated to 80 chars
 //	"full"    → the entire request body, pretty-printed (model/messages/role/stream/tools/...)
+//	            with base64 image data URLs truncated
 func buildRequestBodyLog(body []byte, level string) string {
 	switch level {
 	case "off":
@@ -1325,9 +1343,9 @@ func buildRequestBodyLog(body []byte, level string) string {
 	case "full":
 		var pretty bytes.Buffer
 		if err := json.Indent(&pretty, body, "", "  "); err != nil {
-			return string(body) // fall back to raw if not valid JSON
+			return truncateDataURLs(string(body)) // fall back to raw if not valid JSON
 		}
-		return pretty.String()
+		return truncateDataURLs(pretty.String())
 	default: // "snippet"
 		return extractBodySnippet(body)
 	}
