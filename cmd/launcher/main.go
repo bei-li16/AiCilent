@@ -324,7 +324,7 @@ func initializeConfig(path string) (firstRun bool, err error) {
 			cfg.Global.LogFile = "../proxy.log"
 		}
 		if !yamlHasKey(data, "global", "max_stream_minutes") {
-			cfg.Global.MaxStreamMinutes = 3
+			cfg.Global.MaxStreamMinutes = 15
 		}
 	}
 	// Older GUI releases resolved proxy.log from the executable working
