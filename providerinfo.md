@@ -35,7 +35,7 @@
 
 ### 注意事项
 
-- **V4 Flash 与 V4 Pro 参数不同**：Flash 仅支持 4 档（low/medium/high/none），默认 `medium`；Pro 支持 6 档（含 xhigh/max），默认 `high`，其中 `medium` 和 `xhigh` 映射为 `high`
+- **V4 Flash 与 V4 Pro 参数不同**：Flash 仅支持 4 档（low/medium/high/xhigh/none），默认 `medium`；Pro 支持 6 档（含 xhigh/max），默认 `high`，其中 `medium` 和 `xhigh` 映射为 `high`
 - **GLM-5.2 与原厂差异**：智谱官方文档支持 7 档（max/xhigh/high/medium/low/minimal/none），SenseNova 归一化为 4 档（low/medium/high/none），默认 `medium` 而非 `max`
 - `deepseek-v4-pro` 流式响应中推理字段为 `delta.thinking_content`，其余模型为 `delta.reasoning_content`（非流式为 `reasoning_content`）
 
