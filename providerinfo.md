@@ -27,7 +27,7 @@
 | `kimi-k3` | `low` / `high` / `max` | `max` | `reasoning_content` | ❌ | ❌ 不使用 |
 | `glm-5.2` | `low` / `medium` / `high` / `none` | `medium` | `reasoning_content` | ✅ | ❌ 未提及 |
 | `deepseek-v4-pro` | `low` / `high` / `max` / `none`（`medium`→`high`，`xhigh`→`high`） | `high` | `thinking_content` | ✅ | ✅ enabled/disabled |
-| `deepseek-v4-flash` | `low` / `medium` / `high` / `none` | `medium` | `reasoning_content` | ✅ | ❌ 未提及 |
+| `deepseek-v4-flash` | `low` / `medium` / `high` /`xhigh` / `none` | `medium` | `reasoning_content` | ✅ | ❌ 未提及 |
 | `sensenova-6.8-flash-lite` | `low` / `medium` / `high` / `none` | `medium` | `reasoning_content` | ✅ | ❌ 未提及 |
 | `sensenova-6.7-flash-lite` | 同 6.8（已重定向） | 同 6.8 | 同 6.8 | 同 6.8 | 同 6.8 |
 | `sensenova-u1.5-lite` | N/A（图像生成模型） | N/A | N/A | N/A | N/A |
