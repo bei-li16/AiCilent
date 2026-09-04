@@ -40,6 +40,9 @@ providers.json
 .env
 .env.*
 
+# Deploy scripts (contain credentials)
+deploy-rpi.ps1
+
 # Temp
 old/
 *.bak
