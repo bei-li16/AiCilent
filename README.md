@@ -6,60 +6,11 @@
 
 ## 快速开始
 
-### 编译
-
-```bash
-# CLI 版本（纯 Go，无 CGO 依赖）
-make build-cli
-# 或手动编译（版本号显示为 dev）
-go build -o ai-proxy.exe ./cmd/proxy/
-
-# GUI 版本（需要 CGO + MinGW-w64，Windows 下需安装 GCC）
-make build-gui
-# 或手动编译
-go build -ldflags "-H=windowsgui" -tags gui -o ai-proxy-gui.exe ./cmd/launcher/
-```
-
-| 产物 | 说明 | 大小 |
-|------|------|------|
-| `ai-proxy.exe` | CLI 版本，命令行启动，适合服务器/无头环境 | ~13 MB |
-| `ai-proxy-gui.exe` | GUI 版本，含系统托盘、配置编辑器、实时日志，适合桌面 | ~59 MB |
-
 ### 配置
 
-GUI 版本可直接发布单个 `ai-proxy-gui.exe`。首次启动会以 exe 所在目录为根目录自动创建：
+**GUI 版本**：双击 `ai-proxy-gui.exe` 即可，无需额外配置。首次启动会自动创建 `config/providers.yaml` 和 `proxy.log`，内置默认模板，通过"编辑配置"填写 API Key 即可。升级时自动补充新增字段，不覆盖已有供应商和 API Key。
 
-```text
-config/providers.yaml
-proxy.log
-```
-
-默认配置已嵌入 exe；首次启动后通过“编辑配置”填写供应商 API Key。升级启动时，GUI 会为已有 YAML 补充新版本缺失的配置字段，但不会覆盖已有供应商、API Key 或已明确设置的值。日志路径也不依赖启动时的工作目录。
-
-CLI 版本仍需复制 `config/providers.example.yaml` 为 `config/providers.yaml`，填入 API Key：
-
-```yaml
-global:
-  listen_addr: ":8080"
-  log_file: proxy.log
-  cb_threshold: 2
-  cb_cooldown: 30
-  cb_skip_requests: 10
-
-providers:
-  - name: my-provider
-    model_id: gpt-4o
-    api_key: sk-xxxxxx
-    base_url: https://api.openai.com/v1
-    priority: 1
-    format: openai
-    timeout: 60
-    max_concurrent: 2
-    retry:
-      max_retries: 3
-      retry_interval: 2
-      backoff_factor: 2
-```
+**CLI 版本**：将 `config/providers.example.yaml` 复制为 `config/providers.yaml`，填入 API Key。完整字段说明见[配置参考](#配置参考)。
 
 ### 启动
 
@@ -70,13 +21,141 @@ ai-proxy.exe --version    # 查看版本信息
 
 ### 配置 Agent
 
-将 Agent 工具的 `base_url` 指向 `http://localhost:8080`。`model` 字段支持三种路由模式：
+将 Agent 工具的 `base_url` 指向 `http://localhost:8080`，`model` 字段填写路由模式或真实模型名。
 
-| 模式 | model 值 | 行为 | 适用场景 |
-|------|----------|------|----------|
-| **Flash**（推荐） | `Flash` | 跳过当前最高优先级组 | 日常使用，避免最高优先级组的 TPM 限流 |
-| **Medium** | `Medium` | 全部优先级，自动降级 | 穷尽所有可用供应商 |
-| **Max** | `Max` | 仅当前最高优先级组 | 需要最强模型，不计成本 |
+#### OpenCode
+
+```json
+{
+  "npm": "@ai-sdk/openai-compatible",
+  "options": {
+    "baseURL": "http://localhost:8080",
+    "apiKey": "",
+    "setCacheKey": true
+  },
+  "models": {
+    "P1": {
+      "name": "kimi-k3",
+      "attachment": true,
+      "modalities": {
+        "input": ["text", "image"],
+        "output": ["text"]
+      },
+      "variants": {
+        "low": { "reasoning": true, "reasoningEffort": "low" },
+        "high": { "reasoning": true, "reasoningEffort": "high" },
+        "max": { "reasoning": true, "reasoningEffort": "max" }
+      }
+    },
+    "P2": {
+      "name": "glm-5.2",
+      "attachment": false,
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
+      "variants": {
+        "low": { "reasoning": true, "reasoningEffort": "low" },
+        "medium": { "reasoning": true, "reasoningEffort": "medium" },
+        "high": { "reasoning": true, "reasoningEffort": "high" },
+        "none": { "reasoning": true, "reasoningEffort": "none" }
+      }
+    },
+    "P3": {
+      "name": "deepseek-v4-pro",
+      "attachment": false,
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
+      "variants": {
+        "low": { "reasoning": true, "reasoningEffort": "low" },
+        "high": { "reasoning": true, "reasoningEffort": "high" },
+        "max": { "reasoning": true, "reasoningEffort": "max" },
+        "none": { "reasoning": true, "reasoningEffort": "none" }
+      }
+    },
+    "P4": {
+      "name": "deepseek-v4-flash",
+      "attachment": false,
+      "modalities": {
+        "input": ["text"],
+        "output": ["text"]
+      },
+      "variants": {
+        "low": { "reasoning": true, "reasoningEffort": "low" },
+        "medium": { "reasoning": true, "reasoningEffort": "medium" },
+        "high": { "reasoning": true, "reasoningEffort": "high" },
+        "xhigh": { "reasoning": true, "reasoningEffort": "xhigh" },
+        "none": { "reasoning": true, "reasoningEffort": "none" }
+      }
+    }
+  }
+}
+```
+
+> `model` 键（P1/P2/P3/P4）即路由模式，对应代理的优先级选择。`apiKey` 留空，代理使用 YAML 中配置的供应商密钥。各模型的输入输出模态、思考等级等参数详见 [`providerinfo.md`](providerinfo.md)。
+
+#### Claude Code
+
+```json
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "proxy",
+    "ANTHROPIC_BASE_URL": "http://localhost:8080",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL": "P1",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME": "P1",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "P2",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "P2",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "P3",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "P3",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "P4",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME": "P4",
+    "ANTHROPIC_MODEL": "P1",
+    "API_TIMEOUT_MS": "3000000",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  }
+}
+```
+
+> Fable → P1（最强）、Opus → P2、Sonnet → P3、Haiku → P4。`ANTHROPIC_AUTH_TOKEN` 填任意值，代理使用 YAML 中配置的供应商密钥。
+
+#### Codex
+
+```toml
+model_provider = "custom"
+model = "P1"
+
+[model_providers.custom]
+name = "custom"
+base_url = "http://localhost:8080"
+```
+
+> `model` 填路由模式（P1/P2/P3/P4/Flash/Max/Medium 等）。
+
+#### 其他 Agent
+
+兼容 OpenAI API 格式的工具（如 Cline、Roo Code、Continue 等）：
+
+1. **URL**：`http://localhost:8080`
+2. **模型 ID**：填路由模式或真实模型名，详见下方[模型 ID 路由](#模型-id-路由)
+3. **输入输出模态**：文本/图像，详见 [`providerinfo.md`](providerinfo.md)
+4. **思考等级**：`low`/`medium`/`high`/`xhigh`/`max`/`none`，各模型支持等级不同，详见 [`providerinfo.md`](providerinfo.md)
+
+> `api_key` 填任意值，代理使用 YAML 中配置的供应商密钥。
+
+#### 模型 ID 路由
+
+| model 值 | 命中供应商 | 说明 |
+|----------|-----------|------|
+| `Max` | 仅最高优先级组（如 P1） | 用最强模型，不计成本 |
+| `Flash`（推荐） | 跳过最高优先级组（P2 起） | 日常使用，避免顶级供应商 TPM 限流 |
+| `Medium` | 全部优先级 | 穷尽所有可用供应商 |
+| `P{n}` | 仅 P{n} 组 | 只用指定优先级的供应商 |
+| `P{n}up` | P1 ~ P{n} | 从最高优先级到指定级别，含中间所有组 |
+| `P{ndown}` | P{n} ~ 最低优先级 | 从指定级别向下穷尽所有更便宜的供应商 |
+
+例如配置了 P1~P4 四组供应商，则 `P2up` 命中 P1+P2，`P2down` 命中 P2+P3+P4，`P3` 仅命中 P3。
 
 也可直接填真实模型名（如 `gpt-4o`），通过 `model_routes` 映射到指定供应商。
 
@@ -84,175 +163,49 @@ ai-proxy.exe --version    # 查看版本信息
 
 ## GUI 启动器
 
-`ai-proxy-gui.exe` 提供完整的桌面图形管理界面，无需命令行即可控制代理服务。基于 [Fyne](https://fyne.io) v2.8 构建。
+`ai-proxy-gui.exe` 基于 [Fyne](https://fyne.io) v2 构建，提供桌面图形管理界面。
 
 ### 启动
 
-双击 `ai-proxy-gui.exe` 即可。程序启动后：
-
-- 自动在 exe 所在目录下创建 `config/providers.yaml`（首次运行）或迁移旧配置（升级）
-- 自动启动代理服务并最小化到系统托盘
-- 关闭窗口不会退出程序，仅隐藏到托盘；右键托盘菜单选择"退出"才会停止服务
+双击 `ai-proxy-gui.exe` 即可。程序自动启动代理服务并最小化到系统托盘。关闭窗口仅隐藏到托盘，右键托盘菜单选择"退出"才会停止服务。
 
 ### 主界面
 
-```
-┌─────────────────────────────────────────┐
-│ ● 运行中   监听 :8080   已运行 2h 15m   3 个供应商 │
-├─────────────────────────────────────────┤
-│ [▶ 启动] [⏹ 停止] [↻ 重启] [📊 打开面板] [⚙ 编辑配置] │
-├─────────────────────────────────────────┤
-│ 快速设置                                  │
-│  监听地址: [:8080        ]   日志级别: [snippet▼]    │
-│  远程控制: [☑]              熔断阈值: [2         ]   │
-│  冷却(秒): [30        ]     探测请求: [10        ]   │
-│  默认路由: [sensenova-glm-5.2▼]                      │
-│  [保存并重启]                                         │
-├─────────────────────────────────────────┤
-│ 最近日志                    [☑ 自动跟随] [清空]     │
-│ ┌─────────────────────────────────────┐ │
-│ │ [reqID] 200 ← sensenova-glm-5.2     │ │
-│ │ [reqID] 429 ← sensenovalyh (retry)  │ │
-│ │ ...                                  │ │
-│ └─────────────────────────────────────┘ │
-└─────────────────────────────────────────┘
-```
-
-| 区域 | 功能 |
-|------|------|
-| **状态栏** | 实时显示运行状态、监听地址、运行时长、供应商数量 |
-| **控制按钮** | 启动 / 停止 / 重启代理服务；打开浏览器监控面板；打开配置编辑器 |
-| **快速设置** | 修改监听地址、日志级别（off/snippet/full）、远程控制开关、断路器参数、默认路由目标，保存后自动重启 |
-| **日志窗口** | SSE 实时日志流（最近 200 行），支持自动跟随滚动和清空 |
+- **状态栏**：运行状态、监听地址、运行时长、供应商数量（每 2 秒刷新）
+- **控制按钮**：启动 / 停止 / 重启 / 打开监控面板 / 编辑配置
+- **快速设置**：监听地址、日志级别（off/snippet/full）、远程控制开关、断路器参数（阈值/冷却/探测）、流式时长上限、默认路由，保存后自动重启
+- **日志窗口**：SSE 实时日志流，支持自动跟随和清空
 
 ### 配置编辑器
 
-点击"⚙ 编辑配置"打开独立窗口，可可视化管理供应商：
+点击"⚙ 编辑配置"打开独立窗口，可视化管理供应商：
 
-- **供应商列表**：显示每个供应商的优先级、名称、模型 ID、格式，支持编辑和删除
-- **添加/编辑表单**：填写名称、模型 ID、API Key、Base URL、格式（openai/anthropic）、优先级、超时
-- **保存并重启**：写入 `config/providers.yaml` 并立即重启服务
-- **打开 YAML**：用系统记事本直接编辑原始 YAML 文件
+- **供应商列表**：显示优先级、名称、模型 ID、格式，支持编辑和删除
+- **添加/编辑表单**：名称、模型 ID、API Key（编辑时留空则保留原密钥）、Base URL、格式（openai/anthropic）、优先级、超时、主机最大并发
+- **保存并重启**：写入 `config/providers.yaml` 并立即重启
+- **打开 YAML**：用系统文本编辑器直接编辑原始配置文件
 
 ### 系统托盘
 
-GUI 版本在系统托盘显示图标，右键菜单：
-
-- 启动 / 停止 / 重启服务
-- 打开监控面板 / 编辑配置
-- 显示窗口 / 退出
+右键菜单：启动 / 停止 / 重启服务、打开监控面板、编辑配置、显示窗口、退出
 
 ### 首次运行与配置迁移
 
-- **首次运行**：以 exe 所在目录为根目录自动创建 `config/providers.yaml`，内嵌默认配置模板，弹出提示引导填写 API Key
-- **升级迁移**：检测到旧版配置缺少新字段时自动补充默认值（如 `default_format`、`log_file`、`auth_type`、`rate_limit` 等），不覆盖已有供应商和 API Key
+- **首次运行**：以 exe 所在目录为根目录自动创建 `config/providers.yaml`，内嵌默认模板，弹出提示引导填写 API Key
+- **升级迁移**：自动检测缺失字段并补充默认值，不覆盖已有供应商和 API Key
 - **日志路径**：相对路径以 `config/providers.yaml` 所在目录为基准解析
-
-## 架构概览
-
-```
-Agent 请求
-  │
-  ├─ middleware/logger     请求日志（/api/* 跳过）
-  ├─ middleware/detector   自动检测 OpenAI / Anthropic 格式
-  │
-  └─ router/engine         核心引擎
-       │
-       ├─ 按 priority 分组，逐组尝试（P1 → P2 → P3）
-       │   ├─ 断路器检查：该组是否熔断？→ 跳过
-       │   ├─ round-robin + 上游主机并发队列（同组并发）
-       │   ├─ token bucket 限流检查
-       │   └─ 指数退避重试（全部上游 4xx/5xx 按 YAML 重试）
-       │       └─ 组内全部失败 → recordGroupFailure → CB 计数+1
-       │
-       └─ adapter 协议转换（OpenAI ↔ Anthropic）+ 上游调用
-              │
-              └─ tracer 结构化日志 → gin.DefaultWriter → io.MultiWriter(日志文件, SSE Hub)
-```
-
----
-
-## 路由与故障转移
-
-### 优先级降级链路
-
-```
-P1 全部供应商失败 → CB failureCount[P1]++ → 降级到 P2
-P2 全部供应商失败 → CB failureCount[P2]++ → 降级到 P3
-P3 全部供应商失败 → 返回 503
-```
-
-每个优先级组有**独立的断路器**。P1 熔断后请求直接跳到 P2，不浪费时间重试 P1。
-
-### 断路器（Circuit Breaker）
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `cb_threshold` | 2 | 连续组失败次数达到此值触发熔断 |
-| `cb_cooldown` | 30s | 熔断后冷却时间，到期自动半开探测 |
-| `cb_skip_requests` | 10 | 熔断期间跳过的请求数（也可触发自动关闭） |
-
-```
-CLOSED（正常）
-  │  组失败 ≥ threshold
-  ▼
-OPEN（熔断，请求直接跳过该组）
-  │  cooldown 到期 或 skip_requests 耗尽
-  ▼
-自动关闭 → CLOSED（半开探测下一个请求）
-```
-
-- **状态持久化**：CB 状态保存在 `config/.cb_state.json`，重启后自动恢复
-- **原子写入**：使用临时文件 + rename，防止并发写损坏
-
-### 重试策略
-
-| 错误类型 | 行为 |
-|----------|------|
-| HTTP 5xx | 可重试，等待退避后重试同一供应商 |
-| HTTP 4xx（全部状态码） | 可重试，按 YAML 配置的退避时间重试同一供应商 |
-| 超时/取消 | 不可重试，立即切换 |
-| 流式已部分写入 | 停止重试，注入 SSE 错误事件 |
-
-退避公式：`retry_interval × backoff_factor^(N-1)`，默认 2s → 4s → 8s。
-
----
-
-## 流式传输
-
-- **自动检测**：请求体含 `"stream": true` 自动启用
-- **SSE 实时下发**：收到首个完整 `data:` 事件后提交响应，此后每次写入立即 Flush
-- **空闲超时**：`idleTimeoutReader` 在 `provider.Timeout` 秒无数据时返回超时
-- **整体超时**：`global.max_stream_minutes` 控制流式总时长上限（默认 3 分钟），超过则中断流并注入 SSE error event
-- **中途错误**：流式失败时注入 SSE error event，通知客户端截断
-- **首事件前故障转移**：收到上游 200 后延迟提交下游响应头；首个完整 `data:` 事件前断开、心跳或空流可继续重试/降级
-- **跨格式转换**：SSE 流逐事件实时转换（Anthropic SSE ↔ OpenAI SSE，Responses SSE ↔ Chat Completions SSE）
-
----
-
-## 协议转换
-
-自动检测请求格式（按 URL 路径 + body 字段），支持 OpenAI Chat Completions、OpenAI Responses 和 Anthropic Messages：
-
-| 转换方向 | 处理内容 |
-|----------|---------|
-| 请求体 | system 消息提取/注入、`stop` ↔ `stop_sequences` 重命名、`tools` 格式转换（`input_schema` ↔ `parameters`）、`tool_choice` 格式转换 |
-| 响应体（同步） | content blocks 转换、tool_use ↔ tool_calls、stop_reason ↔ finish_reason 映射 |
-| 响应体（流式） | SSE 事件逐条转换，含 tool_use/tool_calls 状态追踪 |
-
-使用通用 JSON map 操作，保留 `response_format`、`seed` 等未知字段原样透传。
-
----
 
 ## 监控面板
 
 浏览器访问 `http://<host>:8080/`：
 
 - **状态开关** — 一键启用/停用代理（停用时请求返回 503）
-- **汇总卡片** — 总请求 / 成功 / 失败 / 成功率
-- **供应商表格** — 按 priority 显示每个供应商的请求数、成功率
-- **实时日志** — SSE 流式日志，自动更新
-- **最近上游尝试** — 显示请求 ID、重试/降级结果和耗时，可与日志中的同一 ID 关联
+- **汇总卡片** — 客户端请求 / 上游尝试 / 成功 / 失败 / 成功率
+- **命中率/延迟图表** — 按优先级分组的滚动命中率曲线 + 延迟曲线
+- **断路器状态** — 各优先级组的熔断状态、失败次数、冷却倒计时
+- **供应商统计表** — 请求数、成功率、连续失败数、平均延迟、最后错误类型，支持清零基线
+- **最近上游尝试** — 请求 ID、供应商、结果、状态码、耗时，可按 ID 关联日志
+- **实时日志** — SSE 流式日志，支持过滤、暂停、清空，按类型着色
 
 ---
 
@@ -276,158 +229,49 @@ OPEN（熔断，请求直接跳过该组）
 
 ## 配置参考
 
-### global
-
-```yaml
-global:
-  listen_addr: ":8080"       # 监听地址
-  log_file: proxy.log        # 日志文件（留空则仅输出到 stdout）
-  cb_threshold: 2            # 断路器失败阈值
-  cb_cooldown: 30            # 断路器冷却时间（秒）
-  cb_skip_requests: 10       # 熔断期间跳过请求数
-  max_stream_minutes: 3       # 流式传输总时长上限（分钟），0 或留空则默认 3
-```
-
-### model_routes（可选）
-
-模型名别名映射，在非 Max/Medium/Flash 模式下生效：
-
-```yaml
-model_routes:
-  - alias: gpt-4o
-    target: sensenova-glm-5.2
-  - alias: default          # 特殊键：未匹配任何别名时的兜底
-    target: deepseek-v4-flash
-```
-
-### model_rules（可选）
-
-按客户端模型名补充请求参数。已有字段不会被覆盖；`timeout` 是代理到上游的超时时间（秒），不会作为未知字段转发给上游：
-
-```yaml
-model_rules:
-  - model: gpt-4o
-    defaults:
-      temperature: 0.2
-      max_tokens: 4096
-      timeout: 45
-```
-
-### providers
-
-| 字段 | 必填 | 默认值 | 说明 |
-|------|------|--------|------|
-| `name` | 是 | — | 供应商唯一标识 |
-| `model_id` | 是 | — | 实际调用的模型 ID |
-| `api_key` | 是 | — | API Key |
-| `base_url` | 是 | — | API 地址（OpenAI 格式含 `/v1`，Anthropic 格式不含 `/v1`，代码自动拼接 `/v1/messages`） |
-| `priority` | 是 | — | 优先级（越小越优先） |
-| `format` | 是 | — | `openai` 或 `anthropic` |
-| `auth_type` | 否 | 自动 | `bearer`（Authorization: Bearer）或 `x-api-key`（+ anthropic-version）；为空时按 format 自动选择：openai→bearer，anthropic→x-api-key |
-| `timeout` | 否 | 60 | 请求超时（秒，不能为负） |
-| `max_concurrent` | 否 | 0 | 同一上游 scheme/host/port 的最大并发请求数；共享主机取最小正值，0 表示不限 |
-| `retry.max_retries` | 否 | 3 | 最大重试次数（不能为负） |
-| `retry.retry_interval` | 否 | 2 | 首次重试间隔（秒，不能为负） |
-| `retry.backoff_factor` | 否 | 2 | 退避因子（不能为负） |
-| `rate_limit.enabled` | 否 | false | 是否启用 per-provider 限流 |
-| `rate_limit.rpm` | 否 | 60 | 每分钟允许请求数 |
-| `rate_limit.burst` | 否 | 10 | 最大突发请求数 |
-
-### rate_limit 示例
-
-```yaml
-providers:
-  - name: my-provider
-    rate_limit:
-      enabled: true
-      rpm: 60
-      burst: 10
-```
+完整配置模板及字段注释见 [`config/providers.example.yaml`](config/providers.example.yaml)。
 
 ---
 
 ## 部署
 
+### 本地（Windows）
+
+**GUI 版本**：双击 `ai-proxy-gui.exe`，自动创建配置并启动服务，最小化到系统托盘。
+
+**CLI 版本**：将 `config/providers.example.yaml` 复制为 `config/providers.yaml` 并填入 API Key，然后启动：
+
+```bash
+ai-proxy.exe --config config/providers.yaml
+ai-proxy.exe --version    # 查看版本信息
+```
+
 ### 树莓派（Linux ARM64）
 
-#### 1. 交叉编译
+使用 `deploy-rpi-interactive.ps1` 一键部署（需 Posh-SSH 模块，首次自动安装）：
+
+```powershell
+.\deploy-rpi-interactive.ps1
+```
+
+脚本交互式输入用户名、IP 和密码，自动完成：上传二进制和配置、清理旧状态文件（`.cb_state.json`、`.stats.json`、`proxy.log.*`）、重启服务、验证版本和健康检查。
+
+> 首次部署需手动配置 systemd 服务以实现开机自启和崩溃重启，详见脚本注释。局域网设备将 `base_url` 指向 `http://<树莓派IP>:8080`。如需远程控制代理启停，将 `global.control_allow_remote` 设为 `true`。
+
+### 发布 Release
+
+> 以下为 AI 助手打 tag 和创建 Release 的提示词参考，版本号和说明由用户确认。
 
 ```bash
-make build-linux-arm64
+# 1. 打 tag 并推送（版本号询问用户）
+git tag <version> -m "<version>: 简短说明"
+git push origin <version>
+
+# 2. 用 GitHub API 创建 Release，上传资产：
+#    6 个二进制 + README.md + config/providers.example.yaml
 ```
 
-#### 2. 上传到树莓派
-
-```bash
-scp ai-proxy-linux-arm64 pi@raspberrypi:~/ai-proxy
-scp config/providers.yaml    pi@raspberrypi:~/config/providers.yaml
-ssh pi@raspberrypi 'chmod +x ~/ai-proxy'
-```
-
-#### 3. 配置 systemd 服务
-
-> 不配置 systemd 时直接在 SSH 终端运行 `~/ai-proxy`，关闭 SSH 后进程会被 `SIGHUP` 杀掉。systemd 可实现开机自启、断连不挂、崩溃自动重启。
-
-创建服务文件：
-
-```bash
-sudo nano /etc/systemd/system/ai-proxy.service
-```
-
-写入以下内容：
-
-```ini
-[Unit]
-Description=AI Proxy — AI 请求转发平台
-After=network.target
-
-[Service]
-Type=simple
-User=pi
-WorkingDirectory=/home/pi
-ExecStart=/home/pi/ai-proxy --config /home/pi/config/providers.yaml
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-```
-
-#### 4. 启用并启动
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now ai-proxy    # 开机自启 + 立即启动
-sudo systemctl status ai-proxy          # 查看运行状态
-curl http://localhost:8080/health       # 验证服务
-```
-
-#### 5. 日常管理
-
-```bash
-sudo systemctl restart ai-proxy         # 重启（更新二进制后）
-sudo systemctl stop ai-proxy            # 停止
-sudo systemctl start ai-proxy           # 启动
-journalctl -u ai-proxy -f               # 查看实时日志
-```
-
-#### 6. 客户端配置
-
-局域网其他设备将 `base_url` 指向 `http://<树莓派IP>:8080`（如 `http://192.168.1.5:8080`）。`listen_addr: ":8080"` 默认绑定所有网卡，无需额外配置。
-
-> 如需从局域网其他设备通过监控面板控制代理启停，需将 `global.control_allow_remote` 设为 `true`，否则 `/api/control` 仅允许本机访问。
-
-### 跨平台编译
-
-```bash
-make build-cli          # Windows CLI（= make build）
-make build-gui          # Windows GUI（需 CGO + GCC）
-make build-linux-arm64  # 树莓派 / Linux ARM64
-make build-linux        # Linux amd64
-make build-macos-arm64  # macOS Apple Silicon
-make build-all          # 全平台 CLI
-make build VERSION=v1.0.0  # 指定版本号
-```
+> 版本号和 Release 说明由用户确认。Release 资产只包含可执行文件、README 和示例配置。
 
 ---
 
@@ -435,9 +279,12 @@ make build VERSION=v1.0.0  # 指定版本号
 
 | 功能 | 说明 |
 |------|------|
-| **配置热加载** | 每 30s 检测 `providers.yaml` 变更并自动重载，无需重启。不影响正在处理的请求和断路器状态 |
+| **配置热加载** | 每 30s 轮询 `providers.yaml` 变更并自动重载，无需重启。不影响正在处理的请求和断路器状态 |
 | **日志轮转** | 日志文件 100MB 自动分割，保留 5 个备份，旧文件自动清理 |
 | **CB 状态持久化** | 断路器状态保存在 `.cb_state.json`，重启后自动恢复 |
-| **优雅关闭** | 捕获 SIGINT/SIGTERM，等待正在处理的请求最多 10s 后退出，同时停止 config watcher |
-| **请求体大小限制** | 10MB 上限，防止恶意大 payload 致 OOM |
+| **统计持久化** | 供应商统计数据每 30s 自动保存到 `.stats.json`，重启后恢复累计计数 |
+| **优雅关闭** | 捕获 SIGINT/SIGTERM，等待正在处理的请求最多 10s 后退出，同时停止 config watcher 并落盘统计 |
+| **请求体大小限制** | 50MB 上限，防止恶意大 payload 致 OOM（支持多模态 base64 图片） |
 | **HTTP Server 超时** | ReadHeaderTimeout=10s、IdleTimeout=120s，防范 Slowloris |
+| **并发限制** | 按上游主机 scheme/host/port 分组，信号量控制同主机最大并发请求数，共享主机取最小正值 |
+| **限流** | 每供应商独立令牌桶限流，支持热重载动态调整速率 |
