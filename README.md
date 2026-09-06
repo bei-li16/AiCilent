@@ -256,7 +256,15 @@ ai-proxy.exe --version    # 查看版本信息
 .\deploy-rpi-interactive.ps1
 ```
 
-脚本交互式输入用户名、IP 和密码，自动完成：上传二进制和配置、清理旧状态文件（`.cb_state.json`、`.stats.json`、`proxy.log.*`）、重启服务、验证版本和健康检查。
+脚本与二进制均可从 Release 页下载，放到同一目录即可运行。脚本交互式输入树莓派用户名、IP 和密码（部署目录 `/home/<用户名>/Project/ai-proxy` 自动跟随用户名），自动完成：上传二进制、清理旧状态文件（`.cb_state.json`、`.stats.json`、`proxy.log.*`）、重启服务、验证版本和健康检查。
+
+目录布局：
+
+```
+deploy-rpi-interactive.ps1
+ai-proxy-linux-arm64        # 从 Release 页下载
+config/providers.yaml       # 可选：无则沿用树莓派上的现有配置（providers.example.yaml 为模板）
+```
 
 > 首次部署需手动配置 systemd 服务以实现开机自启和崩溃重启，详见脚本注释。局域网设备将 `base_url` 指向 `http://<树莓派IP>:8080`。如需远程控制代理启停，将 `global.control_allow_remote` 设为 `true`。
 
@@ -270,10 +278,11 @@ git tag <version> -m "<version>: 简短说明"
 git push origin <version>
 
 # 2. 用 GitHub API 创建 Release，上传资产：
-#    6 个二进制 + README.md + config/providers.example.yaml + RELEASENOTES.md
+#    6 个二进制 + README.md + config/providers.example.yaml
+#    + RELEASENOTES.md + deploy-rpi-interactive.ps1
 ```
 
-> 版本号和 Release 说明由用户确认。Release 资产只包含可执行文件、README、示例配置和发布说明；二进制不跟踪进 git。各版本变更见 [`RELEASENOTES.md`](RELEASENOTES.md)。
+> 版本号和 Release 说明由用户确认。Release 资产包含可执行文件、README、示例配置、发布说明和部署脚本；二进制不跟踪进 git。各版本变更见 [`RELEASENOTES.md`](RELEASENOTES.md)。
 
 ---
 

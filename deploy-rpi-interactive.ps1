@@ -1,17 +1,25 @@
-# deploy-rpi.ps1 — 部署 ai-proxy 到树莓派
-# 用法: .\deploy-rpi.ps1
+﻿# deploy-rpi.ps1 — 部署 ai-proxy 到树莓派
+# 用法: .\deploy-rpi-interactive.ps1
 # 需要 Posh-SSH 模块（首次运行自动安装）
+#
+# 文件布局（全部与本脚本同目录，均可从 GitHub Release 页下载）:
+#   deploy-rpi-interactive.ps1     本脚本
+#   ai-proxy-linux-arm64           代理二进制（Release 资产，必需）
+#   config\providers.yaml          可选；无则沿用树莓派上的现有配置
+#                                  （providers.example.yaml 为模板，填好 API Key 后改名）
 
 $ErrorActionPreference = 'Stop'
 
 # ── 配置 ──
-$PI_BASE = '/home/bei-li16/Project/ai-proxy'
-$LOCAL_ROOT = 'G:\Data\GitFiles\AiCilent'
+# 脚本相对定位：二进制、配置均以本脚本所在目录为基准，无硬编码盘符
+$LOCAL_ROOT = $PSScriptRoot
 
 # ── 交互式输入用户名 / IP / 密码 ──
 $PI_USER = Read-Host "请输入树莓派用户名"
 $PI_HOST = Read-Host "请输入树莓派 IP 地址"
 $cred = Get-Credential -UserName $PI_USER -Message "输入树莓派密码 ($PI_USER@$PI_HOST)"
+# 远程部署目录跟随输入的用户名，避免硬编码特定 home 路径
+$PI_BASE = "/home/$PI_USER/Project/ai-proxy"
 
 # ── 确保 Posh-SSH ──
 if (-not (Get-Module -ListAvailable Posh-SSH)) {
@@ -20,14 +28,21 @@ if (-not (Get-Module -ListAvailable Posh-SSH)) {
 Import-Module Posh-SSH
 
 # ── 本地文件 ──
-$binLocal = "$LOCAL_ROOT\ai-proxy-linux-arm64"
-$cfgLocal = "$LOCAL_ROOT\config\providers.yaml"
+$binLocal = Join-Path $LOCAL_ROOT 'ai-proxy-linux-arm64'
+if (-not (Test-Path $binLocal)) {
+    Write-Error "找不到二进制: $binLocal`n请从 GitHub Release 页下载 ai-proxy-linux-arm64，放到本脚本同一目录后重试。"
+    exit 1
+}
 
-foreach ($f in @($binLocal, $cfgLocal)) {
-    if (-not (Test-Path $f)) {
-        Write-Error "找不到本地文件: $f"
-        exit 1
-    }
+# 配置可选：优先 config\providers.yaml，其次脚本同目录的 providers.yaml；
+# 都没有则跳过上传，沿用树莓派上的现有配置
+$cfgLocal = Join-Path $LOCAL_ROOT 'config\providers.yaml'
+if (-not (Test-Path $cfgLocal)) {
+    $cfgLocal = Join-Path $LOCAL_ROOT 'providers.yaml'
+}
+$uploadCfg = Test-Path $cfgLocal
+if (-not $uploadCfg) {
+    Write-Warning "未找到 config\providers.yaml，将跳过配置上传，沿用树莓派上的现有配置"
 }
 
 Write-Host '== ai-proxy 树莓派部署 =='
@@ -47,9 +62,13 @@ try {
     Set-SFTPItem -SessionId $sftp.SessionId -Path $binLocal -Destination $PI_BASE -Force
     Invoke-SSHCommand -SessionId $ssh.SessionId -Command "mv -f $PI_BASE/ai-proxy-linux-arm64 $PI_BASE/ai-proxy" | Out-Null
 
-    # ── 上传配置 ──
-    Write-Host '[4/5] 上传配置...'
-    Set-SFTPItem -SessionId $sftp.SessionId -Path $cfgLocal -Destination "$PI_BASE/config" -Force
+    # ── 上传配置（可选） ──
+    if ($uploadCfg) {
+        Write-Host '[4/5] 上传配置...'
+        Set-SFTPItem -SessionId $sftp.SessionId -Path $cfgLocal -Destination "$PI_BASE/config" -Force
+    } else {
+        Write-Host '[4/5] 跳过配置上传（本地未找到 providers.yaml）'
+    }
 
     # ── 清理旧状态/日志，重启服务 ──
     Write-Host '[5/5] 清理并重启服务...'
