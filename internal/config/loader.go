@@ -102,6 +102,26 @@ func (cfg *Config) validate() error {
 			}
 		}
 	}
+	providerNames := make(map[string]bool, len(cfg.Providers))
+	for i := range cfg.Providers {
+		providerNames[cfg.Providers[i].Name] = true
+	}
+	aliasNames := make(map[string]bool, len(cfg.ModelRoutes))
+	for _, route := range cfg.ModelRoutes {
+		if route.Alias == "" {
+			return fmt.Errorf("model route alias is required")
+		}
+		if aliasNames[route.Alias] {
+			return fmt.Errorf("duplicate model route alias: %s", route.Alias)
+		}
+		aliasNames[route.Alias] = true
+		if route.Target == "" {
+			return fmt.Errorf("model route %s: target is required", route.Alias)
+		}
+		if !providerNames[route.Target] && !IsRouteKeyword(route.Target) {
+			return fmt.Errorf("model route %s: target %q matches no provider name or routing keyword (Max/Flash/Medium/P{n}[up|down])", route.Alias, route.Target)
+		}
+	}
 	return nil
 }
 

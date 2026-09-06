@@ -157,6 +157,8 @@ base_url = "http://localhost:8080"
 
 例如配置了 P1~P4 四组供应商，则 `P2up` 命中 P1+P2，`P2down` 命中 P2+P3+P4，`P3` 仅命中 P3。
 
+`model_routes` 的 `target` 除供应商 `name` 外，也可填上述关键词（如 `P1`、`Flash`、`P2down`），别名命中后行为与客户端直发该关键词完全一致（硬性档位，档外不兜底）；填供应商名则保持软钉 + 全链兜底。target 同时匹配关键词和供应商名时**按关键词解释**（档位优先）；既不是供应商名也不是关键词时启动/热重载报错。
+
 也可直接填真实模型名（如 `gpt-4o`），通过 `model_routes` 映射到指定供应商。
 
 ---
@@ -268,10 +270,10 @@ git tag <version> -m "<version>: 简短说明"
 git push origin <version>
 
 # 2. 用 GitHub API 创建 Release，上传资产：
-#    6 个二进制 + README.md + config/providers.example.yaml
+#    6 个二进制 + README.md + config/providers.example.yaml + RELEASENOTES.md
 ```
 
-> 版本号和 Release 说明由用户确认。Release 资产只包含可执行文件、README 和示例配置。
+> 版本号和 Release 说明由用户确认。Release 资产只包含可执行文件、README、示例配置和发布说明；二进制不跟踪进 git。各版本变更见 [`RELEASENOTES.md`](RELEASENOTES.md)。
 
 ---
 

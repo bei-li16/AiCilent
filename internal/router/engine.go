@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1031,20 +1030,89 @@ func (r *idleTimeoutReader) Close() error {
 }
 
 func (e *Engine) getOrderedProviders(modelName string) []*config.Provider {
-	switch modelName {
+	if providers, ok := e.filterByKeyword(modelName); ok {
+		return providers
+	}
+
+	matched := make(map[string]bool)
+	var result []*config.Provider
+
+	if target, ok := e.matcher.Match(modelName); ok {
+		// Keyword targets are hard selections, identical to the client sending
+		// the keyword itself, and take precedence over provider names: a
+		// provider literally named "P1" or "Max" is shadowed by the keyword.
+		if providers, ok := e.filterByKeyword(target); ok {
+			return providers
+		}
+		// Provider-name targets keep the legacy soft-pin semantics: the target
+		// provider leads the chain and every other provider stays available as
+		// fallback.
+		for i := range e.cfg.Providers {
+			if e.cfg.Providers[i].Name == target {
+				result = append(result, &e.cfg.Providers[i])
+				matched[target] = true
+				break
+			}
+		}
+	}
+
+	for i := range e.cfg.Providers {
+		if p := &e.cfg.Providers[i]; p.ModelID == modelName && !matched[p.Name] {
+			result = append(result, p)
+			matched[p.Name] = true
+		}
+	}
+
+	if target, ok := e.matcher.Default(); ok && !matched[target] {
+		// The default route resolves through the same rules but stays soft: a
+		// keyword expands to its band at the default position, and the
+		// remaining providers still follow as fallback.
+		if keyword, isKeyword := e.filterByKeyword(target); isKeyword {
+			for _, p := range keyword {
+				if !matched[p.Name] {
+					result = append(result, p)
+					matched[p.Name] = true
+				}
+			}
+		} else {
+			for i := range e.cfg.Providers {
+				if e.cfg.Providers[i].Name == target {
+					result = append(result, &e.cfg.Providers[i])
+					matched[target] = true
+					break
+				}
+			}
+		}
+	}
+
+	for i := range e.cfg.Providers {
+		if p := &e.cfg.Providers[i]; !matched[p.Name] {
+			result = append(result, p)
+			matched[p.Name] = true
+		}
+	}
+
+	return result
+}
+
+// filterByKeyword resolves a routing keyword to its provider set: "Max"
+// (highest priority only), "Flash" (skip the highest group), "Medium" (all),
+// or a "P{n}"/"P{n}up"/"P{n}down" priority band. ok is false when name is not
+// a keyword. A valid keyword with no matching providers yields an empty set.
+func (e *Engine) filterByKeyword(name string) ([]*config.Provider, bool) {
+	switch name {
 	case "Max":
 		return e.filterProviders(func(p *config.Provider) bool {
 			return p.Priority == e.minPriority()
-		})
+		}), true
 	case "Flash":
 		return e.filterProviders(func(p *config.Provider) bool {
 			return p.Priority > e.minPriority()
-		})
+		}), true
 	case "Medium":
-		return e.allProviders()
+		return e.allProviders(), true
 	}
-
-	if pri, mode, ok := parsePriorityKeyword(modelName); ok {
+	if pri, mode, ok := config.ParsePriorityKeyword(name); ok {
 		minP := e.minPriority()
 		return e.filterProviders(func(p *config.Provider) bool {
 			switch mode {
@@ -1056,47 +1124,9 @@ func (e *Engine) getOrderedProviders(modelName string) []*config.Provider {
 				return p.Priority >= pri
 			}
 			return false
-		})
+		}), true
 	}
-
-	matched := make(map[string]bool)
-	var result []*config.Provider
-
-	if target, ok := e.matcher.Match(modelName); ok {
-		for i, p := range e.cfg.Providers {
-			if p.Name == target {
-				result = append(result, &e.cfg.Providers[i])
-				matched[target] = true
-				break
-			}
-		}
-	}
-
-	for i, p := range e.cfg.Providers {
-		if p.ModelID == modelName && !matched[p.Name] {
-			result = append(result, &e.cfg.Providers[i])
-			matched[p.Name] = true
-		}
-	}
-
-	if target, ok := e.matcher.Default(); ok && !matched[target] {
-		for i, p := range e.cfg.Providers {
-			if p.Name == target {
-				result = append(result, &e.cfg.Providers[i])
-				matched[target] = true
-				break
-			}
-		}
-	}
-
-	for i, p := range e.cfg.Providers {
-		if !matched[p.Name] {
-			result = append(result, &e.cfg.Providers[i])
-			matched[p.Name] = true
-		}
-	}
-
-	return result
+	return nil, false
 }
 
 func (e *Engine) allProviders() []*config.Provider {
@@ -1112,38 +1142,6 @@ func (e *Engine) minPriority() int {
 		return 0
 	}
 	return e.cfg.Providers[0].Priority
-}
-
-// parsePriorityKeyword parses priority-based routing keywords:
-// "P2" → priority=2, mode="only"
-// "P2up" → priority=2, mode="up" (P1..P2)
-// "P2down" → priority=2, mode="down" (P2..max)
-func parsePriorityKeyword(s string) (priority int, mode string, ok bool) {
-	if len(s) < 2 || (s[0] != 'P' && s[0] != 'p') {
-		return 0, "", false
-	}
-	i := 1
-	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
-		i++
-	}
-	if i == 1 {
-		return 0, "", false
-	}
-	n, err := strconv.Atoi(s[1:i])
-	if err != nil || n <= 0 {
-		return 0, "", false
-	}
-	suffix := strings.ToLower(s[i:])
-	switch suffix {
-	case "":
-		return n, "only", true
-	case "up":
-		return n, "up", true
-	case "down":
-		return n, "down", true
-	default:
-		return 0, "", false
-	}
 }
 
 func (e *Engine) filterProviders(fn func(*config.Provider) bool) []*config.Provider {
@@ -1427,7 +1425,7 @@ func modeFilter(modelName string) string {
 	case "Medium":
 		return "all priorities"
 	}
-	if pri, mode, ok := parsePriorityKeyword(modelName); ok {
+	if pri, mode, ok := config.ParsePriorityKeyword(modelName); ok {
 		switch mode {
 		case "only":
 			return fmt.Sprintf("P%d only", pri)
