@@ -1,7 +1,5 @@
-# Binaries
+# Binaries (release assets are distributed via GitHub Release, not git)
 *.exe
-!ai-proxy.exe
-!ai-proxy-gui.exe
 *.exe~
 *.dll
 *.so
@@ -10,6 +8,10 @@
 *.out
 
 # Cross-compiled binaries
+ai-proxy-linux
+ai-proxy-linux-arm64
+ai-proxy-macos
+ai-proxy-macos-arm64
 
 # Logs
 *.log
