@@ -256,14 +256,14 @@ ai-proxy.exe --version    # 查看版本信息
 .\deploy-rpi-interactive.ps1
 ```
 
-脚本与二进制均可从 Release 页下载，放到同一目录即可运行。脚本交互式输入树莓派用户名、IP 和密码（部署目录 `/home/<用户名>/Project/ai-proxy` 自动跟随用户名），自动完成：上传二进制、清理旧状态文件（`.cb_state.json`、`.stats.json`、`proxy.log.*`）、重启服务、验证版本和健康检查。
+脚本与二进制均可从 Release 页下载，放到同一目录即可运行。脚本交互式输入树莓派用户名、IP 和密码（部署目录 `/home/<用户名>/Project/ai-proxy` 自动跟随用户名），自动完成：上传二进制和配置、清理旧状态文件（`.cb_state.json`、`.stats.json`、`proxy.log.*`）、重启服务、验证版本和健康检查。
 
 目录布局：
 
 ```
 deploy-rpi-interactive.ps1
 ai-proxy-linux-arm64        # 从 Release 页下载
-config/providers.yaml       # 可选：无则沿用树莓派上的现有配置（providers.example.yaml 为模板）
+config/providers.yaml       # 必需：providers.example.yaml 填好 API Key 后改名
 ```
 
 > 首次部署需手动配置 systemd 服务以实现开机自启和崩溃重启，详见脚本注释。局域网设备将 `base_url` 指向 `http://<树莓派IP>:8080`。如需远程控制代理启停，将 `global.control_allow_remote` 设为 `true`。
