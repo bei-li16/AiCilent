@@ -111,7 +111,10 @@ function renderStats(data) {
   if (!toggleBusy) toggleEl.checked = data.running;
   uptimeEl.textContent = '运行 ' + data.uptime;
 
-  data.providers.sort((a, b) => a.priority - b.priority || a.name.localeCompare(b.name));
+  // 优先级升序；同优先级内最近活跃的排最前，其次按名称稳定排序。
+  const lastAct = p => p.last_activity ? Date.parse(p.last_activity) : 0;
+  data.providers.sort((a, b) =>
+    a.priority - b.priority || lastAct(b) - lastAct(a) || a.name.localeCompare(b.name));
   statsBody.innerHTML = data.providers.map(p => {
     const bp = (apply && base.providers[p.name]) || { total: 0, success: 0, fail: 0 };
     const dTotal = apply ? delta(p.total, bp.total) : p.total;
@@ -309,6 +312,10 @@ function flashToggle(msg) {
 
 function clearLog() {
   logContainer.innerHTML = '';
+}
+
+function toggleSection(id) {
+  document.getElementById(id).classList.toggle('collapsed');
 }
 
 function togglePause() {

@@ -48,35 +48,39 @@
     <div class="cb-container" id="cb-container"><span class="muted">暂无熔断记录</span></div>
   </section>
 
-  <section class="table-section">
-    <div class="table-header">
-      <h2>供应商统计</h2>
-      <button class="btn-small" id="statsClearBtn" onclick="clearStats()">清零</button>
+  <section class="table-section collapsible collapsed" id="statsSection">
+    <div class="table-header collapsible-header" onclick="toggleSection('statsSection')">
+      <h2><span class="caret"></span>供应商统计</h2>
+      <button class="btn-small" id="statsClearBtn" onclick="event.stopPropagation(); clearStats()">清零</button>
     </div>
-    <div class="stats-table-scroll">
-      <table id="stats-table">
-        <thead>
-          <tr>
-            <th>优先级</th><th>供应商</th><th>模型</th>
-            <th>尝试</th><th>成功</th><th>失败</th><th>成功率</th>
-            <th>连续失败</th><th>平均延迟</th><th>最近错误</th>
-          </tr>
-        </thead>
-        <tbody id="stats-body"></tbody>
-      </table>
+    <div class="collapsible-body">
+      <div class="stats-table-scroll">
+        <table id="stats-table">
+          <thead>
+            <tr>
+              <th>优先级</th><th>供应商</th><th>模型</th>
+              <th>尝试</th><th>成功</th><th>失败</th><th>成功率</th>
+              <th>连续失败</th><th>平均延迟</th><th>最近错误</th>
+            </tr>
+          </thead>
+          <tbody id="stats-body"></tbody>
+        </table>
+      </div>
     </div>
   </section>
 
-  <section class="trace-section">
-    <div class="table-header">
-      <h2>最近上游尝试</h2>
+  <section class="trace-section collapsible collapsed" id="traceSection">
+    <div class="table-header collapsible-header" onclick="toggleSection('traceSection')">
+      <h2><span class="caret"></span>最近上游尝试</h2>
       <span class="muted">请求 ID 可关联重试与回复</span>
     </div>
-    <div class="trace-table-scroll">
-      <table id="trace-table">
-        <thead><tr><th>请求 ID</th><th>供应商</th><th>模型</th><th>优先级</th><th>结果</th><th>状态</th><th>耗时</th><th>时间</th></tr></thead>
-        <tbody id="trace-body"></tbody>
-      </table>
+    <div class="collapsible-body">
+      <div class="trace-table-scroll">
+        <table id="trace-table">
+          <thead><tr><th>请求 ID</th><th>供应商</th><th>模型</th><th>优先级</th><th>结果</th><th>状态</th><th>耗时</th><th>时间</th></tr></thead>
+          <tbody id="trace-body"></tbody>
+        </table>
+      </div>
     </div>
   </section>
 

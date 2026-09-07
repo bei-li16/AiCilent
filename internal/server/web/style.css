@@ -60,6 +60,11 @@ input:checked + .slider::before { transform: translateX(20px); }
 .stats-table-scroll table { min-width: 860px; }
 #stats-table th, #stats-table td { box-sizing: border-box; height: 36px; }
 #stats-table thead th { position: sticky; top: 0; z-index: 1; background: #0d1117; }
+.collapsible-header { cursor: pointer; user-select: none; }
+.caret { display: inline-block; margin-right: 6px; color: #8b949e; transition: transform 0.15s; transform: rotate(90deg); }
+.caret::before { content: "▸"; }
+.collapsed .caret { transform: rotate(0deg); }
+.collapsed .collapsible-body { display: none; }
 .trace-table-scroll { height: 216px; overflow-x: auto; overflow-y: scroll; scrollbar-gutter: stable; }
 .trace-table-scroll table { min-width: 680px; }
 #trace-table th, #trace-table td { box-sizing: border-box; height: 36px; }

@@ -26,6 +26,7 @@ type ProviderStats struct {
 	LatencyCount    int64   `json:"latency_count"`
 	LatencyAvgMs    float64 `json:"latency_avg_ms"` // 平均延迟(ms)
 	LastLatencyMs   float64 `json:"last_latency_ms"`
+	LastActivity    time.Time `json:"last_activity"` // 最近一次尝试时间，用于面板内排序
 }
 
 // CBState is a read-only snapshot of one priority's circuit-breaker state.
@@ -200,6 +201,7 @@ func (c *Collector) Record(requestID, name, modelID string, priority int, succes
 		c.providers[name] = ps
 	}
 	ps.Total++
+	ps.LastActivity = time.Now()
 	latMs := float64(latency.Microseconds()) / 1000.0
 	ps.LastLatencyMs = latMs
 	ps.LatencySumMs += latMs
@@ -351,6 +353,7 @@ func (c *Collector) Reset() {
 		ps.LatencyCount = 0
 		ps.LatencyAvgMs = 0
 		ps.LastLatencyMs = 0
+		ps.LastActivity = time.Time{}
 	}
 	c.overallWin = rollingHit{}
 	c.prioWin = make(map[int]*rollingHit)
