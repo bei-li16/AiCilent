@@ -56,6 +56,10 @@ input:checked + .slider::before { transform: translateX(20px); }
 .table-section { margin-bottom: 24px; }
 .trace-section { margin-bottom: 24px; }
 .trace-section .table-header { min-width: 680px; }
+.stats-table-scroll { height: 216px; overflow-x: auto; overflow-y: scroll; scrollbar-gutter: stable; }
+.stats-table-scroll table { min-width: 860px; }
+#stats-table th, #stats-table td { box-sizing: border-box; height: 36px; }
+#stats-table thead th { position: sticky; top: 0; z-index: 1; background: #0d1117; }
 .trace-table-scroll { height: 216px; overflow-x: auto; overflow-y: scroll; scrollbar-gutter: stable; }
 .trace-table-scroll table { min-width: 680px; }
 #trace-table th, #trace-table td { box-sizing: border-box; height: 36px; }

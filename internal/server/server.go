@@ -104,6 +104,17 @@ func New(cfg *config.Config, configPath string) *Instance {
 		sseHub.ServeHTTP(c.Writer, c.Request)
 	})
 
+	r.POST("/api/stats/reset", func(c *gin.Context) {
+		// Same kill-switch protection as /api/control: stats reset mutates
+		// shared state, so remote callers need control_allow_remote.
+		if !cfg.Global.ControlAllowRemote && !isLoopback(c.Request.RemoteAddr) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "stats reset denied: loopback only"})
+			return
+		}
+		statsCollector.Reset()
+		c.JSON(200, gin.H{"reset": true})
+	})
+
 	r.POST("/api/control", func(c *gin.Context) {
 		// Kill-switch protection: unless control_allow_remote is set, only
 		// loopback callers may toggle the proxy. Prevents a remote visitor from

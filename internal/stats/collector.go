@@ -333,6 +333,41 @@ func (c *Collector) SetRunning(v bool) {
 	c.running.Store(v)
 }
 
+// Reset zeroes all collected statistics in place: provider counters, totals,
+// hit-rate windows/curves, latency curve and recent attempts. Provider entries
+// are kept (zeroed) so the dashboard table keeps listing configured providers.
+// The cleared state is persisted immediately so a restart stays cleared.
+func (c *Collector) Reset() {
+	c.mu.Lock()
+	for _, ps := range c.providers {
+		ps.Total = 0
+		ps.Success = 0
+		ps.Fail = 0
+		ps.Rate = 0
+		ps.ConsecutiveFail = 0
+		ps.LastErrType = ""
+		ps.LastErr = ""
+		ps.LatencySumMs = 0
+		ps.LatencyCount = 0
+		ps.LatencyAvgMs = 0
+		ps.LastLatencyMs = 0
+	}
+	c.overallWin = rollingHit{}
+	c.prioWin = make(map[int]*rollingHit)
+	c.overallSeries = nil
+	c.prioSeries = make(map[int][]float64)
+	c.latencySeries = nil
+	c.recentAttempts = nil
+	c.mu.Unlock()
+
+	c.totalReq.Store(0)
+	c.totalClient.Store(0)
+	c.totalSuccess.Store(0)
+	c.totalFail.Store(0)
+
+	c.Save()
+}
+
 func (c *Collector) IsRunning() bool {
 	return c.running.Load()
 }

@@ -76,25 +76,16 @@ function fetchVersion() {
 }
 
 function clearStats() {
-  if (statsBaseline) {
-    statsBaseline = null;
-    statsBaselineAt = 0;
-    statsClearBtn.textContent = '清零';
-  } else if (lastStatsData) {
-    statsBaseline = {
-      total_req: lastStatsData.total_req,
-      total_client_req: lastStatsData.total_client_req,
-      total_success: lastStatsData.total_success,
-      total_fail: lastStatsData.total_fail,
-      providers: {}
-    };
-    lastStatsData.providers.forEach(p => {
-      statsBaseline.providers[p.name] = { total: p.total, success: p.success, fail: p.fail };
-    });
-    statsBaselineAt = Date.now();
-    statsClearBtn.textContent = '恢复';
-  }
-  if (lastStatsData) renderStats(lastStatsData);
+  if (!confirm('确认清零所有统计数据？该操作会清空服务端统计，不可恢复。')) return;
+  fetch('/api/stats/reset', { method: 'POST' })
+    .then(r => {
+      if (!r.ok) throw new Error('reset denied');
+      statsBaseline = null;
+      statsBaselineAt = 0;
+      statsClearBtn.textContent = '清零';
+      fetchStats();
+    })
+    .catch(() => alert('清零失败：仅允许本机访问（或开启 control_allow_remote）'));
 }
 
 function renderStats(data) {
@@ -263,10 +254,11 @@ function renderChart(curves, latencyCurve) {
   }
   hitChart.innerHTML = svg;
 
-  // Legend: hit-rate curves + latency.
-  let legend = curves.filter(c => c.points && c.points.length).map(c =>
-    `<span class="legend-item"><span class="legend-dot" style="background:${prioColor(c.priority)}"></span>${prioLabel(c.priority)}</span>`
-  ).join('');
+  // Legend: hit-rate curves (label + latest success rate) + latency.
+  let legend = curves.filter(c => c.points && c.points.length).map(c => {
+    const latest = c.points[c.points.length - 1];
+    return `<span class="legend-item"><span class="legend-dot" style="background:${prioColor(c.priority)}"></span>${prioLabel(c.priority)} ${latest.toFixed(1)}%</span>`;
+  }).join('');
   if (maxLat > 0) {
     legend += `<span class="legend-item"><span class="legend-dot dash" style="background:#d2a8ff"></span>命中耗时(s)</span>`;
   }
