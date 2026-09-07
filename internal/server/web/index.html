@@ -91,6 +91,7 @@
         <input type="text" id="logFilter" class="filter-input" placeholder="按子串过滤（provider/状态/模型...）" autocomplete="off">
         <button class="btn-small" id="pauseBtn" onclick="togglePause()">暂停</button>
         <button class="btn-small" onclick="clearLog()">清空</button>
+        <button class="btn-small" onclick="clearLogFile()" title="截断服务端日志文件（备份文件不受影响）">清空文件</button>
       </div>
     </div>
     <div class="log-container" id="log-container"></div>

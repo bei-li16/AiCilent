@@ -160,3 +160,21 @@ func (r *Rotator) Close() error {
 	}
 	return nil
 }
+
+// Clear truncates the active log file to zero length and reopens it, so
+// subsequent writes keep appending. Backup files are left untouched.
+func (r *Rotator) Clear() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.file != nil {
+		if err := r.file.Close(); err != nil {
+			return err
+		}
+		r.file = nil
+	}
+	if err := os.WriteFile(r.path, nil, 0644); err != nil {
+		return err
+	}
+	r.size = 0
+	return r.openFile()
+}

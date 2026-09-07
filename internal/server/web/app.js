@@ -314,6 +314,16 @@ function clearLog() {
   logContainer.innerHTML = '';
 }
 
+function clearLogFile() {
+  if (!confirm('确认清空服务端日志文件？该操作不可恢复（历史备份文件保留）。')) return;
+  fetch('/api/logs/clear', { method: 'POST' })
+    .then(r => {
+      if (!r.ok) throw new Error('clear denied');
+      logContainer.innerHTML = '';
+    })
+    .catch(() => alert('清空失败：仅允许本机访问（或开启 control_allow_remote）'));
+}
+
 function toggleSection(id) {
   document.getElementById(id).classList.toggle('collapsed');
 }

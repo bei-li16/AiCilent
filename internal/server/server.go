@@ -115,6 +115,23 @@ func New(cfg *config.Config, configPath string) *Instance {
 		c.JSON(200, gin.H{"reset": true})
 	})
 
+	r.POST("/api/logs/clear", func(c *gin.Context) {
+		// Same loopback protection as /api/control: truncates the log file.
+		if !cfg.Global.ControlAllowRemote && !isLoopback(c.Request.RemoteAddr) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "log clear denied: loopback only"})
+			return
+		}
+		if rot == nil {
+			c.JSON(200, gin.H{"cleared": true, "note": "logging to stdout, no file to clear"})
+			return
+		}
+		if err := rot.Clear(); err != nil {
+			c.JSON(500, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(200, gin.H{"cleared": true})
+	})
+
 	r.POST("/api/control", func(c *gin.Context) {
 		// Kill-switch protection: unless control_allow_remote is set, only
 		// loopback callers may toggle the proxy. Prevents a remote visitor from
