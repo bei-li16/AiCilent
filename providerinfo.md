@@ -1,6 +1,6 @@
 # 模型列表信息
 
-来源：`GET https://token.sensenova.cn/v1/models`（2026-09-03 实测）  
+来源：`GET https://token.sensenova.cn/v1/models`（2026-09-21 实测）
 思考等级来源：`platform.sensenova.cn/docs` 官方文档（2026-09-03 提取）
 
 ## 模型总览
@@ -11,10 +11,12 @@
 | 2 | `glm-5.2` | 文本 | 文本 | **1M** | **128K** | 旗舰模型，超长任务，工程级上下文，端到端开发流水线 |
 | 3 | `deepseek-v4-pro` | 文本 | 文本 | **1M** | 64K | DeepSeek V4 PRO，1M上下文，工具调用 |
 | 4 | `deepseek-v4-flash` | 文本 | 文本 | **1M** | 64K | DeepSeek高性能对话模型，1M上下文，工具调用 |
-| 5 | `sensenova-6.8-flash-lite` | 文本+**图像** | 文本 | 262K | 64K | 轻量多模态智能体（6.8版本） |
-| 6 | `sensenova-6.7-flash-lite` | 文本+**图像** | 文本 | 262K | 64K | 已自动重定向至 6.8-flash-lite |
-| 7 | `sensenova-u1.5-lite` | 文本 | **图像** | 262K | 64K | 基于U1.5加速版，专用于信息图生成 |
-| 8 | `sensenova-u1-fast` | 文本 | **图像** | 262K | 64K | 基于U1加速版，专用于信息图生成 |
+| 5 | `deepseek-v4.1-flash` | 文本+**图像** | 文本 | **1M** | 64K | DeepSeek V4.1 Flash，多模态高性能对话模型，支持图片理解和工具调用 |
+| 6 | `deepseek-flash` | 文本 | 文本 | **1M** | 64K | DeepSeek Flash，高性能对话模型，支持工具调用 |
+| 7 | `sensenova-6.8-flash-lite` | 文本+**图像** | 文本 | 262K | 64K | 轻量多模态智能体（6.8版本） |
+| 8 | `sensenova-6.7-flash-lite` | 文本+**图像** | 文本 | 262K | 64K | 已自动重定向至 6.8-flash-lite；当前模型列表未单独返回 |
+| 9 | `sensenova-u1.5-lite` | 文本 | **图像** | 262K | 64K | 基于U1.5加速版，专用于信息图生成 |
+| 10 | `sensenova-u1-fast` | 文本 | **图像** | 262K | 64K | 基于U1加速版，专用于信息图生成 |
 
 ---
 
@@ -28,6 +30,8 @@
 | `glm-5.2` | `low` / `medium` / `high` / `none` | `medium` | `reasoning_content` | ✅ | ❌ 未提及 |
 | `deepseek-v4-pro` | `low` / `high` / `max` / `none`（`medium`→`high`，`xhigh`→`high`） | `high` | `thinking_content` | ✅ | ✅ enabled/disabled |
 | `deepseek-v4-flash` | `low` / `medium` / `high` /`xhigh` / `none` | `medium` | `reasoning_content` | ✅ | ❌ 未提及 |
+| `deepseek-v4.1-flash` | 待官方文档确认（模型接口确认支持 reasoning） | 待确认 | 待确认 | 待确认 | 待确认 |
+| `deepseek-flash` | 待官方文档确认（模型接口确认支持 reasoning） | 待确认 | 待确认 | 待确认 | 待确认 |
 | `sensenova-6.8-flash-lite` | `low` / `medium` / `high` / `none` | `medium` | `reasoning_content` | ✅ | ❌ 未提及 |
 | `sensenova-6.7-flash-lite` | 同 6.8（已重定向） | 同 6.8 | 同 6.8 | 同 6.8 | 同 6.8 |
 | `sensenova-u1.5-lite` | N/A（图像生成模型） | N/A | N/A | N/A | N/A |
@@ -45,11 +49,13 @@
 
 - 所有模型定价当前均显示为 **0**（免费），支持 `tools`、`json_mode`、`reasoning`，量化精度 fp8，数据中心位于中国(CN)，业务模式为 tokenplan+metered
 - 图像生成类：`sensenova-u1-fast`、`sensenova-u1.5-lite`（仅文本输入、图像输出，使用 `/v1/images/generations` 端点）
-- 多模态(图像理解)：`kimi-k3`、`sensenova-6.7-flash-lite`（已重定向至6.8）、`sensenova-6.8-flash-lite`
-- 推理/长上下文类：`deepseek-v4-flash`、`deepseek-v4-pro`、`glm-5.2`、`kimi-k3`（均为 1M 上下文）
+- 多模态(图像理解)：`kimi-k3`、`deepseek-v4.1-flash`、`sensenova-6.7-flash-lite`（已重定向至6.8）、`sensenova-6.8-flash-lite`
+- 推理/长上下文类：`deepseek-v4-flash`、`deepseek-v4.1-flash`、`deepseek-v4-pro`、`deepseek-flash`、`glm-5.2`、`kimi-k3`（均为 1M 上下文）
 
 ## 变更记录
 
+- 2026-09-22：补充 `deepseek-v4.1-flash` 支持图片输入和多模态图片理解
+- 2026-09-21：重新请求 `/v1/models`；新增 `deepseek-v4.1-flash` 和 `deepseek-flash`，二者均为 1M 上下文、64K 最大输出，并支持 `tools`、`json_mode`、`reasoning`
 - 2026-09-03：`kimi-k3` 输入模态由"文本+图像"更正为"文本"（API 实测 `input_modalities: ["text"]`）；新增思考模式列
 - 2026-09-03：从 `platform.sensenova.cn/docs` 官方文档提取各模型思考等级定义，整理为速查表
 - 2026-09-03：`kimi-k3` 输入模态改回"文本+图像"（支持多模态图像理解）

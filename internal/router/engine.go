@@ -635,9 +635,6 @@ func (e *Engine) releaseConnSlot(limiter *hostLimiter) {
 
 func (e *Engine) streamTransport(timeout int) *http.Transport {
 	headerTimeout := time.Duration(timeout) * time.Second
-	if headerTimeout <= 0 || headerTimeout > 30*time.Second {
-		headerTimeout = 30 * time.Second
-	}
 
 	e.streamMu.Lock()
 	defer e.streamMu.Unlock()

@@ -14,9 +14,9 @@ model_routes:                    # 模型路由别名映射，将别名映射到
   - alias: gpt-4o                # 对外暴露的模型别名
     target: glm-5.2              # 映射到的 provider name（软钉：该组优先，其余供应商仍作兜底）
   - alias: gpt-4o-mini
-    target: deepseek-v4-flash
+    target: deepseek-v4.1-flash
   - alias: default               # 默认路由，请求中模型不在路由表时使用
-    target: deepseek-v4-flash
+    target: deepseek-v4.1-flash
   # target 也可填路由关键词，语义与客户端直发该关键词完全一致（硬性档位，档外不兜底）；
   # target 同时匹配关键词和供应商名时按关键词解释（档位优先）：
   # - alias: best
@@ -67,9 +67,9 @@ providers:                       # 供应商列表，按优先级从高到低降
       backoff_factor: 2
 
   # ════════ 低价位供应商示例（演示跨优先级降级）════════
-  - name: deepseek-v4-flash       # 上面 model_routes 中 gpt-4o-mini / default 的 target
+  - name: deepseek-v4.1-flash       # 上面 model_routes 中 gpt-4o-mini / default 的 target
     vendor: openai
-    model_id: deepseek-v4-flash
+    model_id: deepseek-v4.1-flash
     api_key: YOUR_API_KEY_HERE
     base_url: https://api.example.com/v1
     priority: 2                   # 优先级 2：P1 组全失败后降级到这一档
