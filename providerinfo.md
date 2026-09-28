@@ -12,7 +12,7 @@
 | 3 | `deepseek-v4-pro` | 文本 | 文本 | **1M** | 64K | DeepSeek V4 PRO，1M上下文，工具调用 |
 | 4 | `deepseek-v4-flash` | 文本 | 文本 | **1M** | 64K | DeepSeek高性能对话模型，1M上下文，工具调用 |
 | 5 | `deepseek-v4.1-flash` | 文本+**图像** | 文本 | **1M** | 64K | DeepSeek V4.1 Flash，多模态高性能对话模型，支持图片理解和工具调用 |
-| 6 | `deepseek-flash` | 文本 | 文本 | **1M** | 64K | DeepSeek Flash，高性能对话模型，支持工具调用 |
+| 6 | `deepseek-flash` | 文本+**图像** | 文本 | **1M** | 64K | DeepSeek Flash，多模态高性能对话模型，支持图片理解和工具调用 |
 | 7 | `sensenova-6.8-flash-lite` | 文本+**图像** | 文本 | 262K | 64K | 轻量多模态智能体（6.8版本） |
 | 8 | `sensenova-6.7-flash-lite` | 文本+**图像** | 文本 | 262K | 64K | 已自动重定向至 6.8-flash-lite；当前模型列表未单独返回 |
 | 9 | `sensenova-u1.5-lite` | 文本 | **图像** | 262K | 64K | 基于U1.5加速版，专用于信息图生成 |
@@ -51,7 +51,7 @@
 
 - 所有模型定价当前均显示为 **0**（免费），支持 `tools`、`json_mode`、`reasoning`，量化精度 fp8，数据中心位于中国(CN)，业务模式为 tokenplan+metered
 - 图像生成类：`sensenova-u1-fast`、`sensenova-u1.5-lite`（仅文本输入、图像输出，使用 `/v1/images/generations` 端点）
-- 多模态(图像理解)：`kimi-k3`、`deepseek-v4.1-flash`、`sensenova-6.7-flash-lite`（已重定向至6.8）、`sensenova-6.8-flash-lite`
+- 多模态(图像理解)：`kimi-k3`、`deepseek-v4.1-flash`、`deepseek-flash`、`sensenova-6.7-flash-lite`（已重定向至6.8）、`sensenova-6.8-flash-lite`
 - 推理/长上下文类：`deepseek-v4-flash`、`deepseek-v4.1-flash`、`deepseek-v4-pro`、`deepseek-flash`、`glm-5.2`、`kimi-k3`（均为 1M 上下文）
 
 ## 变更记录
@@ -62,3 +62,4 @@
 - 2026-09-03：从 `platform.sensenova.cn/docs` 官方文档提取各模型思考等级定义，整理为速查表
 - 2026-09-03：`kimi-k3` 输入模态改回"文本+图像"（支持多模态图像理解）
 - 2026-09-28：思考挡位数据更新为 API 报错枚举法实测结果，新增 `deepseek-flash`、`deepseek-v4.1-flash` 挡位信息；挡位由原来 4-6 档修正为 5-8 档（新增 `minimal`、`ultra` 等）
+- 2026-09-28：`deepseek-flash` 输入模态由"文本"更正为"文本+图像"（实测支持图片输入），补充信息同步更新
