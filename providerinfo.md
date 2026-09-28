@@ -43,7 +43,7 @@
 - **deepseek-v4-flash 与 deepseek-v4-pro 挡位不同**：Flash 仅 5 档（无 minimal/max/ultra），Pro 有 8 档（全量）
 - **deepseek-flash / deepseek-v4.1-flash**：与 deepseek-v4-pro 相同，均为 8 档全量
 - **glm-5.2 与 kimi-k3**：均为 7 档（无 ultra），挡位完全一致
-- `deepseek-v4-pro` 流式响应中推理字段为 `delta.thinking_content`，其余模型为 `delta.reasoning_content`（非流式为 `reasoning_content`）
+- 所有模型（含 `deepseek-v4-pro`）流式响应的推理字段均为 `delta.reasoning_content`（2026-09-28 经 ai-proxy 链路实测，3 次采样共 80 个 chunk，`thinking_content` 出现 0 次）；非流式同为 `reasoning_content`
 
 ---
 
@@ -63,3 +63,4 @@
 - 2026-09-03：`kimi-k3` 输入模态改回"文本+图像"（支持多模态图像理解）
 - 2026-09-28：思考挡位数据更新为 API 报错枚举法实测结果，新增 `deepseek-flash`、`deepseek-v4.1-flash` 挡位信息；挡位由原来 4-6 档修正为 5-8 档（新增 `minimal`、`ultra` 等）
 - 2026-09-28：`deepseek-flash` 输入模态由"文本"更正为"文本+图像"（实测支持图片输入），补充信息同步更新
+- 2026-09-28：更正 `deepseek-v4-pro` 流式推理字段为 `delta.reasoning_content`（原记载 `delta.thinking_content` 经代理链路实测未复现）
