@@ -245,6 +245,13 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 	}
 	tr.LogRequest(c.Request.Method, c.Request.URL.Path, logLevel, buildRequestBodyLog(body, logLevel))
 
+	// Normalize OpenAI-only roles before any format conversion, so both the
+	// openai->openai passthrough and the openai->anthropic system hoisting see a
+	// body the upstream accepts. This runs after LogRequest on purpose: the log
+	// keeps showing the role the client actually sent, which is what makes this
+	// class of failure diagnosable.
+	body = normalizeDeveloperRole(body)
+
 	// Filter to providers that speak the upstream protocol needed by this
 	// request. Responses is an OpenAI client protocol that is adapted to the
 	// provider's Chat Completions endpoint, so it uses OpenAI providers.
@@ -1220,6 +1227,49 @@ func normalizeSensenovaReasoning(body []byte) []byte {
 	}
 	// Sensenova rejects reasoning_effort unless reasoning mode is enabled.
 	data["reasoning"] = true
+
+	modified, err := json.Marshal(data)
+	if err != nil {
+		return body
+	}
+	return modified
+}
+
+// normalizeDeveloperRole rewrites the OpenAI "developer" role to "system" in the
+// messages array. OpenAI defines developer as the successor of system, but no
+// other vendor is obliged to accept it: Sensenova's glm-5.2 endpoint answers such
+// a request with 400 invalid_parameter_error, and because the router degrades
+// across every account of a group, one unsupported role fails the whole request
+// even when sibling models (deepseek-flash, kimi-k3) tolerate it.
+//
+// Only the role string is touched; message count, order, content, tool_calls and
+// tool_call_id are preserved. The rewrite is idempotent and never fails a request:
+// an unparsable body, a missing messages array, or a marshal error leaves the
+// original bytes in place.
+func normalizeDeveloperRole(body []byte) []byte {
+	var data map[string]interface{}
+	if err := json.Unmarshal(body, &data); err != nil {
+		return body
+	}
+	messages, ok := data["messages"].([]interface{})
+	if !ok {
+		return body
+	}
+
+	changed := false
+	for _, rawMessage := range messages {
+		message, ok := rawMessage.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if role, _ := message["role"].(string); role == "developer" {
+			message["role"] = "system"
+			changed = true
+		}
+	}
+	if !changed {
+		return body
+	}
 
 	modified, err := json.Marshal(data)
 	if err != nil {

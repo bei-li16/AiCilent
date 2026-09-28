@@ -2,6 +2,16 @@
 
 各版本发布信息汇总（据 git 提交历史整理），最新版本在前。
 
+## v1.0.25（2026-09-28）
+
+**修复 glm-5.2 拒绝 developer 消息角色**
+
+- Chat Completions 透传路径新增 `developer` → `system` 角色归一化（`normalizeDeveloperRole`），修复 DeepSeek Harness 等客户端发送 `role: developer` 时 SenseNova glm-5.2 返回 400 invalid_parameter_error（"inference request is invalid"）导致整组降级全部失败的问题；kimi-k3、deepseek-flash 上游原本就接受该角色，不受影响
+- 归一化在 `HandleRequest` 统一执行一次，同时覆盖 openai→openai 透传与 openai→anthropic 转换路径；Responses 入站（无 `messages` 字段）与 anthropic 入站自动不受影响，`responses.go` 原有转换保持不变
+- 改写为窄映射：仅 developer 角色变化，user/assistant/tool 角色、tool_calls、tool_call_id、消息数量与顺序全部保留；解析失败、缺 messages 或无 developer 角色时原样返回，绝不让归一化本身弄挂请求
+- 归一化在 LogRequest 之后执行：日志保留客户端实际发送的原始角色，便于排查此类兼容性问题
+- 新增测试：窄映射断言（角色序列与字段保留）、幂等性、8 种边界输入不改写、gin 全链路回归测试（httptest 上游断言实际收到的角色序列）
+
 ## v1.0.24（2026-09-22）
 
 **流式超时与模型配置更新**
