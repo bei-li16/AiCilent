@@ -1,7 +1,7 @@
 # 模型列表信息
 
-来源：`GET https://token.sensenova.cn/v1/models`（2026-09-21 实测）
-思考等级来源：`platform.sensenova.cn/docs` 官方文档（2026-09-03 提取）
+来源：`GET https://token.sensenova.cn/v1/models`（2026-09-21 实测）  
+思考挡位来源：API 报错枚举法实测（2026-09-28），向各模型发送 `reasoning_effort: "invalid"` 触发参数校验错误，从返回信息中提取合法值列表
 
 ## 模型总览
 
@@ -20,27 +20,29 @@
 
 ---
 
-## 思考等级（SenseNova 平台）
+## 思考挡位（API 实测 2026-09-28）
 
-> 信息提取自 `platform.sensenova.cn/docs` 官方文档。SenseNova 平台对各模型参数进行了**归一化处理**，与模型原厂（Zhipu/DeepSeek/Moonshot）的官方文档可能不同，以 SenseNova 平台文档为准。
+> 通过向 `/v1/chat/completions` 发送 `reasoning_effort: "invalid"` 触发服务端参数校验报错，从错误信息中提取各模型的合法取值。挡位强度从低到高：`none → minimal → low → medium → high → xhigh → max → ultra`
 
-| 模型ID | 支持的 reasoning_effort | 默认值 | 响应字段 | 可关闭思考 | thinking.type |
-|--------|------------------------|--------|---------|-----------|---------------|
-| `kimi-k3` | `low` / `high` / `max` | `max` | `reasoning_content` | ❌ | ❌ 不使用 |
-| `glm-5.2` | `low` / `medium` / `high` / `none` | `medium` | `reasoning_content` | ✅ | ❌ 未提及 |
-| `deepseek-v4-pro` | `low` / `high` / `max` / `none`（`medium`→`high`，`xhigh`→`high`） | `high` | `thinking_content` | ✅ | ✅ enabled/disabled |
-| `deepseek-v4-flash` | `low` / `medium` / `high` /`xhigh` / `none` | `medium` | `reasoning_content` | ✅ | ❌ 未提及 |
-| `deepseek-v4.1-flash` | 待官方文档确认（模型接口确认支持 reasoning） | 待确认 | 待确认 | 待确认 | 待确认 |
-| `deepseek-flash` | 待官方文档确认（模型接口确认支持 reasoning） | 待确认 | 待确认 | 待确认 | 待确认 |
-| `sensenova-6.8-flash-lite` | `low` / `medium` / `high` / `none` | `medium` | `reasoning_content` | ✅ | ❌ 未提及 |
-| `sensenova-6.7-flash-lite` | 同 6.8（已重定向） | 同 6.8 | 同 6.8 | 同 6.8 | 同 6.8 |
-| `sensenova-u1.5-lite` | N/A（图像生成模型） | N/A | N/A | N/A | N/A |
-| `sensenova-u1-fast` | N/A（图像生成模型） | N/A | N/A | N/A | N/A |
+| 模型ID | 支持的 reasoning_effort | 挡位数 | 可关闭思考 |
+|--------|------------------------|--------|-----------|
+| `deepseek-v4-pro` | `none` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` / `ultra` | 8 | ✅ |
+| `deepseek-flash` | `none` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` / `ultra` | 8 | ✅ |
+| `deepseek-v4.1-flash` | `none` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` / `ultra` | 8 | ✅ |
+| `glm-5.2` | `none` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` | 7 | ✅ |
+| `kimi-k3` | `none` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` | 7 | ✅ |
+| `deepseek-v4-flash` | `none` / `low` / `medium` / `high` / `xhigh` | 5 | ✅ |
+| `sensenova-6.8-flash-lite` | `none` / `low` / `medium` / `high` / `xhigh` | 5 | ✅ |
+| `sensenova-6.7-flash-lite` | 同 6.8（已重定向） | 同 6.8 | 同 6.8 |
+| `sensenova-u1.5-lite` | N/A（图像生成模型） | — | — |
+| `sensenova-u1-fast` | N/A（图像生成模型） | — | — |
 
 ### 注意事项
 
-- **V4 Flash 与 V4 Pro 参数不同**：Flash 仅支持 4 档（low/medium/high/xhigh/none），默认 `medium`；Pro 支持 6 档（含 xhigh/max），默认 `high`，其中 `medium` 和 `xhigh` 映射为 `high`
-- **GLM-5.2 与原厂差异**：智谱官方文档支持 7 档（max/xhigh/high/medium/low/minimal/none），SenseNova 归一化为 4 档（low/medium/high/none），默认 `medium` 而非 `max`
+- **挡位强度排序**：`none` → `minimal` → `low` → `medium` → `high` → `xhigh` → `max` → `ultra`
+- **deepseek-v4-flash 与 deepseek-v4-pro 挡位不同**：Flash 仅 5 档（无 minimal/max/ultra），Pro 有 8 档（全量）
+- **deepseek-flash / deepseek-v4.1-flash**：与 deepseek-v4-pro 相同，均为 8 档全量
+- **glm-5.2 与 kimi-k3**：均为 7 档（无 ultra），挡位完全一致
 - `deepseek-v4-pro` 流式响应中推理字段为 `delta.thinking_content`，其余模型为 `delta.reasoning_content`（非流式为 `reasoning_content`）
 
 ---
@@ -59,3 +61,4 @@
 - 2026-09-03：`kimi-k3` 输入模态由"文本+图像"更正为"文本"（API 实测 `input_modalities: ["text"]`）；新增思考模式列
 - 2026-09-03：从 `platform.sensenova.cn/docs` 官方文档提取各模型思考等级定义，整理为速查表
 - 2026-09-03：`kimi-k3` 输入模态改回"文本+图像"（支持多模态图像理解）
+- 2026-09-28：思考挡位数据更新为 API 报错枚举法实测结果，新增 `deepseek-flash`、`deepseek-v4.1-flash` 挡位信息；挡位由原来 4-6 档修正为 5-8 档（新增 `minimal`、`ultra` 等）
