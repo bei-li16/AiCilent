@@ -26,8 +26,8 @@ type GlobalConfig struct {
 	// MaxStreamMinutes 流式传输总时长上限（分钟）。超过此时间 context 取消，
 	// 流被中断并注入 SSE error event。默认 3。
 	MaxStreamMinutes int `yaml:"max_stream_minutes" json:"max_stream_minutes"`
-	// RateLimitCooldown 上游返回 429 后该 provider 的冷却秒数（默认 30，<=0 用默认）。
-	// 冷却期内不再选中该 provider，直接换号；避免用同一个被限流的账号反复撞击。
+	// RateLimitCooldown 按 provider 的 retry 配置重试耗尽后仍返回 429 时的可选冷却秒数。
+	// 默认关闭（<=0）；显式设置正数后，冷却期内后续请求跳过该 provider。
 	RateLimitCooldown int `yaml:"rate_limit_cooldown" json:"rate_limit_cooldown"`
 }
 

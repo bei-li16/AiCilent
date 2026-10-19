@@ -1,7 +1,7 @@
 .PHONY: build build-cli build-gui run clean test vet
 
 APP_NAME = ai-proxy
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+VERSION ?= $(shell cat internal/version/VERSION)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "unknown")
 LDFLAGS  = -ldflags "-X ai-proxy/internal/version.Version=$(VERSION) -X ai-proxy/internal/version.Commit=$(COMMIT) -X ai-proxy/internal/version.BuildDate=$(DATE)"

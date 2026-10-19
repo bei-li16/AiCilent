@@ -1,16 +1,26 @@
 package version
 
 import (
+	_ "embed"
 	"fmt"
 	"runtime"
 	"strings"
 )
 
+//go:embed VERSION
+var releaseVersion string
+
 var (
-	Version   = "dev"
+	Version   = ""
 	Commit    = "none"
 	BuildDate = "unknown"
 )
+
+func init() {
+	if Version == "" {
+		Version = strings.TrimSpace(releaseVersion)
+	}
+}
 
 func String() string {
 	var b strings.Builder

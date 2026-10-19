@@ -160,7 +160,7 @@ func TestCoolingProvidersAreNotForcedOrCountedAsFailures(t *testing.T) {
 	var calls atomic.Int32
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1) }))
 	defer up.Close()
-	e, _ := newStreamEngine(t, up.URL, config.GlobalConfig{CBThreshold: 1})
+	e, _ := newStreamEngine(t, up.URL, config.GlobalConfig{CBThreshold: 1, RateLimitCooldown: 30})
 	e.markProviderCooldown("p")
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)

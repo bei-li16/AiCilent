@@ -50,9 +50,9 @@ type Engine struct {
 	// Rate limiters (rlMu protects)
 	rlMu         sync.Mutex
 	rateLimiters map[string]*ratelimit.TokenBucket
-	// coolUntil holds per-provider cooldown deadlines set after a 429. A
-	// rate-limited account cannot serve again until its TPM/RPM window slides,
-	// so retrying it (or picking it for the next request) only wastes latency.
+	// coolUntil holds per-provider cooldown deadlines set after exhausting
+	// the configured retry budget on 429 responses. Subsequent requests skip
+	// the provider until its cooldown expires.
 	coolUntil map[string]time.Time
 
 	// Round-robin index (rrMu protects)
@@ -201,6 +201,9 @@ func (e *Engine) reloadConfig() error {
 		}
 	}
 	e.rateLimiters = newRL
+	if cfg.Global.RateLimitCooldown <= 0 {
+		clear(e.coolUntil)
+	}
 	e.rlMu.Unlock()
 
 	// Apply host concurrency changes without interrupting active requests.
@@ -473,9 +476,9 @@ func (e *Engine) tryGroup(c *gin.Context, body []byte, requestFormat string, str
 			lastErr = fwdErr
 			upstreamFailed = upstreamFailed || breakerFailure(fwdErr)
 
-			if statusCode == http.StatusTooManyRequests {
+			if statusCode == http.StatusTooManyRequests && attempt == maxRetries+1 {
 				e.markProviderCooldown(provider.Name)
-				break // respect this account's cooldown, including the last candidate
+				break // cool down and fail over only after the YAML retry budget is exhausted
 			}
 
 			if c.Writer.Written() {
@@ -762,13 +765,14 @@ func (e *Engine) streamTransport(timeout int) *http.Transport {
 	return transport
 }
 
-// checkRateLimit returns nil if the provider is within its rate limit,
-// or an error if rate limited. Always returns nil if rate limiting is disabled.
+// checkRateLimit checks the optional upstream cooldown and the local limiter.
+// Both are disabled unless explicitly enabled in the configuration.
 func (e *Engine) checkRateLimit(providerName string) error {
+	cooldownEnabled := e.rateLimitCooldownSec() > 0
 	now := time.Now()
 	e.rlMu.Lock()
 	until, cooling := e.coolUntil[providerName]
-	if cooling && now.Before(until) {
+	if cooling && cooldownEnabled && now.Before(until) {
 		remain := until.Sub(now)
 		e.rlMu.Unlock()
 		return &adapter.APIError{
@@ -794,9 +798,8 @@ func (e *Engine) checkRateLimit(providerName string) error {
 	return nil
 }
 
-// markProviderCooldown parks a provider for a while after it answered 429.
-// Its TPM/RPM window needs time to slide; retrying the same key only adds
-// latency and burns the retry budget that another account could use.
+// markProviderCooldown parks a provider after its configured retries still
+// end in 429, giving the rate-limit window time to slide before new requests.
 func (e *Engine) markProviderCooldown(providerName string) {
 	sec := e.rateLimitCooldownSec()
 	if sec <= 0 || providerName == "" {
@@ -812,7 +815,7 @@ func (e *Engine) rateLimitCooldownSec() int {
 	sec := e.cfg.Global.RateLimitCooldown
 	e.reloadMu.RUnlock()
 	if sec <= 0 {
-		return 30
+		return 0
 	}
 	return sec
 }
