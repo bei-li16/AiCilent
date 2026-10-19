@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -42,10 +43,17 @@ type Engine struct {
 	failureCount     map[int]int
 	circuitOpenSince map[int]*time.Time
 	skipRemaining    map[int]int
+	probeInFlight    map[int]bool
+	probeLease       map[int]uint64
+	nextProbeLease   uint64
 
 	// Rate limiters (rlMu protects)
 	rlMu         sync.Mutex
 	rateLimiters map[string]*ratelimit.TokenBucket
+	// coolUntil holds per-provider cooldown deadlines set after a 429. A
+	// rate-limited account cannot serve again until its TPM/RPM window slides,
+	// so retrying it (or picking it for the next request) only wastes latency.
+	coolUntil map[string]time.Time
 
 	// Round-robin index (rrMu protects)
 	rrMu    sync.Mutex
@@ -94,8 +102,11 @@ func NewEngine(cfg *config.Config, configPath string, logWriter, fileWriter io.W
 		failureCount:     make(map[int]int),
 		circuitOpenSince: make(map[int]*time.Time),
 		skipRemaining:    make(map[int]int),
+		probeInFlight:    make(map[int]bool),
+		probeLease:       make(map[int]uint64),
 		rrIndex:          make(map[int]int),
 		rateLimiters:     rl,
+		coolUntil:        make(map[string]time.Time),
 		transport: &http.Transport{
 			MaxIdleConns:        100,
 			MaxIdleConnsPerHost: 10,
@@ -109,7 +120,20 @@ func NewEngine(cfg *config.Config, configPath string, logWriter, fileWriter io.W
 	}
 	e.rebuildConnLimiters(cfg)
 	e.loadCBState()
+	e.logCBConfig()
 	return e
+}
+
+// logCBConfig prints the circuit-breaker configuration once per load/reload.
+// It used to be emitted on every request, which buried the real CB events.
+func (e *Engine) logCBConfig() {
+	e.reloadMu.RLock()
+	g := e.cfg.Global
+	e.reloadMu.RUnlock()
+	fmt.Fprintf(e.logWriter,
+		"[%s] [-] CB       | [CFG] | config | cb_threshold=%d cb_cooldown=%ds cb_skip_requests=%d rate_limit_cooldown=%ds\n",
+		time.Now().Format("2006-01-02 15:04:05.000"),
+		g.CBThreshold, g.CBCooldown, g.CBSkipRequests, e.rateLimitCooldownSec())
 }
 
 // StartWatcher starts a goroutine that polls the config file for changes
@@ -191,6 +215,7 @@ func (e *Engine) reloadConfig() error {
 	}
 	e.rrMu.Unlock()
 
+	e.logCBConfig()
 	return nil
 }
 
@@ -284,11 +309,6 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 		return
 	}
 
-	// Log CB config for debugging
-	tr.LogCircuitBreaker(0, "config",
-		fmt.Sprintf("cb_threshold=%d cb_cooldown=%ds cb_skip_requests=%d",
-			cfg.Global.CBThreshold, cfg.Global.CBCooldown, cfg.Global.CBSkipRequests))
-
 	var lastErr error
 	var completed bool
 
@@ -310,103 +330,15 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 			tr.LogDegradeGroup(priority, reason)
 		}
 
+		var probeID uint64
 		if e.shouldSkipGroup(priority, modelName, tr,
-			cfg.Global.CBThreshold, cfg.Global.CBCooldown, cfg.Global.CBSkipRequests) {
+			cfg.Global.CBThreshold, cfg.Global.CBCooldown, cfg.Global.CBSkipRequests, false, &probeID) {
 			tr.LogQueue(priority, "skipped (circuit breaker)", 0, len(group))
 			continue
 		}
 
-		startIdx := e.advanceRRIndex(priority, len(group))
-		tr.LogQueue(priority, "trying", startIdx, len(group))
-
-		for i := 0; i < len(group); i++ {
-			idx := (startIdx + i) % len(group)
-			provider := group[idx]
-
-			if i > 0 && lastErr != nil {
-				tr.LogDegradeProvider(provider.Name, priority, lastErr.Error())
-			}
-
-			// Check rate limit before attempting
-			if rlErr := e.checkRateLimit(provider.Name); rlErr != nil {
-				tr.LogQueue(priority, fmt.Sprintf("provider %s rate limited, skipping", provider.Name), idx, len(group))
-				continue
-			}
-
-			maxRetries := provider.Retry.MaxRetries
-			rm := retry.NewManager(maxRetries, provider.Retry.RetryInterval, provider.Retry.BackoffFactor)
-			for rm.ShouldRetry() {
-				attempt := rm.Attempt()
-				start := time.Now()
-
-				var fwdErr error
-				if streaming {
-					fwdErr = e.forwardRequestStream(c, body, requestFormat, provider, effectiveTimeout(provider.Timeout, modelTimeout), tr)
-				} else {
-					fwdErr = e.forwardRequest(c, body, requestFormat, provider, effectiveTimeout(provider.Timeout, modelTimeout), middleware.GetReqID(c))
-				}
-
-				latency := time.Since(start)
-
-				if fwdErr == nil {
-					e.stats.Record(middleware.GetReqID(c), provider.Name, provider.ModelID, priority, true, http.StatusOK, "", latency)
-					tr.LogAttempt(provider.Name, priority, attempt, maxRetries+1, true, "", latency)
-					e.closeCircuitBreaker(priority, modelName, tr,
-						cfg.Global.CBThreshold, cfg.Global.CBCooldown, cfg.Global.CBSkipRequests)
-					tr.LogResult(true, provider.Name, idx)
-					tr.LogQueue(priority, "released", idx, len(group))
-					fmt.Fprint(e.logWriter, tr.Dump())
-					completed = true
-					break
-				}
-
-				statusCode, errMsg := errorDetail(fwdErr)
-				e.stats.Record(middleware.GetReqID(c), provider.Name, provider.ModelID, priority, false, statusCode, errMsg, latency)
-				tr.LogAttempt(provider.Name, priority, attempt, maxRetries+1, false, fwdErr.Error(), latency)
-				lastErr = fwdErr
-
-				if c.Writer.Written() {
-					tr.LogQueue(priority, "released (stream written)", idx, len(group))
-					tr.LogResult(false, provider.Name, idx)
-					e.recordGroupFailure(modelName, priority, tr,
-						cfg.Global.CBThreshold, cfg.Global.CBCooldown, cfg.Global.CBSkipRequests)
-					fmt.Fprint(e.logWriter, tr.Dump())
-					completed = true
-					break
-				}
-
-				if apiErr, ok := fwdErr.(*adapter.APIError); ok && !apiErr.Retryable() {
-					tr.LogSkipRetry(provider.Name, priority, apiErr.StatusCode)
-					break
-				}
-
-				if ctx.Err() != nil {
-					break
-				}
-
-				// Only wait if there is a next retry (skip after final attempt)
-				if attempt < maxRetries+1 {
-					if err := rm.Wait(ctx); err != nil {
-						break
-					}
-				}
-			}
-
-			if completed {
-				break
-			}
-
-			if c.Writer.Written() {
-				break
-			}
-		}
-
-		if !completed && !c.Writer.Written() {
-			tr.LogQueue(priority, "released (all failed)", startIdx, len(group))
-			e.recordGroupFailure(modelName, priority, tr,
-				cfg.Global.CBThreshold, cfg.Global.CBCooldown, cfg.Global.CBSkipRequests)
-		}
-
+		completed, lastErr = e.tryGroup(c, body, requestFormat, streaming, group,
+			modelTimeout, modelName, tr, cfg, probeID)
 		if completed {
 			break
 		}
@@ -418,65 +350,239 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 
 	tr.LogResult(false, "", 0)
 	fmt.Fprint(e.logWriter, tr.Dump())
-	c.JSON(http.StatusServiceUnavailable, gin.H{
-		"error": fmt.Sprintf("all providers failed: %v", lastErr),
-	})
+	status := http.StatusServiceUnavailable
+	message := "all provider groups unavailable (circuit breaker or local capacity)"
+	if lastErr != nil {
+		message = "all providers failed: " + lastErr.Error()
+		var apiErr *adapter.APIError
+		if errors.As(lastErr, &apiErr) && apiErr.StatusCode == http.StatusTooManyRequests {
+			status = http.StatusTooManyRequests
+		}
+	}
+	c.JSON(status, gin.H{"error": message})
 }
 
-func (e *Engine) shouldSkipGroup(priority int, modelName string, tr *tracer.Recorder, threshold, cooldownSec, skipRequests int) bool {
+// tryGroup attempts every provider in one priority group, honouring each
+// provider's retry policy, and reports whether the request is finished.
+//
+// Client-initiated cancellations are classified here and deliberately kept out
+// of the circuit breaker: a client that closes its connection says nothing
+// about backend health.
+func (e *Engine) tryGroup(c *gin.Context, body []byte, requestFormat string, streaming bool,
+	group []*config.Provider, modelTimeout int, modelName string, tr *tracer.Recorder,
+	cfg *config.Config, probeID uint64) (bool, error) {
+
+	ctx := c.Request.Context()
+	priority := group[0].Priority
+	defer func() {
+		e.cbMu.Lock()
+		if probeID != 0 && e.probeLease[priority] == probeID {
+			e.probeInFlight[priority] = false
+		}
+		e.cbMu.Unlock()
+	}()
+	startIdx := e.advanceRRIndex(priority, len(group))
+	tr.LogQueue(priority, "trying", startIdx, len(group))
+
+	var lastErr error
+	upstreamFailed := false
+	var lastProvider *config.Provider
+	lastIdx := 0
+
+	type candidate struct {
+		idx      int
+		provider *config.Provider
+	}
+	candidates := make([]candidate, 0, len(group))
+	for i := 0; i < len(group); i++ {
+		idx := (startIdx + i) % len(group)
+		provider := group[idx]
+		candidates = append(candidates, candidate{idx: idx, provider: provider})
+	}
+
+	for ci, cand := range candidates {
+		idx, provider := cand.idx, cand.provider
+		lastProvider, lastIdx = provider, idx
+		if ctx.Err() != nil {
+			break
+		}
+		if rlErr := e.checkRateLimit(provider.Name); rlErr != nil {
+			lastErr = rlErr
+			tr.LogQueue(priority, fmt.Sprintf("provider %s skipping (%v)", provider.Name, rlErr), idx, len(group))
+			continue
+		}
+
+		if ci > 0 && lastErr != nil {
+			tr.LogDegradeProvider(provider.Name, priority, lastErr.Error())
+		}
+
+		maxRetries := provider.Retry.MaxRetries
+		rm := retry.NewManager(maxRetries, provider.Retry.RetryInterval, provider.Retry.BackoffFactor)
+		for rm.ShouldRetry() {
+			if ctx.Err() != nil {
+				break
+			}
+			attempt := rm.Attempt()
+			start := time.Now()
+
+			var fwdErr error
+			if streaming {
+				fwdErr = e.forwardRequestStream(c, body, requestFormat, provider, effectiveTimeout(provider.Timeout, modelTimeout), tr)
+			} else {
+				fwdErr = e.forwardRequest(c, body, requestFormat, provider, effectiveTimeout(provider.Timeout, modelTimeout), middleware.GetReqID(c))
+			}
+
+			latency := time.Since(start)
+
+			if fwdErr == nil {
+				e.stats.Record(middleware.GetReqID(c), provider.Name, provider.ModelID, priority, true, http.StatusOK, "", latency)
+				tr.LogAttempt(provider.Name, priority, attempt, maxRetries+1, true, "", latency)
+				e.closeCircuitBreaker(priority, modelName, tr,
+					cfg.Global.CBThreshold, cfg.Global.CBCooldown, cfg.Global.CBSkipRequests)
+				tr.LogResult(true, provider.Name, idx)
+				tr.LogQueue(priority, "released", idx, len(group))
+				fmt.Fprint(e.logWriter, tr.Dump())
+				return true, nil
+			}
+
+			var capacityErr *localCapacityError
+			if errors.As(fwdErr, &capacityErr) {
+				lastErr = fwdErr
+				tr.LogQueue(priority, fwdErr.Error(), idx, len(group))
+				if isRequestCanceled(c, fwdErr) {
+					tr.LogCanceled(provider.Name, idx)
+					fmt.Fprint(e.logWriter, tr.Dump())
+					return true, nil
+				}
+				break // no upstream call was made; do not count a provider attempt
+			}
+			// The client left mid-stream. Not an upstream failure: no failover
+			// (nobody to write to) and no circuit-breaker penalty.
+			if errors.Is(fwdErr, errClientGoneIncomplete) || isRequestCanceled(c, fwdErr) {
+				e.stats.RecordCanceled(middleware.GetReqID(c), provider.Name, provider.ModelID, priority, "client disconnected", latency)
+				tr.LogAttemptCanceled(provider.Name, priority, attempt, maxRetries+1, latency)
+				tr.LogQueue(priority, "released (client disconnected)", idx, len(group))
+				tr.LogCanceled(provider.Name, idx)
+				fmt.Fprint(e.logWriter, tr.Dump())
+				return true, nil
+			}
+
+			statusCode, errMsg := errorDetail(fwdErr)
+			e.stats.Record(middleware.GetReqID(c), provider.Name, provider.ModelID, priority, false, statusCode, errMsg, latency)
+			tr.LogAttempt(provider.Name, priority, attempt, maxRetries+1, false, fwdErr.Error(), latency)
+			lastErr = fwdErr
+			upstreamFailed = upstreamFailed || breakerFailure(fwdErr)
+
+			if statusCode == http.StatusTooManyRequests {
+				e.markProviderCooldown(provider.Name)
+				break // respect this account's cooldown, including the last candidate
+			}
+
+			if c.Writer.Written() {
+				tr.LogQueue(priority, "released (stream written)", idx, len(group))
+				tr.LogResult(false, provider.Name, idx)
+				if breakerFailure(fwdErr) {
+					e.recordGroupFailure(modelName, priority, tr,
+						cfg.Global.CBThreshold, cfg.Global.CBCooldown, cfg.Global.CBSkipRequests, probeID)
+				}
+				fmt.Fprint(e.logWriter, tr.Dump())
+				return true, nil
+			}
+
+			if apiErr, ok := fwdErr.(*adapter.APIError); ok && !apiErr.Retryable() {
+				tr.LogSkipRetry(provider.Name, priority, apiErr.StatusCode)
+				break
+			}
+
+			if ctx.Err() != nil {
+				break
+			}
+
+			// Only wait if there is a next retry (skip after final attempt)
+			if attempt < maxRetries+1 {
+				if err := rm.Wait(ctx); err != nil {
+					break
+				}
+			}
+		}
+
+		if c.Writer.Written() {
+			return true, lastErr
+		}
+		if ctx.Err() != nil {
+			// The client is gone; another provider would have nobody to write
+			// to. Leave the final bookkeeping to the block below.
+			break
+		}
+	}
+
+	if !c.Writer.Written() {
+		// A client that disappeared while we were backing off is not a backend
+		// signal: report it without touching the breaker.
+		if ctx.Err() != nil {
+			name := ""
+			if lastProvider != nil {
+				name = lastProvider.Name
+			}
+			tr.LogQueue(priority, "released (client disconnected)", startIdx, len(group))
+			tr.LogCanceled(name, lastIdx)
+			fmt.Fprint(e.logWriter, tr.Dump())
+			return true, lastErr
+		}
+		tr.LogQueue(priority, "released (all failed)", startIdx, len(group))
+		if upstreamFailed {
+			e.recordGroupFailure(modelName, priority, tr,
+				cfg.Global.CBThreshold, cfg.Global.CBCooldown, cfg.Global.CBSkipRequests, probeID)
+		}
+	}
+	return false, lastErr
+}
+
+// A cooldown or exhausted skip budget permits one probe, never an unbounded
+// reset of the breaker. Its outcome decides when the breaker really closes.
+func (e *Engine) shouldSkipGroup(priority int, modelName string, tr *tracer.Recorder, threshold, cooldownSec, skipRequests int, _ bool, lease ...*uint64) bool {
 	e.cbMu.Lock()
 	defer e.cbMu.Unlock()
-
-	failures := e.failureCount[priority]
-
-	if failures < threshold {
+	openSince := e.circuitOpenSince[priority]
+	if openSince == nil || e.failureCount[priority] < threshold {
 		return false
 	}
-
-	openSince, exists := e.circuitOpenSince[priority]
-	if !exists || openSince == nil {
+	if e.probeInFlight[priority] {
+		tr.LogCircuitBreaker(priority, "skip", "condition=probe_in_flight")
+		return true
+	}
+	if time.Since(*openSince) >= time.Duration(cooldownSec)*time.Second || e.skipRemaining[priority] <= 0 {
+		e.nextProbeLease++
+		e.probeInFlight[priority] = true
+		e.probeLease[priority] = e.nextProbeLease
+		if len(lease) > 0 && lease[0] != nil {
+			*lease[0] = e.nextProbeLease
+		}
+		tr.LogCircuitBreaker(priority, "half-open", "condition=probe_admitted model="+modelName)
 		return false
 	}
-
-	cooldown := time.Duration(cooldownSec) * time.Second
-	elapsed := time.Since(*openSince)
-
-	if elapsed >= cooldown {
-		e.failureCount[priority] = 0
-		e.circuitOpenSince[priority] = nil
-		e.skipRemaining[priority] = skipRequests
-		tr.LogCircuitBreaker(priority, "auto-closed",
-			fmt.Sprintf("condition=cooldown_expired cooldown=%ds elapsed=%v threshold=%d failures=%d",
-				cooldownSec, elapsed.Round(time.Second), threshold, failures))
-		return false
-	}
-
-	if e.skipRemaining[priority] <= 0 {
-		e.failureCount[priority] = 0
-		e.circuitOpenSince[priority] = nil
-		e.skipRemaining[priority] = skipRequests
-		tr.LogCircuitBreaker(priority, "auto-closed",
-			fmt.Sprintf("condition=skip_requests_exhausted threshold=%d failures=%d",
-				threshold, failures))
-		return false
-	}
-
 	e.skipRemaining[priority]--
-	remaining := e.skipRemaining[priority]
-	cooldownLeft := cooldown - elapsed
-	tr.LogCircuitBreaker(priority, "skip",
-		fmt.Sprintf("condition=cooldown_pending_and_skip_remaining>0 cb_threshold=%d failures=%d cooldown_remaining=%v skip_remaining=%d",
-			threshold, failures, cooldownLeft.Round(time.Second), remaining))
+	tr.LogCircuitBreaker(priority, "skip", fmt.Sprintf("condition=cooldown_pending skip_remaining=%d", e.skipRemaining[priority]))
 	return true
 }
 
-func (e *Engine) recordGroupFailure(modelName string, priority int, tr *tracer.Recorder, threshold, cooldownSec, skipRequests int) {
+func breakerFailure(err error) bool {
+	var apiErr *adapter.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode == 408 || apiErr.StatusCode >= 500
+	}
+	var capacityErr *localCapacityError
+	return !errors.As(err, &capacityErr) && !errors.Is(err, errClientGoneIncomplete)
+}
+
+func (e *Engine) recordGroupFailure(modelName string, priority int, tr *tracer.Recorder, threshold, cooldownSec, skipRequests int, lease ...uint64) {
 	e.cbMu.Lock()
 
 	e.failureCount[priority]++
 	failures := e.failureCount[priority]
 
-	if failures >= threshold && e.circuitOpenSince[priority] == nil {
+	wasProbe := len(lease) > 0 && lease[0] != 0 && e.probeLease[priority] == lease[0] && e.probeInFlight[priority]
+	if failures >= threshold && (e.circuitOpenSince[priority] == nil || wasProbe) {
 		now := time.Now()
 		e.circuitOpenSince[priority] = &now
 		e.skipRemaining[priority] = skipRequests
@@ -500,6 +606,8 @@ func (e *Engine) closeCircuitBreaker(priority int, modelName string, tr *tracer.
 	prevFailures := e.failureCount[priority]
 
 	e.failureCount[priority] = 0
+	e.probeInFlight[priority] = false
+	e.probeLease[priority] = 0
 	e.circuitOpenSince[priority] = nil
 	e.skipRemaining[priority] = skipRequests
 
@@ -657,10 +765,24 @@ func (e *Engine) streamTransport(timeout int) *http.Transport {
 // checkRateLimit returns nil if the provider is within its rate limit,
 // or an error if rate limited. Always returns nil if rate limiting is disabled.
 func (e *Engine) checkRateLimit(providerName string) error {
+	now := time.Now()
 	e.rlMu.Lock()
-	rl, ok := e.rateLimiters[providerName]
+	until, cooling := e.coolUntil[providerName]
+	if cooling && now.Before(until) {
+		remain := until.Sub(now)
+		e.rlMu.Unlock()
+		return &adapter.APIError{
+			StatusCode: http.StatusTooManyRequests,
+			Message:    fmt.Sprintf("provider %s cooling down after upstream 429 (%v left)", providerName, remain.Round(time.Second)),
+		}
+	}
+	if cooling {
+		delete(e.coolUntil, providerName)
+	}
+	rl := e.rateLimiters[providerName]
 	e.rlMu.Unlock()
-	if !ok || rl == nil {
+
+	if rl == nil {
 		return nil
 	}
 	if !rl.Allow(providerName) {
@@ -670,6 +792,37 @@ func (e *Engine) checkRateLimit(providerName string) error {
 		}
 	}
 	return nil
+}
+
+// markProviderCooldown parks a provider for a while after it answered 429.
+// Its TPM/RPM window needs time to slide; retrying the same key only adds
+// latency and burns the retry budget that another account could use.
+func (e *Engine) markProviderCooldown(providerName string) {
+	sec := e.rateLimitCooldownSec()
+	if sec <= 0 || providerName == "" {
+		return
+	}
+	e.rlMu.Lock()
+	e.coolUntil[providerName] = time.Now().Add(time.Duration(sec) * time.Second)
+	e.rlMu.Unlock()
+}
+
+func (e *Engine) rateLimitCooldownSec() int {
+	e.reloadMu.RLock()
+	sec := e.cfg.Global.RateLimitCooldown
+	e.reloadMu.RUnlock()
+	if sec <= 0 {
+		return 30
+	}
+	return sec
+}
+
+// isRequestCanceled reports whether err is the cancellation of the downstream
+// request context (the client closed the connection), as opposed to our own
+// deadline or an upstream failure.
+func isRequestCanceled(c *gin.Context, err error) bool {
+	ctxErr := c.Request.Context().Err()
+	return ctxErr != nil && errors.Is(err, ctxErr)
 }
 
 func (e *Engine) advanceRRIndex(priority, groupLen int) int {
@@ -703,7 +856,7 @@ func (e *Engine) forwardRequest(c *gin.Context, body []byte, requestFormat strin
 
 	limiter, err := e.acquireConnSlot(requestCtx, provider)
 	if err != nil {
-		return fmt.Errorf("wait for upstream connection slot: %w", err)
+		return &localCapacityError{err: err}
 	}
 	defer e.releaseConnSlot(limiter)
 
@@ -789,7 +942,7 @@ func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat
 	}
 	limiter, err := e.acquireConnSlot(slotCtx, provider)
 	if err != nil {
-		return fmt.Errorf("wait for upstream connection slot: %w", err)
+		return &localCapacityError{err: err}
 	}
 	defer e.releaseConnSlot(limiter)
 
@@ -821,24 +974,49 @@ func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat
 	defer idleReader.Close()
 
 	gate := newSSECommitWriter(c.Writer)
+	tracker := newTerminalWriter(gate, requestFormat)
 	if requestFormat != provider.Format {
-		err = adapter.StreamConvertResponse(idleReader, gate, provider.Format, requestFormat)
+		err = adapter.StreamConvertResponse(idleReader, tracker, provider.Format, requestFormat)
 	} else {
-		_, err = io.Copy(gate, idleReader)
+		_, err = io.Copy(tracker, idleReader)
+	}
+
+	if errors.Is(err, errStreamTerminal) {
+		err = nil
+	}
+	if err == nil && !tracker.Terminated() {
+		err = tracker.Finish()
+		if errors.Is(err, errStreamTerminal) {
+			err = nil
+		}
+		if err == nil && !tracker.Terminated() {
+			// Compatibility is limited to a clean EOF after a semantic finish.
+			// Never turn a timeout, cancellation, or truncated event into success.
+			err = writeStreamTerminator(tracker, requestFormat)
+			if errors.Is(err, errStreamTerminal) {
+				err = nil
+			}
+		}
 	}
 	if err == nil && !gate.Committed() {
 		err = fmt.Errorf("upstream stream ended before the first event")
 	}
-
-	// If the stream failed mid-way (headers already written), inject an
-	// SSE error event so the client knows the stream was truncated.
-	if err != nil && c.Writer.Written() {
+	var writeErr *downstreamWriteError
+	if err != nil && (errors.As(err, &writeErr) || isRequestCanceled(c, err)) {
+		err = fmt.Errorf("%w: %v", errClientGoneIncomplete, err)
+	}
+	tr.LogStreamEnd(tracker.Answered(), tracker.Terminated(), err)
+	// An upstream failure may be reported inside an already committed stream.
+	// A disconnected downstream must not receive an additional error event.
+	if err != nil && c.Writer.Written() && !errors.Is(err, errClientGoneIncomplete) {
 		errMsg := err.Error()
 		if len(errMsg) > 500 {
 			errMsg = errMsg[:500] + "..."
 		}
 		var payload interface{}
-		if requestFormat == "anthropic" {
+		if requestFormat == "responses" {
+			payload = map[string]string{"type": "error", "code": "stream_interrupted", "message": "stream interrupted: " + errMsg}
+		} else if requestFormat == "anthropic" {
 			payload = map[string]interface{}{
 				"type": "error",
 				"error": map[string]string{
@@ -853,7 +1031,7 @@ func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat
 		}
 		payloadJSON, marshalErr := json.Marshal(payload)
 		if marshalErr == nil {
-			if requestFormat == "anthropic" {
+			if requestFormat == "anthropic" || requestFormat == "responses" {
 				fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", payloadJSON)
 			} else {
 				fmt.Fprintf(c.Writer, "data: %s\n\n", payloadJSON)
@@ -929,8 +1107,10 @@ func (w *sseCommitWriter) writeAndFlush(p []byte) error {
 	if len(p) == 0 {
 		return nil
 	}
-	if _, err := w.w.Write(p); err != nil {
+	if n, err := w.w.Write(p); err != nil {
 		return err
+	} else if n != len(p) {
+		return io.ErrShortWrite
 	}
 	if f, ok := w.w.(http.Flusher); ok {
 		f.Flush()
@@ -958,11 +1138,28 @@ func sseEventEnd(data []byte) int {
 func sseEventHasData(event []byte) bool {
 	normalized := bytes.ReplaceAll(event, []byte("\r\n"), []byte("\n"))
 	for _, line := range bytes.Split(normalized, []byte("\n")) {
+		line = bytes.TrimPrefix(line, []byte("\xef\xbb\xbf"))
 		if bytes.Equal(line, []byte("data")) || bytes.HasPrefix(line, []byte("data:")) {
 			return true
 		}
 	}
 	return false
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Stream completion tracking
+// ─────────────────────────────────────────────────────────────
+
+// idleTimeoutError marks reads that stopped because the upstream went silent.
+// It is a distinct type so the router can tell "upstream stalled" apart from
+// "client finished" and "we hit the overall stream cap".
+type idleTimeoutError struct{ timeout time.Duration }
+
+func (e *idleTimeoutError) Error() string { return fmt.Sprintf("idle timeout after %v", e.timeout) }
+
+func isIdleTimeoutErr(err error) bool {
+	var target *idleTimeoutError
+	return errors.As(err, &target)
 }
 
 type idleTimeoutReader struct {
@@ -1017,7 +1214,7 @@ func (r *idleTimeoutReader) Read(p []byte) (int, error) {
 		copy(p, buf[:result.n])
 		return result.n, result.err
 	case <-r.timer.C:
-		return 0, fmt.Errorf("idle timeout after %v", r.timeout)
+		return 0, &idleTimeoutError{timeout: r.timeout}
 	case <-r.done:
 		return 0, io.ErrClosedPipe
 	}
@@ -1570,6 +1767,8 @@ func (e *Engine) saveCBState() {
 	if e.configPath == "" {
 		return
 	}
+	e.fileMu.Lock()
+	defer e.fileMu.Unlock()
 	e.cbMu.Lock()
 	state := e.captureCBState()
 	e.cbMu.Unlock()
@@ -1580,8 +1779,6 @@ func (e *Engine) saveCBState() {
 	if err != nil {
 		return
 	}
-	e.fileMu.Lock()
-	defer e.fileMu.Unlock()
 	path := e.cbStatePath()
 	tmpPath := path + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0644); err != nil {

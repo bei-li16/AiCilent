@@ -12,9 +12,19 @@ func (e *APIError) Error() string {
 }
 
 func (e *APIError) Retryable() bool {
-	// All upstream 4xx and 5xx responses are retryable. The retry count and
-	// backoff schedule are controlled exclusively by the provider YAML.
-	if e.StatusCode >= 400 {
+	// Only failures that another attempt (or another provider/key) can
+	// plausibly fix are retryable:
+	//   429 rate limit — yes, a different window/key may accept the request
+	//   408/5xx       — yes, transient upstream conditions
+	// Other 4xx responses do not justify retrying the same provider/key.
+	// The router may still select another provider (for example after a
+	// credential-specific 401/403 or a model-specific 404).
+	switch {
+	case e.StatusCode == 429:
+		return true
+	case e.StatusCode == 408:
+		return true
+	case e.StatusCode >= 500:
 		return true
 	}
 	return false

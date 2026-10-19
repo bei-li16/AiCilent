@@ -111,6 +111,23 @@ func (r *Recorder) LogSkipRetry(providerName string, priority int, statusCode in
 	fmt.Fprint(r.logWriter, msg)
 }
 
+func (r *Recorder) LogAttemptCanceled(providerName string, priority, attempt, max int, latency time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	fmt.Fprintf(r.logWriter, "%s PROVIDER | [P%d][%d/%d] %s | CANCELED | %v | downstream disconnected\n",
+		r.prefix(), priority, attempt, max, providerName, latency)
+}
+
+func (r *Recorder) LogStreamEnd(answered, terminated bool, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	reason := "protocol_complete"
+	if err != nil {
+		reason = err.Error()
+	}
+	fmt.Fprintf(r.logWriter, "%s STREAM   | answered=%t terminal_written=%t | end_reason=%s\n", r.prefix(), answered, terminated, reason)
+}
+
 func (r *Recorder) LogDegradeProvider(providerName string, priority int, reason string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -162,6 +179,18 @@ func (r *Recorder) LogResult(success bool, providerName string, rrIdx int) {
 	if !success {
 		r.resultStatus = "FAIL"
 	}
+	r.resultProv = providerName
+	r.resultRR = rrIdx
+}
+
+// LogCanceled records a request that ended because the downstream client
+// disconnected. It is deliberately distinct from FAIL: no upstream failure
+// occurred, and mixing the two is what made completed requests look like a
+// broken backend.
+func (r *Recorder) LogCanceled(providerName string, rrIdx int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.resultStatus = "CANCELED"
 	r.resultProv = providerName
 	r.resultRR = rrIdx
 }

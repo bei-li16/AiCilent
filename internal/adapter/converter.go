@@ -1,7 +1,6 @@
 package adapter
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -394,20 +393,60 @@ func ConvertResponse(body []byte, fromFormat, toFormat, model string) ([]byte, e
 //  Streaming SSE conversion
 // ─────────────────────────────────────────────────────────────
 
+// errorTrackingWriter remembers the first write error so SSE converter loops
+// (whose write helpers do not check per-call errors) can stop as soon as the
+// downstream writer refuses further bytes — e.g. after the terminal tracker
+// has forwarded [DONE] and no more output should be produced.
+type errorTrackingWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (w *errorTrackingWriter) Write(p []byte) (int, error) {
+	if w.err != nil {
+		return 0, w.err
+	}
+	n, err := w.w.Write(p)
+	if err == nil && n != len(p) {
+		err = io.ErrShortWrite
+	}
+	if err != nil && w.err == nil {
+		w.err = err
+	}
+	return n, err
+}
+
+// errShortCircuitReader stops the upstream read as soon as the downstream
+// writer has failed. Without it a converter loop would call Scanner.Scan()
+// again and block on the network even though no further output can be written.
+type errShortCircuitReader struct {
+	r   io.Reader
+	err *error
+}
+
+func (r *errShortCircuitReader) Read(p []byte) (int, error) {
+	if r.err != nil && *r.err != nil {
+		return 0, io.EOF
+	}
+	return r.r.Read(p)
+}
+
 func StreamConvertResponse(src io.Reader, dst io.Writer, fromFormat, toFormat string) error {
 	if fromFormat == toFormat {
 		_, err := io.Copy(dst, src)
 		return err
 	}
+	ew := &errorTrackingWriter{w: dst}
+	sr := &errShortCircuitReader{r: src, err: &ew.err}
 	if fromFormat == "openai" && toFormat == "responses" {
-		return convertOpenAISSEToResponses(src, dst)
+		return convertOpenAISSEToResponses(sr, ew)
 	}
 
 	if fromFormat == "anthropic" && toFormat == "openai" {
-		return convertAnthropicSSEToOpenAI(src, dst)
+		return convertAnthropicSSEToOpenAI(sr, ew)
 	}
 	if fromFormat == "openai" && toFormat == "anthropic" {
-		return convertOpenAISSETOAnthropic(src, dst)
+		return convertOpenAISSETOAnthropic(sr, ew)
 	}
 
 	return fmt.Errorf("unsupported stream conversion: %s -> %s", fromFormat, toFormat)
@@ -423,8 +462,9 @@ type blockTracker struct {
 }
 
 func convertAnthropicSSEToOpenAI(src io.Reader, dst io.Writer) error {
-	scanner := bufio.NewScanner(src)
-	scanner.Buffer(make([]byte, 0, 4096), 1048576)
+	scanner := newEventScanner(src, "anthropic")
+
+	ew, _ := dst.(*errorTrackingWriter)
 
 	var currentEvent string
 	// Track content blocks by index
@@ -433,12 +473,11 @@ func convertAnthropicSSEToOpenAI(src io.Reader, dst io.Writer) error {
 	nextToolIdx := 0
 
 	for scanner.Scan() {
-		line := scanner.Text()
-
-		if strings.HasPrefix(line, "event: ") {
-			currentEvent = strings.TrimPrefix(line, "event: ")
-			continue
+		if ew != nil && ew.err != nil {
+			return ew.err
 		}
+		line := scanner.Text()
+		currentEvent = scanner.event.Type
 
 		if !strings.HasPrefix(line, "data: ") {
 			continue
@@ -636,6 +675,15 @@ func convertAnthropicSSEToOpenAI(src io.Reader, dst io.Writer) error {
 			writeSSEDone(dst)
 		}
 	}
+	if ew != nil && ew.err != nil {
+		return ew.err
+	}
+	if scanner.Err() == nil && !scanner.state.Terminated {
+		writeSSEDone(dst)
+	}
+	if ew != nil && ew.err != nil {
+		return ew.err
+	}
 	return scanner.Err()
 }
 
@@ -644,8 +692,9 @@ func convertAnthropicSSEToOpenAI(src io.Reader, dst io.Writer) error {
 // ─────────────────────────────────────────────────────────────
 
 func convertOpenAISSETOAnthropic(src io.Reader, dst io.Writer) error {
-	scanner := bufio.NewScanner(src)
-	scanner.Buffer(make([]byte, 0, 4096), 1048576)
+	scanner := newEventScanner(src, "openai")
+
+	ew, _ := dst.(*errorTrackingWriter)
 
 	var roleWritten bool
 	var contentBlockStarted bool
@@ -654,6 +703,9 @@ func convertOpenAISSETOAnthropic(src io.Reader, dst io.Writer) error {
 	msgCounter := 0
 
 	for scanner.Scan() {
+		if ew != nil && ew.err != nil {
+			return ew.err
+		}
 		line := scanner.Text()
 
 		if !strings.HasPrefix(line, "data: ") {
@@ -826,6 +878,15 @@ func convertOpenAISSETOAnthropic(src io.Reader, dst io.Writer) error {
 			})
 		}
 	}
+	if ew != nil && ew.err != nil {
+		return ew.err
+	}
+	if scanner.Err() == nil && !scanner.state.Terminated {
+		writeAnthropicEvent(dst, "message_stop", map[string]string{"type": "message_stop"})
+	}
+	if ew != nil && ew.err != nil {
+		return ew.err
+	}
 	return scanner.Err()
 }
 
@@ -844,20 +905,27 @@ type toolCallAcc struct {
 //  SSE write helpers
 // ─────────────────────────────────────────────────────────────
 
-// writeSSEData writes a "data:" SSE line. Write errors are intentionally
-// ignored — client disconnects are detected via streamCtx cancellation
-// in the idleTimeoutReader, which stops the upstream read loop.
-func writeSSEData(w io.Writer, data interface{}) {
-	b, _ := json.Marshal(data)
-	fmt.Fprintf(w, "data: %s\n\n", string(b))
+// writeSSEData emits a complete SSE event. The conversion writer also retains
+// the first write error, so the loop stops before another upstream read.
+func writeSSEData(w io.Writer, data interface{}) error {
+	b, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(w, "data: %s\n\n", b)
+	return err
 }
 
-func writeSSEDone(w io.Writer) {
-	fmt.Fprintf(w, "data: [DONE]\n\n")
+func writeSSEDone(w io.Writer) error {
+	_, err := fmt.Fprintf(w, "data: [DONE]\n\n")
+	return err
 }
 
-func writeAnthropicEvent(w io.Writer, event string, data interface{}) {
-	b, _ := json.Marshal(data)
-	fmt.Fprintf(w, "event: %s\n", event)
-	fmt.Fprintf(w, "data: %s\n\n", string(b))
+func writeAnthropicEvent(w io.Writer, event string, data interface{}) error {
+	b, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
+	return err
 }

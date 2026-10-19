@@ -11,21 +11,26 @@ import (
 	"time"
 )
 
+// StatusClientAbort is the historical log/UI code. Cancellation recording uses
+// RecordCanceled so a real upstream HTTP 499 cannot be confused with it.
+const StatusClientAbort = 499
+
 type ProviderStats struct {
-	Name            string  `json:"name"`
-	ModelID         string  `json:"model_id"`
-	Priority        int     `json:"priority"`
-	Total           int64   `json:"total"`
-	Success         int64   `json:"success"`
-	Fail            int64   `json:"fail"`
-	Rate            float64 `json:"rate"`
-	ConsecutiveFail int64   `json:"consecutive_fail"` // 当前连续失败数，成功后归零
-	LastErrType     string  `json:"last_err_type"`    // 最近错误类型，如 tpm_limit/rpm_exhausted/not_found/upstream_error
-	LastErr         string  `json:"last_err"`         // 最近错误简述（截断）
-	LatencySumMs    float64 `json:"-"`                // 累计延迟(ms)，用于算平均
-	LatencyCount    int64   `json:"latency_count"`
-	LatencyAvgMs    float64 `json:"latency_avg_ms"` // 平均延迟(ms)
-	LastLatencyMs   float64 `json:"last_latency_ms"`
+	Name            string    `json:"name"`
+	ModelID         string    `json:"model_id"`
+	Priority        int       `json:"priority"`
+	Total           int64     `json:"total"`
+	Success         int64     `json:"success"`
+	Fail            int64     `json:"fail"`
+	ClientAbort     int64     `json:"client_abort"`     // 下游客户端中途断开次数；不算 provider 失败
+	Rate            float64   `json:"rate"`             // 成功率 = Success / (Total - ClientAbort)
+	ConsecutiveFail int64     `json:"consecutive_fail"` // 当前连续失败数，成功后归零
+	LastErrType     string    `json:"last_err_type"`    // 最近错误类型，如 tpm_limit/rpm_exhausted/not_found/upstream_error
+	LastErr         string    `json:"last_err"`         // 最近错误简述（截断）
+	LatencySumMs    float64   `json:"-"`                // 累计延迟(ms)，用于算平均
+	LatencyCount    int64     `json:"latency_count"`
+	LatencyAvgMs    float64   `json:"latency_avg_ms"` // 平均延迟(ms)
+	LastLatencyMs   float64   `json:"last_latency_ms"`
 	LastActivity    time.Time `json:"last_activity"` // 最近一次尝试时间，用于面板内排序
 }
 
@@ -106,6 +111,7 @@ type Snapshot struct {
 	TotalClientReq int64           `json:"total_client_req"` // 客户端请求数
 	TotalSuccess   int64           `json:"total_success"`
 	TotalFail      int64           `json:"total_fail"`
+	TotalCanceled  int64           `json:"total_canceled"`
 	TotalRate      float64         `json:"total_rate"`
 	Running        bool            `json:"running"`
 	StartTime      time.Time       `json:"start_time"`
@@ -122,6 +128,7 @@ type AttemptStats struct {
 	ModelID    string    `json:"model_id"`
 	Priority   int       `json:"priority"`
 	Success    bool      `json:"success"`
+	Outcome    string    `json:"outcome"`
 	StatusCode int       `json:"status_code"`
 	LatencyMs  float64   `json:"latency_ms"`
 	Timestamp  time.Time `json:"timestamp"`
@@ -130,16 +137,17 @@ type AttemptStats struct {
 const recentAttemptsCap = 200
 
 type Collector struct {
-	mu           sync.Mutex
-	providers    map[string]*ProviderStats
-	totalReq     atomic.Int64 // 上游尝试次数
-	totalClient  atomic.Int64 // 客户端请求数
-	totalSuccess atomic.Int64
-	totalFail    atomic.Int64
-	startTime    time.Time
-	running      atomic.Bool
-	statsPath    string
-	fileMu       sync.Mutex
+	mu            sync.Mutex
+	providers     map[string]*ProviderStats
+	totalReq      atomic.Int64 // 上游尝试次数
+	totalClient   atomic.Int64 // 客户端请求数
+	totalSuccess  atomic.Int64
+	totalFail     atomic.Int64
+	totalCanceled atomic.Int64
+	startTime     time.Time
+	running       atomic.Bool
+	statsPath     string
+	fileMu        sync.Mutex
 	// Hit-rate rolling windows (last hitWindowSize outcomes) + time series of
 	// rolling success rates. priority 0 = overall.
 	overallWin     rollingHit
@@ -194,7 +202,17 @@ func ClassifyError(statusCode int, msg string) string {
 // statusCode is the upstream HTTP status (0 for network errors); errMsg is the
 // raw error message (used to classify the failure type); latency is the attempt duration.
 func (c *Collector) Record(requestID, name, modelID string, priority int, success bool, statusCode int, errMsg string, latency time.Duration) {
+	c.record(requestID, name, modelID, priority, success, statusCode, errMsg, latency, false)
+}
+
+// RecordCanceled is explicit: an actual upstream HTTP 499 remains a failure.
+func (c *Collector) RecordCanceled(requestID, name, modelID string, priority int, errMsg string, latency time.Duration) {
+	c.record(requestID, name, modelID, priority, false, 0, errMsg, latency, true)
+}
+
+func (c *Collector) record(requestID, name, modelID string, priority int, success bool, statusCode int, errMsg string, latency time.Duration, canceled bool) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	ps, ok := c.providers[name]
 	if !ok {
 		ps = &ProviderStats{Name: name, ModelID: modelID, Priority: priority}
@@ -214,6 +232,17 @@ func (c *Collector) Record(requestID, name, modelID string, priority int, succes
 		ps.ConsecutiveFail = 0
 		ps.LastErrType = ""
 		ps.LastErr = ""
+	} else if canceled {
+		// The downstream client walked away. Not the provider's fault:
+		// excluded from the fail counter, the consecutive-fail streak, and
+		// every success-rate denominator.
+		ps.ClientAbort++
+		ps.LastErrType = "client_abort"
+		// Truncate to keep the stored message short.
+		if len(errMsg) > 120 {
+			errMsg = errMsg[:120] + "..."
+		}
+		ps.LastErr = errMsg
 	} else {
 		ps.Fail++
 		ps.ConsecutiveFail++
@@ -225,41 +254,53 @@ func (c *Collector) Record(requestID, name, modelID string, priority int, succes
 		ps.LastErr = errMsg
 	}
 	if ps.Total > 0 {
-		ps.Rate = float64(ps.Success) / float64(ps.Total) * 100
+		if denom := ps.Total - ps.ClientAbort; denom > 0 {
+			ps.Rate = float64(ps.Success) / float64(denom) * 100
+		}
+	}
+	outcome := "failed"
+	if success {
+		outcome = "success"
+	}
+	recordedStatus := statusCode
+	if canceled {
+		outcome, recordedStatus = "canceled", 0
 	}
 	c.recentAttempts = append(c.recentAttempts, AttemptStats{
 		RequestID: requestID, Provider: name, ModelID: modelID, Priority: priority,
-		Success: success, StatusCode: statusCode, LatencyMs: latMs, Timestamp: time.Now(),
+		Success: success, Outcome: outcome, StatusCode: recordedStatus, LatencyMs: latMs, Timestamp: time.Now(),
 	})
 	if len(c.recentAttempts) > recentAttemptsCap {
 		copy(c.recentAttempts, c.recentAttempts[len(c.recentAttempts)-recentAttemptsCap:])
 		c.recentAttempts = c.recentAttempts[:recentAttemptsCap]
 	}
-	c.mu.Unlock()
-
 	c.totalReq.Add(1)
-	if success {
-		c.totalSuccess.Add(1)
+	// All attempts are counted; cancellations are excluded only from failures
+	// and health-rate windows, consistently with the per-provider counters.
+	if canceled {
+		c.totalCanceled.Add(1)
 	} else {
-		c.totalFail.Add(1)
-	}
+		if success {
+			c.totalSuccess.Add(1)
+		} else {
+			c.totalFail.Add(1)
+		}
 
-	// Update hit-rate rolling windows + series (re-lock for the map/slice work).
-	c.mu.Lock()
-	c.overallWin.push(success)
-	c.overallSeries = pushSeries(c.overallSeries, c.overallWin.rate())
-	pw, ok := c.prioWin[priority]
-	if !ok {
-		pw = &rollingHit{}
-		c.prioWin[priority] = pw
+		// Update health-rate windows under the same lock as counters.
+		c.overallWin.push(success)
+		c.overallSeries = pushSeries(c.overallSeries, c.overallWin.rate())
+		pw, ok := c.prioWin[priority]
+		if !ok {
+			pw = &rollingHit{}
+			c.prioWin[priority] = pw
+		}
+		pw.push(success)
+		c.prioSeries[priority] = pushSeries(c.prioSeries[priority], pw.rate())
+		// Latency curve: only successful attempts ("hit") record their duration.
+		if success {
+			c.latencySeries = pushSeries(c.latencySeries, latency.Seconds())
+		}
 	}
-	pw.push(success)
-	c.prioSeries[priority] = pushSeries(c.prioSeries[priority], pw.rate())
-	// Latency curve: only successful attempts ("hit") record their duration.
-	if success {
-		c.latencySeries = pushSeries(c.latencySeries, latency.Seconds())
-	}
-	c.mu.Unlock()
 }
 
 // RecordClientRequest increments the client-side request counter once per
@@ -293,15 +334,15 @@ func (c *Collector) Snapshot() Snapshot {
 	}
 	latencyCurve := copySeries(c.latencySeries)
 	recentAttempts := append([]AttemptStats(nil), c.recentAttempts...)
-	c.mu.Unlock()
-
 	totalReq := c.totalReq.Load()
 	totalClient := c.totalClient.Load()
 	totalSuccess := c.totalSuccess.Load()
 	totalFail := c.totalFail.Load()
+	totalCanceled := c.totalCanceled.Load()
+	c.mu.Unlock()
 	totalRate := 0.0
-	if totalReq > 0 {
-		totalRate = float64(totalSuccess) / float64(totalReq) * 100
+	if eligible := totalSuccess + totalFail; eligible > 0 {
+		totalRate = float64(totalSuccess) / float64(eligible) * 100
 	}
 	running := c.running.Load()
 	uptime := time.Since(c.startTime).Round(time.Second).String()
@@ -312,6 +353,7 @@ func (c *Collector) Snapshot() Snapshot {
 		TotalClientReq: totalClient,
 		TotalSuccess:   totalSuccess,
 		TotalFail:      totalFail,
+		TotalCanceled:  totalCanceled,
 		TotalRate:      totalRate,
 		Running:        running,
 		StartTime:      c.startTime,
@@ -345,6 +387,7 @@ func (c *Collector) Reset() {
 		ps.Total = 0
 		ps.Success = 0
 		ps.Fail = 0
+		ps.ClientAbort = 0
 		ps.Rate = 0
 		ps.ConsecutiveFail = 0
 		ps.LastErrType = ""
@@ -361,12 +404,12 @@ func (c *Collector) Reset() {
 	c.prioSeries = make(map[int][]float64)
 	c.latencySeries = nil
 	c.recentAttempts = nil
-	c.mu.Unlock()
-
 	c.totalReq.Store(0)
 	c.totalClient.Store(0)
 	c.totalSuccess.Store(0)
 	c.totalFail.Store(0)
+	c.totalCanceled.Store(0)
+	c.mu.Unlock()
 
 	c.Save()
 }
@@ -386,29 +429,34 @@ type persistedProvider struct {
 	Total        int64   `json:"total"`
 	Success      int64   `json:"success"`
 	Fail         int64   `json:"fail"`
+	ClientAbort  int64   `json:"client_abort"`
 	LatencySumMs float64 `json:"latency_sum_ms"`
 	LatencyCount int64   `json:"latency_count"`
 }
 
 type persistedState struct {
-	Providers    []persistedProvider `json:"providers"`
-	TotalReq     int64               `json:"total_req"`
-	TotalClient  int64               `json:"total_client_req"`
-	TotalSuccess int64               `json:"total_success"`
-	TotalFail    int64               `json:"total_fail"`
+	Providers     []persistedProvider `json:"providers"`
+	TotalReq      int64               `json:"total_req"`
+	TotalClient   int64               `json:"total_client_req"`
+	TotalSuccess  int64               `json:"total_success"`
+	TotalFail     int64               `json:"total_fail"`
+	TotalCanceled int64               `json:"total_canceled"`
 }
 
 func (c *Collector) Save() {
 	if c.statsPath == "" {
 		return
 	}
+	c.fileMu.Lock()
+	defer c.fileMu.Unlock()
 	c.mu.Lock()
 	state := persistedState{
-		TotalReq:     c.totalReq.Load(),
-		TotalClient:  c.totalClient.Load(),
-		TotalSuccess: c.totalSuccess.Load(),
-		TotalFail:    c.totalFail.Load(),
-		Providers:    make([]persistedProvider, 0, len(c.providers)),
+		TotalReq:      c.totalReq.Load(),
+		TotalClient:   c.totalClient.Load(),
+		TotalSuccess:  c.totalSuccess.Load(),
+		TotalFail:     c.totalFail.Load(),
+		TotalCanceled: c.totalCanceled.Load(),
+		Providers:     make([]persistedProvider, 0, len(c.providers)),
 	}
 	for _, ps := range c.providers {
 		state.Providers = append(state.Providers, persistedProvider{
@@ -418,6 +466,7 @@ func (c *Collector) Save() {
 			Total:        ps.Total,
 			Success:      ps.Success,
 			Fail:         ps.Fail,
+			ClientAbort:  ps.ClientAbort,
 			LatencySumMs: ps.LatencySumMs,
 			LatencyCount: ps.LatencyCount,
 		})
@@ -428,8 +477,6 @@ func (c *Collector) Save() {
 	if err != nil {
 		return
 	}
-	c.fileMu.Lock()
-	defer c.fileMu.Unlock()
 	tmpPath := c.statsPath + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
 		return
@@ -450,7 +497,9 @@ func (c *Collector) load() {
 		return
 	}
 	c.mu.Lock()
+	var canceled int64
 	for _, p := range state.Providers {
+		canceled += p.ClientAbort
 		ps := &ProviderStats{
 			Name:         p.Name,
 			ModelID:      p.ModelID,
@@ -458,11 +507,12 @@ func (c *Collector) load() {
 			Total:        p.Total,
 			Success:      p.Success,
 			Fail:         p.Fail,
+			ClientAbort:  p.ClientAbort,
 			LatencySumMs: p.LatencySumMs,
 			LatencyCount: p.LatencyCount,
 		}
-		if ps.Total > 0 {
-			ps.Rate = float64(ps.Success) / float64(ps.Total) * 100
+		if denom := ps.Total - ps.ClientAbort; denom > 0 {
+			ps.Rate = float64(ps.Success) / float64(denom) * 100
 		}
 		if ps.LatencyCount > 0 {
 			ps.LatencyAvgMs = ps.LatencySumMs / float64(ps.LatencyCount)
@@ -470,6 +520,14 @@ func (c *Collector) load() {
 		c.providers[p.Name] = ps
 	}
 	c.mu.Unlock()
+	// Older drafts excluded cancellations from the global attempt count.
+	if state.TotalCanceled < canceled {
+		state.TotalCanceled = canceled
+	}
+	if eligible := state.TotalSuccess + state.TotalFail + state.TotalCanceled; state.TotalReq < eligible {
+		state.TotalReq = eligible
+	}
+	c.totalCanceled.Store(state.TotalCanceled)
 	c.totalReq.Store(state.TotalReq)
 	c.totalClient.Store(state.TotalClient)
 	c.totalSuccess.Store(state.TotalSuccess)

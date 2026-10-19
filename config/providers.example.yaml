@@ -9,6 +9,7 @@ global:
   cb_skip_requests: 1            # 熔断恢复后跳过的请求数，用于探测后端是否恢复
   control_allow_remote: false    # 控制台启停开关(/api/control)是否允许远程访问，默认仅 loopback(127.0.0.1/::1)可调用；true 才允许远程管理（不支持热重载）
   max_stream_minutes: 3          # 流式传输总时长上限（分钟），超过则中断流并注入错误事件。0 或留空则默认 3 分钟
+  rate_limit_cooldown: 30        # 上游返回 429 后该 provider 的冷却秒数：冷却期内直接换号，不再用同一被限流账号重试。0 或留空则默认 30 秒
 
 model_routes:                    # 模型路由别名映射，将别名映射到实际 provider
   - alias: gpt-4o                # 对外暴露的模型别名

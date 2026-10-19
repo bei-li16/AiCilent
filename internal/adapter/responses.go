@@ -1,7 +1,6 @@
 package adapter
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -367,6 +366,7 @@ func responsesUsage(rawUsage interface{}) map[string]interface{} {
 }
 
 type responsesStreamState struct {
+	finishReason    string
 	responseID      string
 	model           string
 	createdAt       int64
@@ -391,9 +391,12 @@ type responsesStreamFunction struct {
 
 func convertOpenAISSEToResponses(src io.Reader, dst io.Writer) error {
 	state := &responsesStreamState{functionCalls: make(map[int]*responsesStreamFunction)}
-	scanner := bufio.NewScanner(src)
-	scanner.Buffer(make([]byte, 0, 4096), 1048576)
+	scanner := newEventScanner(src, "openai")
+	ew, _ := dst.(*errorTrackingWriter)
 	for scanner.Scan() {
+		if ew != nil && ew.err != nil {
+			return ew.err
+		}
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
 			continue
@@ -409,11 +412,17 @@ func convertOpenAISSEToResponses(src io.Reader, dst io.Writer) error {
 		}
 		state.consumeChunk(chunk, dst)
 	}
+	if ew != nil && ew.err != nil {
+		return ew.err
+	}
 	if err := scanner.Err(); err != nil {
 		return err
 	}
 	if state.responseID != "" {
 		state.finish(dst)
+	}
+	if ew != nil && ew.err != nil {
+		return ew.err
 	}
 	return nil
 }
@@ -468,6 +477,7 @@ func (s *responsesStreamState) consumeChunk(chunk map[string]interface{}, dst io
 		}
 	}
 	if finish, _ := choice["finish_reason"].(string); finish != "" {
+		s.finishReason = finish
 		s.closeMessage(dst)
 		for _, function := range s.functionCalls {
 			s.closeFunction(dst, function)
@@ -554,13 +564,24 @@ func (s *responsesStreamState) finish(dst io.Writer) {
 	for _, function := range s.functionCalls {
 		s.closeFunction(dst, function)
 	}
-	response := s.baseResponse("completed")
+	status, event := "completed", "response.completed"
+	if s.finishReason == "length" || s.finishReason == "content_filter" {
+		status, event = "incomplete", "response.incomplete"
+	}
+	response := s.baseResponse(status)
+	if status == "incomplete" {
+		reason := "max_output_tokens"
+		if s.finishReason == "content_filter" {
+			reason = "content_filter"
+		}
+		response["incomplete_details"] = map[string]string{"reason": reason}
+	}
 	response["output"] = s.output
 	response["output_text"] = s.messageText.String()
 	if s.usage != nil {
 		response["usage"] = s.usage
 	}
-	s.writeEvent(dst, "response.completed", map[string]interface{}{"response": response})
+	s.writeEvent(dst, event, map[string]interface{}{"response": response})
 	s.responseID = ""
 }
 

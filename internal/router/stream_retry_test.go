@@ -55,7 +55,7 @@ func TestForwardRequestStreamCommitsFirstEvent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, "data: {\"id\":\"ok\"}\n\n")
+		_, _ = io.WriteString(w, "data: {\"id\":\"ok\"}\n\ndata: [DONE]\n\n")
 	}))
 	defer upstream.Close()
 
@@ -70,7 +70,7 @@ func TestForwardRequestStreamCommitsFirstEvent(t *testing.T) {
 	if err := e.forwardRequestStream(ctx, []byte(`{"model":"m","stream":true}`), "openai", &provider, 5, tr); err != nil {
 		t.Fatal(err)
 	}
-	if !ctx.Writer.Written() || recorder.Body.String() != "data: {\"id\":\"ok\"}\n\n" {
+	if !ctx.Writer.Written() || recorder.Body.String() != "data: {\"id\":\"ok\"}\n\ndata: [DONE]\n\n" {
 		t.Fatalf("unexpected downstream response: written=%v body=%q", ctx.Writer.Written(), recorder.Body.String())
 	}
 }
@@ -119,7 +119,7 @@ func TestForwardRequestStreamCommitsSplitEventOnlyAfterTerminator(t *testing.T) 
 		flusher.Flush()
 		close(wrotePartial)
 		<-allowTerminator
-		_, _ = io.WriteString(w, "\n\n")
+		_, _ = io.WriteString(w, "\n\ndata: [DONE]\n\n")
 		flusher.Flush()
 	}))
 	defer upstream.Close()
@@ -145,7 +145,7 @@ func TestForwardRequestStreamCommitsSplitEventOnlyAfterTerminator(t *testing.T) 
 	if err := <-errCh; err != nil {
 		t.Fatal(err)
 	}
-	if !ctx.Writer.Written() || recorder.Body.String() != "data: {\"id\":\"ok\"}\n\n" {
+	if !ctx.Writer.Written() || recorder.Body.String() != "data: {\"id\":\"ok\"}\n\ndata: [DONE]\n\n" {
 		t.Fatalf("unexpected downstream response: written=%v body=%q", ctx.Writer.Written(), recorder.Body.String())
 	}
 }
@@ -159,7 +159,7 @@ func TestHandleRequestFailsOverBeforeFirstStreamEvent(t *testing.T) {
 	defer first.Close()
 	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, "data: {\"id\":\"fallback\"}\n\n")
+		_, _ = io.WriteString(w, "data: {\"id\":\"fallback\"}\n\ndata: [DONE]\n\n")
 	}))
 	defer second.Close()
 
@@ -182,7 +182,7 @@ func TestHandleRequestFailsOverBeforeFirstStreamEvent(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", recorder.Code, recorder.Body.String())
 	}
-	if got := recorder.Body.String(); got != "data: {\"id\":\"fallback\"}\n\n" {
+	if got := recorder.Body.String(); got != "data: {\"id\":\"fallback\"}\n\ndata: [DONE]\n\n" {
 		t.Fatalf("unexpected failover body: %q", got)
 	}
 }

@@ -97,14 +97,15 @@ function renderStats(data) {
   const dClient = apply ? delta(data.total_client_req, base.total_client_req) : data.total_client_req;
   const dSuccess = apply ? delta(data.total_success, base.total_success) : data.total_success;
   const dFail = apply ? delta(data.total_fail, base.total_fail) : data.total_fail;
-  const dRate = dReq > 0 ? (dSuccess / dReq * 100) : 0;
+  const dEligible = dSuccess + dFail;
+  const dRate = dEligible > 0 ? (dSuccess / dEligible * 100) : 0;
 
   totalReqEl.textContent = dReq;
   totalClientEl.textContent = dClient;
   totalSuccessEl.textContent = dSuccess;
   totalFailEl.textContent = dFail;
-  totalRateEl.textContent = dReq > 0 ? dRate.toFixed(1) + '%' : '—';
-  totalRateEl.className = dReq > 0 ? 'card-value ' + colorClass(dRate) : 'card-value';
+  totalRateEl.textContent = dEligible > 0 ? dRate.toFixed(1) + '%' : '—';
+  totalRateEl.className = dEligible > 0 ? 'card-value ' + colorClass(dRate) : 'card-value';
 
   statusEl.textContent = data.running ? '● 运行中' : '● 已停用';
   statusEl.className = 'status ' + (data.running ? 'running' : 'stopped');
@@ -116,11 +117,14 @@ function renderStats(data) {
   data.providers.sort((a, b) =>
     a.priority - b.priority || lastAct(b) - lastAct(a) || a.name.localeCompare(b.name));
   statsBody.innerHTML = data.providers.map(p => {
-    const bp = (apply && base.providers[p.name]) || { total: 0, success: 0, fail: 0 };
+    const bp = (apply && base.providers[p.name]) || { total: 0, success: 0, fail: 0, client_abort: 0 };
     const dTotal = apply ? delta(p.total, bp.total) : p.total;
     const dSucc = apply ? delta(p.success, bp.success) : p.success;
     const dFl = apply ? delta(p.fail, bp.fail) : p.fail;
-    const rate = dTotal > 0 ? (dSucc / dTotal * 100).toFixed(1) + '%' : '—';
+    const dAbort = apply ? delta(p.client_abort || 0, bp.client_abort || 0) : (p.client_abort || 0);
+    // Client aborts are not provider failures: keep them out of the rate.
+    const dEffective = Math.max(0, dTotal - dAbort);
+    const rate = dEffective > 0 ? (dSucc / dEffective * 100).toFixed(1) + '%' : '—';
     const cf = p.consecutive_fail > 0 ? `<span class="cf-bad">${p.consecutive_fail}</span>` : '0';
     const err = p.last_err_type
       ? `<span class="err-type" title="${escapeAttr(p.last_err)}">${p.last_err_type}</span>`
@@ -132,7 +136,8 @@ function renderStats(data) {
       <td>${dTotal}</td>
       <td class="ok-num">${dSucc}</td>
       <td class="fail-num">${dFl}</td>
-      <td class="${dTotal > 0 ? colorClass(dSucc / dTotal * 100) : ''}">${rate}</td>
+      <td class="muted">${dAbort}</td>
+      <td class="${dEffective > 0 ? colorClass(dSucc / dEffective * 100) : ''}">${rate}</td>
       <td>${cf}</td>
       <td class="muted">${fmtLatency(p.latency_avg_ms)}</td>
       <td>${err}</td>
@@ -153,13 +158,16 @@ function renderRecentAttempts(attempts) {
   const recent = attempts.filter(a => !statsBaselineAt || !a.timestamp || Date.parse(a.timestamp) >= statsBaselineAt).slice(-RECENT_ATTEMPT_LIMIT).reverse();
   traceBody.innerHTML = recent.map(a => {
     const ok = a.success;
+    const aborted = a.outcome ? a.outcome === 'canceled' : a.status_code === 499;
+    const outcome = ok ? '成功' : (aborted ? '取消' : '失败');
+    const outcomeClass = ok ? 'ok-num' : (aborted ? 'muted' : 'fail-num');
     const timestamp = a.timestamp ? new Date(a.timestamp).toLocaleTimeString() : '—';
     return `<tr>
       <td class="trace-id" title="${escapeText(a.request_id)}">${escapeText(String(a.request_id).slice(0, 12))}</td>
       <td>${escapeText(a.provider)}</td>
       <td class="muted">${escapeText(a.model_id)}</td>
       <td>P${a.priority}</td>
-      <td class="${ok ? 'ok-num' : 'fail-num'}">${ok ? '成功' : '失败'}</td>
+      <td class="${outcomeClass}">${outcome}</td>
       <td>${a.status_code || '—'}</td>
       <td class="muted">${fmtLatency(a.latency_ms)}</td>
       <td class="muted">${escapeText(timestamp)}</td>
