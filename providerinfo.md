@@ -9,14 +9,15 @@
 |---|--------|---------|---------|--------|---------|---------|
 | 1 | `kimi-k3` | 文本+**图像** | 文本 | **1M** | 64K | Kimi旗舰思考模型，1M上下文，多模态，工具调用 |
 | 2 | `glm-5.2` | 文本 | 文本 | **1M** | **128K** | 旗舰模型，超长任务，工程级上下文，端到端开发流水线 |
-| 3 | `deepseek-v4-pro` | 文本 | 文本 | **1M** | 64K | DeepSeek V4 PRO，1M上下文，工具调用 |
-| 4 | `deepseek-v4-flash` | 文本 | 文本 | **1M** | 64K | DeepSeek高性能对话模型，1M上下文，工具调用 |
-| 5 | `deepseek-v4.1-flash` | 文本+**图像** | 文本 | **1M** | 64K | DeepSeek V4.1 Flash，多模态高性能对话模型，支持图片理解和工具调用 |
-| 6 | `deepseek-flash` | 文本+**图像** | 文本 | **1M** | 64K | DeepSeek Flash，多模态高性能对话模型，支持图片理解和工具调用 |
-| 7 | `sensenova-6.8-flash-lite` | 文本+**图像** | 文本 | 262K | 64K | 轻量多模态智能体（6.8版本） |
-| 8 | `sensenova-6.7-flash-lite` | 文本+**图像** | 文本 | 262K | 64K | 已自动重定向至 6.8-flash-lite；当前模型列表未单独返回 |
-| 9 | `sensenova-u1.5-lite` | 文本 | **图像** | 262K | 64K | 基于U1.5加速版，专用于信息图生成 |
-| 10 | `sensenova-u1-fast` | 文本 | **图像** | 262K | 64K | 基于U1加速版，专用于信息图生成 |
+| 3 | `glm-5.3` | 文本 | 文本 | **1M** | **128K** | GLM 新一代旗舰（2026-11 新增），1M上下文；思考仅 3 档（low/high/max）且无 none 无法关闭；图片输入不报错但会被静默忽略，勿传图 |
+| 4 | `deepseek-v4-pro` | 文本 | 文本 | **1M** | 64K | DeepSeek V4 PRO，1M上下文，工具调用 |
+| 5 | `deepseek-v4-flash` | 文本 | 文本 | **1M** | 64K | DeepSeek高性能对话模型，1M上下文，工具调用 |
+| 6 | `deepseek-v4.1-flash` | 文本+**图像** | 文本 | **1M** | 64K | DeepSeek V4.1 Flash，多模态高性能对话模型，支持图片理解和工具调用 |
+| 7 | `deepseek-flash` | 文本+**图像** | 文本 | **1M** | 64K | DeepSeek Flash，多模态高性能对话模型，支持图片理解和工具调用 |
+| 8 | `sensenova-6.8-flash-lite` | 文本+**图像** | 文本 | 262K | 64K | 轻量多模态智能体（6.8版本） |
+| 9 | `sensenova-6.7-flash-lite` | 文本+**图像** | 文本 | 262K | 64K | 已自动重定向至 6.8-flash-lite；当前模型列表未单独返回 |
+| 10 | `sensenova-u1.5-lite` | 文本 | **图像** | 262K | 64K | 基于U1.5加速版，专用于信息图生成 |
+| 11 | `sensenova-u1-fast` | 文本 | **图像** | 262K | 64K | 基于U1加速版，专用于信息图生成 |
 
 ---
 
@@ -30,6 +31,7 @@
 | `deepseek-flash` | `none` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` / `ultra` | 8 | ✅ |
 | `deepseek-v4.1-flash` | `none` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` / `ultra` | 8 | ✅ |
 | `glm-5.2` | `none` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` | 7 | ✅ |
+| `glm-5.3` | `low` / `high` / `max` | 3 | ❌（无 `none`） |
 | `kimi-k3` | `none` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` | 7 | ✅ |
 | `deepseek-v4-flash` | `none` / `low` / `medium` / `high` / `xhigh` | 5 | ✅ |
 | `sensenova-6.8-flash-lite` | `none` / `low` / `medium` / `high` / `xhigh` | 5 | ✅ |
@@ -43,7 +45,9 @@
 - **deepseek-v4-flash 与 deepseek-v4-pro 挡位不同**：Flash 仅 5 档（无 minimal/max/ultra），Pro 有 8 档（全量）
 - **deepseek-flash / deepseek-v4.1-flash**：与 deepseek-v4-pro 相同，均为 8 档全量
 - **glm-5.2 与 kimi-k3**：均为 7 档（无 ultra），挡位完全一致
-- 所有模型（含 `deepseek-v4-pro`）流式响应的推理字段均为 `delta.reasoning_content`（2026-09-28 经 ai-proxy 链路实测，3 次采样共 80 个 chunk，`thinking_content` 出现 0 次）；非流式同为 `reasoning_content`
+- **glm-5.3 仅 3 档（low / high / max）且无 `none`**：无法关闭思考，最低档为 `low`（2026-11-04 报错枚举实测）
+- **glm-5.3 图片输入会被静默忽略**：不报错、返回 200，但模型自述无多模态输入能力，答案基于纯文本生成——请按纯文本模型使用，勿向其发送图片（2026-11-04 实测）
+- 所有模型流式响应的推理字段均为 `delta.reasoning_content`（2026-09-28 经 ai-proxy 链路实测，3 次采样共 80 个 chunk，`thinking_content` 出现 0 次；2026-11-04 补充实测 `glm-5.3` 同为该字段）；非流式同为 `reasoning_content`
 
 ---
 
@@ -52,7 +56,7 @@
 - 所有模型定价当前均显示为 **0**（免费），支持 `tools`、`json_mode`、`reasoning`，量化精度 fp8，数据中心位于中国(CN)，业务模式为 tokenplan+metered
 - 图像生成类：`sensenova-u1-fast`、`sensenova-u1.5-lite`（仅文本输入、图像输出，使用 `/v1/images/generations` 端点）
 - 多模态(图像理解)：`kimi-k3`、`deepseek-v4.1-flash`、`deepseek-flash`、`sensenova-6.7-flash-lite`（已重定向至6.8）、`sensenova-6.8-flash-lite`
-- 推理/长上下文类：`deepseek-v4-flash`、`deepseek-v4.1-flash`、`deepseek-v4-pro`、`deepseek-flash`、`glm-5.2`、`kimi-k3`（均为 1M 上下文）
+- 推理/长上下文类：`deepseek-v4-flash`、`deepseek-v4.1-flash`、`deepseek-v4-pro`、`deepseek-flash`、`glm-5.2`、`glm-5.3`、`kimi-k3`（均为 1M 上下文）
 
 ## 变更记录
 
@@ -64,3 +68,4 @@
 - 2026-09-28：思考挡位数据更新为 API 报错枚举法实测结果，新增 `deepseek-flash`、`deepseek-v4.1-flash` 挡位信息；挡位由原来 4-6 档修正为 5-8 档（新增 `minimal`、`ultra` 等）
 - 2026-09-28：`deepseek-flash` 输入模态由"文本"更正为"文本+图像"（实测支持图片输入），补充信息同步更新
 - 2026-09-28：更正 `deepseek-v4-pro` 流式推理字段为 `delta.reasoning_content`（原记载 `delta.thinking_content` 经代理链路实测未复现）
+- 2026-11-04：新增 `glm-5.3`（1M 上下文、128K 最大输出、fp8；思考挡位实测 `low`/`high`/`max` 共 3 档、无 `none` 无法关思考；接受图片但静默忽略，按纯文本登记；流式推理字段实测为 `delta.reasoning_content`）
