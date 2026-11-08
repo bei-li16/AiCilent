@@ -106,20 +106,22 @@ func pushSeries(s []float64, v float64) []float64 {
 }
 
 type Snapshot struct {
-	Providers      []ProviderStats `json:"providers"`
-	TotalReq       int64           `json:"total_req"`        // 上游尝试次数（含重试/降级）
-	TotalClientReq int64           `json:"total_client_req"` // 客户端请求数
-	TotalSuccess   int64           `json:"total_success"`
-	TotalFail      int64           `json:"total_fail"`
-	TotalCanceled  int64           `json:"total_canceled"`
-	TotalRate      float64         `json:"total_rate"`
-	Running        bool            `json:"running"`
-	StartTime      time.Time       `json:"start_time"`
-	Uptime         string          `json:"uptime"`
-	CB             []CBState       `json:"cb"`
-	Curves         []HitRateCurve  `json:"curves"`
-	LatencyCurve   []float64       `json:"latency_curve"` // 命中成功耗时序列（秒），每个点=一次成功尝试的耗时
-	RecentAttempts []AttemptStats  `json:"recent_attempts"`
+	Providers            []ProviderStats `json:"providers"`
+	TotalReq             int64           `json:"total_req"`        // 上游尝试次数（含重试/降级）
+	TotalClientReq       int64           `json:"total_client_req"` // 客户端请求数
+	TotalSuccess         int64           `json:"total_success"`
+	TotalFail            int64           `json:"total_fail"`
+	TotalCanceled        int64           `json:"total_canceled"`
+	TotalRate            float64         `json:"total_rate"`
+	Running              bool            `json:"running"`
+	StartTime            time.Time       `json:"start_time"`
+	Uptime               string          `json:"uptime"`
+	CB                   []CBState       `json:"cb"`
+	Curves               []HitRateCurve  `json:"curves"`
+	LatencyCurve         []float64       `json:"latency_curve"`         // 命中成功耗时序列（秒），每个点=一次成功尝试的耗时
+	LatencyCurves        []HitRateCurve  `json:"latency_curves"`        // 同一成功样本口径，0=汇总，其余按优先级独立采样
+	ConfiguredPriorities []int           `json:"configured_priorities"` // 由运行中的 YAML 配置填充，历史记录不参与
+	RecentAttempts       []AttemptStats  `json:"recent_attempts"`
 }
 
 type AttemptStats struct {
@@ -155,16 +157,18 @@ type Collector struct {
 	overallSeries  []float64
 	prioSeries     map[int][]float64
 	latencySeries  []float64 // 成功命中耗时序列（秒，≤240）
+	prioLatency    map[int][]float64
 	recentAttempts []AttemptStats
 }
 
 func New(statsPath string) *Collector {
 	c := &Collector{
-		providers:  make(map[string]*ProviderStats),
-		startTime:  time.Now(),
-		statsPath:  statsPath,
-		prioWin:    make(map[int]*rollingHit),
-		prioSeries: make(map[int][]float64),
+		providers:   make(map[string]*ProviderStats),
+		startTime:   time.Now(),
+		statsPath:   statsPath,
+		prioWin:     make(map[int]*rollingHit),
+		prioSeries:  make(map[int][]float64),
+		prioLatency: make(map[int][]float64),
 	}
 	c.running.Store(true)
 	c.load()
@@ -299,6 +303,7 @@ func (c *Collector) record(requestID, name, modelID string, priority int, succes
 		// Latency curve: only successful attempts ("hit") record their duration.
 		if success {
 			c.latencySeries = pushSeries(c.latencySeries, latency.Seconds())
+			c.prioLatency[priority] = pushSeries(c.prioLatency[priority], latency.Seconds())
 		}
 	}
 }
@@ -333,6 +338,10 @@ func (c *Collector) Snapshot() Snapshot {
 		curves = append(curves, HitRateCurve{Priority: p, Points: copySeries(c.prioSeries[p])})
 	}
 	latencyCurve := copySeries(c.latencySeries)
+	latencyCurves := []HitRateCurve{{Priority: 0, Points: copySeries(c.latencySeries)}}
+	for _, p := range prios {
+		latencyCurves = append(latencyCurves, HitRateCurve{Priority: p, Points: copySeries(c.prioLatency[p])})
+	}
 	recentAttempts := append([]AttemptStats(nil), c.recentAttempts...)
 	totalReq := c.totalReq.Load()
 	totalClient := c.totalClient.Load()
@@ -360,6 +369,7 @@ func (c *Collector) Snapshot() Snapshot {
 		Uptime:         uptime,
 		Curves:         curves,
 		LatencyCurve:   latencyCurve,
+		LatencyCurves:  latencyCurves,
 		RecentAttempts: recentAttempts,
 	}
 }
@@ -403,6 +413,7 @@ func (c *Collector) Reset() {
 	c.overallSeries = nil
 	c.prioSeries = make(map[int][]float64)
 	c.latencySeries = nil
+	c.prioLatency = make(map[int][]float64)
 	c.recentAttempts = nil
 	c.totalReq.Store(0)
 	c.totalClient.Store(0)
@@ -423,15 +434,20 @@ func (c *Collector) IsRunning() bool {
 // ─────────────────────────────────────────────────────────────
 
 type persistedProvider struct {
-	Name         string  `json:"name"`
-	ModelID      string  `json:"model_id"`
-	Priority     int     `json:"priority"`
-	Total        int64   `json:"total"`
-	Success      int64   `json:"success"`
-	Fail         int64   `json:"fail"`
-	ClientAbort  int64   `json:"client_abort"`
-	LatencySumMs float64 `json:"latency_sum_ms"`
-	LatencyCount int64   `json:"latency_count"`
+	Name            string    `json:"name"`
+	ModelID         string    `json:"model_id"`
+	Priority        int       `json:"priority"`
+	Total           int64     `json:"total"`
+	Success         int64     `json:"success"`
+	Fail            int64     `json:"fail"`
+	ClientAbort     int64     `json:"client_abort"`
+	LatencySumMs    float64   `json:"latency_sum_ms"`
+	LatencyCount    int64     `json:"latency_count"`
+	ConsecutiveFail int64     `json:"consecutive_fail"`
+	LastErrType     string    `json:"last_err_type"`
+	LastErr         string    `json:"last_err"`
+	LastLatencyMs   float64   `json:"last_latency_ms"`
+	LastActivity    time.Time `json:"last_activity"`
 }
 
 type persistedState struct {
@@ -460,15 +476,20 @@ func (c *Collector) Save() {
 	}
 	for _, ps := range c.providers {
 		state.Providers = append(state.Providers, persistedProvider{
-			Name:         ps.Name,
-			ModelID:      ps.ModelID,
-			Priority:     ps.Priority,
-			Total:        ps.Total,
-			Success:      ps.Success,
-			Fail:         ps.Fail,
-			ClientAbort:  ps.ClientAbort,
-			LatencySumMs: ps.LatencySumMs,
-			LatencyCount: ps.LatencyCount,
+			Name:            ps.Name,
+			ModelID:         ps.ModelID,
+			Priority:        ps.Priority,
+			Total:           ps.Total,
+			Success:         ps.Success,
+			Fail:            ps.Fail,
+			ClientAbort:     ps.ClientAbort,
+			LatencySumMs:    ps.LatencySumMs,
+			LatencyCount:    ps.LatencyCount,
+			ConsecutiveFail: ps.ConsecutiveFail,
+			LastErrType:     ps.LastErrType,
+			LastErr:         ps.LastErr,
+			LastLatencyMs:   ps.LastLatencyMs,
+			LastActivity:    ps.LastActivity,
 		})
 	}
 	c.mu.Unlock()
@@ -501,15 +522,20 @@ func (c *Collector) load() {
 	for _, p := range state.Providers {
 		canceled += p.ClientAbort
 		ps := &ProviderStats{
-			Name:         p.Name,
-			ModelID:      p.ModelID,
-			Priority:     p.Priority,
-			Total:        p.Total,
-			Success:      p.Success,
-			Fail:         p.Fail,
-			ClientAbort:  p.ClientAbort,
-			LatencySumMs: p.LatencySumMs,
-			LatencyCount: p.LatencyCount,
+			Name:            p.Name,
+			ModelID:         p.ModelID,
+			Priority:        p.Priority,
+			Total:           p.Total,
+			Success:         p.Success,
+			Fail:            p.Fail,
+			ClientAbort:     p.ClientAbort,
+			LatencySumMs:    p.LatencySumMs,
+			LatencyCount:    p.LatencyCount,
+			ConsecutiveFail: p.ConsecutiveFail,
+			LastErrType:     p.LastErrType,
+			LastErr:         p.LastErr,
+			LastLatencyMs:   p.LastLatencyMs,
+			LastActivity:    p.LastActivity,
 		}
 		if denom := ps.Total - ps.ClientAbort; denom > 0 {
 			ps.Rate = float64(ps.Success) / float64(denom) * 100

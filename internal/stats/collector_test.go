@@ -21,6 +21,30 @@ func TestSnapshotIncludesRecentAttemptsByRequestID(t *testing.T) {
 	}
 }
 
+func TestFailureStreakSurvivesReloadAndSuccessClearsIt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stats.json")
+	c := New(path)
+	c.Record("r1", "p", "m", 1, false, 429, "rate limit", time.Millisecond)
+	c.Record("r2", "p", "m", 1, false, 503, "unavailable", time.Millisecond)
+	c.RecordCanceled("r3", "p", "m", 1, "client left", time.Millisecond)
+	c.Save()
+	c = New(path)
+	p := c.Snapshot().Providers[0]
+	if p.ConsecutiveFail != 2 || p.LastActivity.IsZero() || p.LastErrType != "client_abort" || p.LastErr != "client left" {
+		t.Fatalf("reload lost recent state: %+v", p)
+	}
+	c.Record("r4", "p", "m", 1, true, 200, "", time.Millisecond)
+	c.Save()
+	c = New(path)
+	p = c.Snapshot().Providers[0]
+	if p.ConsecutiveFail != 0 || p.LastErrType != "" || p.LastErr != "" || p.LastActivity.IsZero() {
+		t.Fatalf("success did not reset persisted streak: %+v", p)
+	}
+	if p.Total != 4 || p.Success != 1 || p.Fail != 2 || p.ClientAbort != 1 {
+		t.Fatalf("persisting metadata changed counters: %+v", p)
+	}
+}
+
 func TestCanceledPersistenceResetAndOutcome(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "stats.json")
 	c := New(path)
@@ -134,5 +158,31 @@ func TestClientAbortExcludedFromRatesAndFailures(t *testing.T) {
 	}
 	if got := ClassifyError(StatusClientAbort, ""); got != "http_499" {
 		t.Fatalf("ClassifyError(499) = %q, want http_499", got)
+	}
+}
+
+func TestLatencyCurvesSeparatePrioritiesAndExcludeFailedOrCanceled(t *testing.T) {
+	c := New("")
+	c.Record("a", "p1", "m", 1, true, 200, "", 2*time.Second)
+	c.Record("b", "p2", "m", 2, false, 429, "rate limit", time.Second)
+	c.RecordCanceled("c", "p1", "m", 1, "canceled", time.Second)
+	c.Record("d", "p2", "m", 2, true, 200, "", 4*time.Second)
+	curves := c.Snapshot().LatencyCurves
+	if len(curves) != 3 || len(curves[0].Points) != 2 || curves[1].Priority != 1 || len(curves[1].Points) != 1 || curves[1].Points[0] != 2 || curves[2].Points[0] != 4 {
+		t.Fatalf("incorrect successful-latency series: %+v", curves)
+	}
+	curves[1].Points[0] = 999
+	if c.Snapshot().LatencyCurves[1].Points[0] != 2 {
+		t.Fatal("snapshot shares mutable storage")
+	}
+	for i := 0; i < 250; i++ {
+		c.Record("bounded", "p1", "m", 1, true, 200, "", time.Second)
+	}
+	if len(c.Snapshot().LatencyCurves[1].Points) != 240 {
+		t.Fatal("per-priority latency curve must be bounded")
+	}
+	c.Reset()
+	if curves := c.Snapshot().LatencyCurves; len(curves) != 1 || len(curves[0].Points) != 0 {
+		t.Fatalf("latency curves survived reset: %+v", curves)
 	}
 }

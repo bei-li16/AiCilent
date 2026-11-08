@@ -1714,24 +1714,20 @@ func errorDetail(err error) (int, string) {
 func (e *Engine) CBSnapshot() []stats.CBState {
 	e.reloadMu.RLock()
 	cooldownSec := e.cfg.Global.CBCooldown
+	seen := make(map[int]struct{})
+	for _, provider := range e.cfg.Providers {
+		if provider.Priority > 0 {
+			seen[provider.Priority] = struct{}{}
+		}
+	}
 	e.reloadMu.RUnlock()
 	cooldown := time.Duration(cooldownSec) * time.Second
 
 	e.cbMu.Lock()
 	defer e.cbMu.Unlock()
 
-	// Collect priorities seen across all CB maps.
-	seen := make(map[int]struct{})
-	for p := range e.failureCount {
-		seen[p] = struct{}{}
-	}
-	for p := range e.circuitOpenSince {
-		seen[p] = struct{}{}
-	}
-	if len(seen) == 0 {
-		return nil
-	}
-
+	// Current YAML is authoritative. Persisted maps can still contain removed
+	// priorities; they must not create phantom groups in the dashboard.
 	out := make([]stats.CBState, 0, len(seen))
 	for p := range seen {
 		openSince := e.circuitOpenSince[p]

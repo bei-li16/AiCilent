@@ -3,11 +3,14 @@ package server
 import (
 	"context"
 	"embed"
+	"html"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"ai-proxy/internal/config"
@@ -86,6 +89,7 @@ func New(cfg *config.Config, configPath string) *Instance {
 	r.GET("/", serveWeb("web/index.html", "text/html; charset=utf-8"))
 	r.GET("/style.css", serveWeb("web/style.css", "text/css; charset=utf-8"))
 	r.GET("/app.js", serveWeb("web/app.js", "application/javascript; charset=utf-8"))
+	r.GET("/dashboard-core.js", serveWeb("web/dashboard-core.js", "application/javascript; charset=utf-8"))
 	r.GET("/api/version", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"version":    version.Version,
@@ -97,6 +101,10 @@ func New(cfg *config.Config, configPath string) *Instance {
 	r.GET("/api/stats", func(c *gin.Context) {
 		snap := statsCollector.Snapshot()
 		snap.CB = engine.CBSnapshot()
+		snap.ConfiguredPriorities = make([]int, 0, len(snap.CB))
+		for _, group := range snap.CB {
+			snap.ConfiguredPriorities = append(snap.ConfiguredPriorities, group.Priority)
+		}
 		c.JSON(200, snap)
 	})
 
@@ -196,6 +204,16 @@ func serveWeb(filePath, contentType string) gin.HandlerFunc {
 		if err != nil {
 			c.AbortWithStatus(http.StatusNotFound)
 			return
+		}
+		// HTML always revalidates. Asset URLs identify the embedded build, including
+		// rebuilds from an uncommitted worktree with the same release version.
+		c.Header("Cache-Control", "no-cache")
+		if filePath == "web/index.html" {
+			asset := url.QueryEscape(version.Version + "." + version.Commit + "." + version.BuildDate)
+			data = []byte(strings.NewReplacer(
+				"__DASHBOARD_VERSION__", html.EscapeString(version.Version),
+				"__DASHBOARD_ASSET__", asset,
+			).Replace(string(data)))
 		}
 		c.Data(http.StatusOK, contentType, data)
 	}

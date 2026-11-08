@@ -1,102 +1,140 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AI 请求转发平台</title>
-<link rel="stylesheet" href="/style.css">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark">
+  <meta name="dashboard-build" content="__DASHBOARD_VERSION__">
+  <title>AI 代理监控 · 请求转发平台</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23172234'/%3E%3Cpath d='M8 16h7m0 0 8-8m-8 8 8 8' fill='none' stroke='%235ea2ff' stroke-width='3'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/style.css?v=__DASHBOARD_ASSET__">
+  <script src="/dashboard-core.js?v=__DASHBOARD_ASSET__" defer></script>
+  <script src="/app.js?v=__DASHBOARD_ASSET__" defer></script>
 </head>
 <body>
-<div class="app">
-  <header class="header">
-    <div class="header-left">
-      <h1>AI 请求转发平台</h1>
-      <span class="uptime" id="uptime"></span>
-      <span class="build-info" id="buildInfo">版本加载中</span>
-    </div>
-    <div class="header-right">
-      <span class="live-badge" id="liveBadge" title="实时日志连接状态">● 实时</span>
-      <span class="status" id="status">● 运行中</span>
-      <label class="switch">
-        <input type="checkbox" id="toggle" checked>
-        <span class="slider"></span>
-      </label>
-    </div>
-  </header>
-
-  <section class="summary" id="summary">
-    <div class="card"><div class="card-label">客户端请求</div><div class="card-value" id="totalClient">0</div></div>
-    <div class="card"><div class="card-label">上游尝试</div><div class="card-value" id="totalReq">0</div></div>
-    <div class="card success"><div class="card-label">成功</div><div class="card-value" id="totalSuccess">0</div></div>
-    <div class="card fail"><div class="card-label">失败</div><div class="card-value" id="totalFail">0</div></div>
-    <div class="card"><div class="card-label">成功率</div><div class="card-value" id="totalRate">—</div></div>
-  </section>
-
-  <section class="chart-section">
-    <div class="chart-header">
-      <h2>命中率 / 命中耗时曲线</h2>
-      <div class="chart-legend" id="chartLegend"></div>
-    </div>
-    <div class="chart-container" id="chartContainer">
-      <svg id="hitChart" viewBox="0 0 1000 200" preserveAspectRatio="none"></svg>
-      <span class="muted chart-empty" id="chartEmpty">暂无数据</span>
-    </div>
-  </section>
-
-  <section class="cb-section">
-    <h2>熔断器状态</h2>
-    <div class="cb-container" id="cb-container"><span class="muted">暂无熔断记录</span></div>
-  </section>
-
-  <section class="table-section collapsible collapsed" id="statsSection">
-    <div class="table-header collapsible-header" onclick="toggleSection('statsSection')">
-      <h2><span class="caret"></span>供应商统计</h2>
-      <button class="btn-small" id="statsClearBtn" onclick="event.stopPropagation(); clearStats()">清零</button>
-    </div>
-    <div class="collapsible-body">
-      <div class="stats-table-scroll">
-        <table id="stats-table">
-          <thead>
-            <tr>
-              <th>优先级</th><th>供应商</th><th>模型</th>
-              <th>尝试</th><th>成功</th><th>失败</th><th>取消</th><th>成功率</th>
-              <th>连续失败</th><th>平均延迟</th><th>最近错误</th>
-            </tr>
-          </thead>
-          <tbody id="stats-body"></tbody>
-        </table>
+  <a class="skip-link" href="#workspace">跳到排障工作区</a>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M7 16h9m0 0 9-9m-9 9 9 9"/><circle cx="7" cy="16" r="2"/><circle cx="25" cy="7" r="2"/><circle cx="25" cy="25" r="2"/></svg></span>
+        <div><p class="eyebrow">AI GATEWAY / OPERATIONS</p><h1>AI 代理监控</h1><p class="brand-meta"><span id="uptime">正在读取运行时长</span><span id="buildInfo">版本加载中</span></p></div>
       </div>
-    </div>
-  </section>
-
-  <section class="trace-section collapsible collapsed" id="traceSection">
-    <div class="table-header collapsible-header" onclick="toggleSection('traceSection')">
-      <h2><span class="caret"></span>最近上游尝试</h2>
-      <span class="muted">请求 ID 可关联重试与回复</span>
-    </div>
-    <div class="collapsible-body">
-      <div class="trace-table-scroll">
-        <table id="trace-table">
-          <thead><tr><th>请求 ID</th><th>供应商</th><th>模型</th><th>优先级</th><th>结果</th><th>状态</th><th>耗时</th><th>时间</th></tr></thead>
-          <tbody id="trace-body"></tbody>
-        </table>
+      <div class="topbar-status">
+        <span class="badge neutral" id="serviceStatus"><i></i>服务状态待获取</span>
+        <span class="connection" id="logStatus"><i></i>日志连接中</span>
+        <span class="connection" id="statsStatus"><i></i>统计连接中</span>
+        <details class="management" id="managementMenu">
+          <summary class="button secondary">服务管理 <span aria-hidden="true">⌄</span></summary>
+          <div class="management-menu">
+            <p>管理操作会影响当前服务</p>
+            <button type="button" id="serviceControl">获取服务状态中…</button>
+            <button type="button" id="resetStats" class="danger-text">重置服务端统计…</button>
+            <button type="button" id="clearServerLogs" class="danger-text">清空服务端日志文件…</button>
+          </div>
+        </details>
       </div>
-    </div>
-  </section>
+    </header>
 
-  <section class="log-section">
-    <div class="log-header">
-      <h2>实时日志</h2>
-      <div class="log-controls">
-        <input type="text" id="logFilter" class="filter-input" placeholder="按子串过滤（provider/状态/模型...）" autocomplete="off">
-        <button class="btn-small" id="pauseBtn" onclick="togglePause()">暂停</button>
-        <button class="btn-small" onclick="clearLog()">清空</button>
-        <button class="btn-small" onclick="clearLogFile()" title="截断服务端日志文件（备份文件不受影响）">清空文件</button>
+    <main>
+      <section class="overview" aria-labelledby="overviewTitle">
+        <div class="section-heading"><div><p class="eyebrow">运行总览</p><h2 id="overviewTitle">请求与上游质量</h2></div><div class="overview-meta"><span class="scope-label">累计统计 · 清零后重新计数</span><span id="updatedAt">等待首次更新</span></div></div>
+        <div id="dataNotice" class="data-notice" role="status" hidden></div>
+        <div class="metrics">
+          <article class="metric"><div class="metric-label">客户端请求 <span class="info" title="累计进入网关的请求，不等于最终已完成请求数">i</span></div><div class="metric-value" id="totalClient">—</div><p>累计进入网关的请求</p></article>
+          <article class="metric"><div class="metric-label">上游尝试</div><div class="metric-value" id="totalAttempts">—</div><p id="attemptAverage">包含重试与账号切换</p></article>
+          <article class="metric featured"><div class="metric-label">上游尝试成功率</div><div class="metric-value" id="attemptRate">—</div><p id="rateFraction">成功 /（成功 + 失败）</p><span class="metric-footnote">取消尝试不计入分母</span></article>
+          <article class="metric"><div class="metric-label">失败尝试</div><div class="metric-value warning-text" id="totalFailed">—</div><p>包含限流、超时及其他失败</p></article>
+          <article class="metric"><div class="metric-label">取消尝试</div><div class="metric-value" id="totalCanceled">—</div><p>单独记录，不作为上游失败</p></article>
+        </div>
+      </section>
+
+      <section class="diagnostic" id="diagnostic" aria-labelledby="diagnosticTitle">
+        <span class="diagnostic-icon" id="diagnosticIcon" aria-hidden="true">i</span>
+        <div class="diagnostic-copy"><h2 id="diagnosticTitle">等待最近尝试样本</h2><p id="diagnosticText">这里将展示最近记录中的限流、失败和取消，不代表全部历史。</p></div>
+        <button type="button" class="button secondary" id="inspectDiagnostic" disabled>查看相关请求 <span aria-hidden="true">↗</span></button>
+      </section>
+
+      <div class="operations">
+      <aside class="telemetry" aria-label="趋势与优先级">
+      <section class="trends" aria-label="独立样本趋势">
+        <article class="panel chart-panel">
+          <div class="panel-heading"><div><p class="eyebrow">QUALITY / 尝试质量</p><h2>上游尝试成功率</h2></div><div class="chart-actions"><button type="button" id="rateAll">显示全部</button><button type="button" id="rateOverall">仅汇总</button></div></div>
+          <div class="legend-row"><span class="legend-hint">多选</span><div class="chart-legend" id="rateLegend" aria-label="成功率曲线，可多选"></div></div>
+          <div class="chart-canvas" id="rateCanvas"><svg id="rateChart" role="img" aria-label="上游尝试成功率样本序列，方向键查看样本" tabindex="0"></svg><div class="chart-empty" id="rateEmpty"><span aria-hidden="true">⌁</span><strong>暂无成功率样本</strong><p>真实上游尝试发生后生成序列</p></div><div class="chart-tooltip" id="rateTooltip" hidden></div></div>
+          <p class="chart-caption" id="rateCaption">横轴为各序列独立采样序号，不表示同一时刻。</p>
+        </article>
+        <article class="panel chart-panel">
+          <div class="panel-heading"><div><p class="eyebrow">LATENCY / 成功尝试耗时</p><h2>上游处理与传输</h2></div><div class="chart-actions"><button type="button" id="latencyAll">显示全部</button><button type="button" id="latencyOverall">仅汇总</button></div></div>
+          <div class="legend-row"><span class="legend-hint">多选</span><div class="chart-legend" id="latencyLegend" aria-label="耗时曲线，可多选"></div></div>
+          <div class="chart-canvas" id="latencyCanvas"><svg id="latencyChart" role="img" aria-label="成功上游尝试耗时，方向键查看样本" tabindex="0"></svg><div class="chart-empty" id="latencyEmpty"><span aria-hidden="true">⌁</span><strong>暂无成功耗时样本</strong><p>不会用零值代替未知数据</p></div><div class="chart-tooltip" id="latencyTooltip" hidden></div></div>
+          <div class="quantiles"><span class="scope-label" id="latencySample">汇总 0 次成功尝试</span><span>P50 <strong id="latencyP50">—</strong></span><span>P95 <strong id="latencyP95">—</strong></span></div>
+          <p class="chart-caption" id="latencyCaption">独立样本序号 · 单位秒，不含退避；非端到端或首字延迟。</p>
+        </article>
+      </section>
+
+      <section class="priorities" aria-labelledby="priorityTitle">
+        <div class="section-heading compact"><h2 id="priorityTitle">优先级与熔断</h2><span class="muted" title="按当前运行 YAML 显示。熔断关闭不等于上游没有限流；点击卡片查看最近尝试。">当前配置 · 点击查看</span></div>
+        <div class="priority-grid" id="priorityGrid"><p class="empty-inline">暂无优先级记录</p></div>
+      </section>
+      </aside>
+
+      <section class="panel workspace" id="workspace" aria-labelledby="workspaceTitle">
+        <div class="workspace-header">
+        <div class="workspace-heading"><div><p class="eyebrow">INVESTIGATE</p><h2 id="workspaceTitle">排障工作区</h2></div><span class="scope-label" id="workspaceScope">供应商累计统计</span></div>
+        <div class="workspace-tabs" role="tablist" aria-label="排障视图">
+          <button type="button" role="tab" id="tabProviders" aria-selected="true" aria-controls="paneProviders" data-pane="providers">供应商统计 <span id="providerTabCount">0</span></button>
+          <button type="button" role="tab" id="tabRequests" aria-selected="false" aria-controls="paneRequests" data-pane="requests" tabindex="-1">请求追踪 <span id="requestTabCount">0</span></button>
+          <button type="button" role="tab" id="tabLogs" aria-selected="false" aria-controls="paneLogs" data-pane="logs" tabindex="-1">原始日志 <span id="logTabCount">0</span></button>
+        </div>
+        </div>
+        <form class="filter-bar" id="filterForm" role="search">
+          <label class="search-control"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4 4"/></svg><input id="searchInput" type="search" aria-label="搜索供应商、模型、请求 ID 或日志" placeholder="搜索供应商、模型、请求 ID…" autocomplete="off"></label>
+          <label><span class="sr-only">优先级</span><select id="priorityFilter" aria-label="筛选优先级"><option value="">全部优先级</option></select></label>
+          <label><span class="sr-only">模型</span><select id="modelFilter" aria-label="筛选模型"><option value="">全部模型</option></select></label>
+          <label><span class="sr-only">结果</span><select id="resultFilter" aria-label="筛选结果"><option value="">全部结果</option><option value="success">成功记录</option><option value="limited">限流 429</option><option value="failed">其他失败</option><option value="canceled">取消</option><option value="unseen">暂无尝试</option></select></label>
+          <label id="logLevelControl" hidden><span class="sr-only">日志级别</span><select id="logLevelFilter" aria-label="筛选日志级别" title="按事件和结果归类；原始日志没有统一的级别字段"><option value="">全部级别</option><option value="warn+">WARN 及以上</option><option value="error">ERROR · 错误</option><option value="warn">WARN · 警告</option><option value="info">INFO · 常规</option><option value="debug">DEBUG · 诊断</option></select></label>
+          <button type="button" class="button ghost" id="resetFilters">重置筛选</button>
+        </form>
+
+        <div id="paneProviders" role="tabpanel" aria-labelledby="tabProviders">
+          <div class="provider-navigation">
+            <div class="provider-rule-row"><span class="navigation-label">快捷视图</span><div id="providerViews" class="filter-chips" aria-label="供应商快捷视图"></div></div>
+            <div class="provider-rule-row"><label class="group-mode"><span class="sr-only">供应商分组方式</span><select id="providerGroupBy" aria-label="供应商分组方式"><option value="model">按模型切换</option><option value="priority">按优先级切换</option></select></label><div id="providerGroups" class="filter-chips" aria-label="供应商分组"></div></div>
+          </div>
+          <div class="table-toolbar"><p id="providerCount">等待供应商数据</p><label>排序 <select id="providerSort" aria-label="供应商排序"><option value="priority">优先级、名称</option><option value="streak">最近连续失败最多</option><option value="fail">累计失败最多</option><option value="rate">有效成功率最低</option><option value="latency">平均尝试耗时最长</option><option value="recent">最近活跃</option><option value="name">供应商名称</option></select></label></div>
+          <div class="table-scroll" id="providerScroll"><table id="providerTable"><caption class="sr-only">供应商累计上游尝试统计</caption><thead><tr><th>优先级</th><th>供应商 / 模型</th><th class="number">尝试</th><th class="number">成功</th><th class="number">失败</th><th class="number">取消</th><th class="number" title="成功后归零；客户端取消不增加也不中断上游失败计数。旧存档缺少最近状态时显示 —。">最近连续失败</th><th class="number">有效成功率</th><th class="number" title="所有已记录上游尝试的平均耗时，包含失败及取消">平均尝试耗时</th><th>最近状态</th><th><span class="sr-only">详情</span></th></tr></thead><tbody id="providerBody"></tbody></table></div>
+          <div class="empty-state" id="providerEmpty" hidden><strong>没有匹配的供应商</strong><p>调整筛选条件，或等待真实尝试产生。</p></div>
+          <div class="pagination"><span id="providerPageInfo">0 条</span><span class="mobile-hint">表格可左右滑动</span><div><button class="button secondary" id="providerPrev" type="button" aria-label="供应商上一页">← 上一页</button><span id="providerPageNumber">0 / 0</span><button class="button secondary" id="providerNext" type="button" aria-label="供应商下一页">下一页 →</button></div></div>
+        </div>
+
+        <div id="paneRequests" role="tabpanel" aria-labelledby="tabRequests" hidden>
+          <div class="table-toolbar"><p id="requestCount">仅最近 200 条尝试中的请求分组</p><button type="button" class="button secondary" id="refreshRequests">更新请求列表</button></div>
+          <p class="scope-note">按请求 ID 聚合已知记录；起点、结尾及退避可能不在样本中，不能据此推算完整请求成功率。</p>
+          <div class="table-scroll" id="requestScroll"><table id="requestTable"><caption class="sr-only">最近上游尝试中的请求分组</caption><thead><tr><th>请求 ID</th><th>模型 / 优先级</th><th class="number">已知尝试</th><th>涉及账号</th><th>样本中观察到的结果</th><th class="number" title="仅相加已记录的上游尝试耗时，不含退避和记录外阶段">记录耗时 Σ</th><th>最近记录</th><th><span class="sr-only">详情</span></th></tr></thead><tbody id="requestBody"></tbody></table></div>
+          <div class="empty-state" id="requestEmpty" hidden><strong>没有匹配的请求记录</strong><p>最近记录保留有限，不代表历史中没有请求。</p></div>
+          <div class="pagination"><span id="requestPageInfo">0 组</span><div><button class="button secondary" id="requestPrev" type="button" aria-label="请求上一页">← 上一页</button><span id="requestPageNumber">0 / 0</span><button class="button secondary" id="requestNext" type="button" aria-label="请求下一页">下一页 →</button></div></div>
+        </div>
+
+        <div id="paneLogs" role="tabpanel" aria-labelledby="tabLogs" hidden>
+          <div class="log-toolbar"><div><span class="badge neutral" id="logFollowState">自动跟随</span><span id="logBufferInfo" class="muted">等待日志</span></div><div><button type="button" class="button secondary" id="pauseFollow">暂停跟随</button><button type="button" class="button secondary" id="jumpLatest" hidden>跳到最新</button><button type="button" class="button ghost" id="clearLogView">清空当前视图</button></div></div>
+          <div id="logRows" class="log-rows" tabindex="0" aria-label="原始日志，向上阅读会暂停跟随">
+            <div class="log-column-header" aria-hidden="true">
+              <span>时间 / 事件</span><span>请求 ID</span><span>供应商 / 模型</span><span>结果</span><span>详情</span>
+            </div>
+            <div id="logEntries"></div>
+          </div>
+          <div class="empty-state" id="logEmpty"><strong>暂无匹配日志</strong><p>可以调整条件，或等待新的服务日志。</p></div>
+          <p class="scope-note" id="logFilterInfo">级别按事件和结果归类。仅当前浏览器的有界缓存，不是完整服务端历史。点击日志行展开原文。</p>
+        </div>
+      </section>
       </div>
-    </div>
-    <div class="log-container" id="log-container"></div>
-  </section>
-</div>
-<script src="/app.js"></script>
+    </main>
+    <footer class="footer"><span>AI 请求转发平台 · 样本范围随各区域标注</span></footer>
+  </div>
+
+  <dialog class="drawer" id="detailDrawer" aria-labelledby="detailTitle"><div class="drawer-heading"><div><p class="eyebrow" id="detailKind">记录详情</p><h2 id="detailTitle">详情</h2></div><button type="button" class="icon-button" id="closeDetail" aria-label="关闭详情" autofocus>×</button></div><div id="detailBody" class="drawer-body"></div></dialog>
+  <dialog class="confirm-dialog" id="confirmDialog" aria-labelledby="confirmTitle"><h2 id="confirmTitle">确认操作</h2><p id="confirmMessage"></p><p id="confirmError" class="danger-text" role="alert" hidden></p><div class="dialog-actions"><button type="button" class="button secondary" id="cancelAction" autofocus>取消</button><button type="button" class="button danger" id="confirmAction">确认执行</button></div></dialog>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <noscript><p class="data-notice">此监控面板需要 JavaScript 才能展示实时数据和交互。</p></noscript>
 </body>
 </html>

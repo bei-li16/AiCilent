@@ -57,3 +57,7 @@ test/
 .cb_state.json.tmp
 .stats.json
 .stats.json.tmp
+
+# Generated dashboard acceptance evidence
+artifacts/
+__pycache__/
