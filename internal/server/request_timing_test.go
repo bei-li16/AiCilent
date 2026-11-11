@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -80,9 +81,19 @@ func TestRequestTimingIncludesRetryAndMeasuresFirstStreamWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	first := strings.Index(string(log), "["+sample.RequestID+"] FIRST_RESPONSE")
+	stream := strings.Index(string(log), "["+sample.RequestID+"] STREAM")
 	summary := strings.Index(string(log), "["+sample.RequestID+"] SUMMARY")
-	if first < 0 || summary <= first || strings.Count(string(log), " FIRST_RESPONSE ") != 1 {
+	if first < 0 || stream <= first || summary <= stream || strings.Count(string(log), " FIRST_RESPONSE ") != 1 {
 		t.Fatalf("expected one first-response event before stream completion: %s", log)
+	}
+	match := regexp.MustCompile(`request_elapsed=([^ ]+) \| end_reason=protocol_complete`).FindStringSubmatch(string(log[stream:summary]))
+	if len(match) != 2 {
+		t.Fatalf("stream completion is missing its request-relative elapsed time: %s", log[stream:summary])
+	}
+	elapsed, err := time.ParseDuration(match[1])
+	elapsedMs := float64(elapsed) / float64(time.Millisecond)
+	if err != nil || elapsedMs <= *sample.FirstResponseMs || elapsedMs > sample.TotalMs {
+		t.Fatalf("stream elapsed=%s (%v), must be between first response and total duration: %+v", elapsed, err, sample)
 	}
 	if strings.Count(string(log), "retry_start_gap=") != 1 {
 		t.Fatalf("only the second attempt should report a retry start gap: %s", log)

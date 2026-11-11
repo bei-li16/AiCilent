@@ -13,13 +13,18 @@ import (
 
 const CtxRequestedModel = "requested_model"
 
+func RequestStartedAt(c *gin.Context) time.Time {
+	value, _ := c.Get(requestStartKey)
+	start, _ := value.(time.Time)
+	return start
+}
+
 // RequestTiming measures the downstream request rather than any single
 // upstream attempt. Only model routes use it.
 func RequestTiming(log io.Writer, record func(stats.RequestTiming)) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		value, _ := c.Get(requestStartKey)
-		start, ok := value.(time.Time)
-		if !ok {
+		start := RequestStartedAt(c)
+		if start.IsZero() {
 			start = time.Now()
 		}
 		id := GetReqID(c)

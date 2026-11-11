@@ -1,8 +1,10 @@
 package stats
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -17,14 +19,14 @@ func TestClientOutcomesPersistWithoutGuessingLegacyResults(t *testing.T) {
 	if got := c.Snapshot(); got.TotalClientReq != 149 || got.TotalClientCompleted != 0 || got.TotalClientSuccess != 0 {
 		t.Fatalf("legacy attempts must not be treated as client outcomes: %+v", got)
 	}
-	c.RecordClientOutcome(c.RecordClientRequest(), true)
-	c.RecordClientOutcome(c.RecordClientRequest(), false)
+	c.RecordClientOutcome(c.RecordClientRequest("success"), true)
+	c.RecordClientOutcome(c.RecordClientRequest("failure"), false)
 	c.Save()
 	c = New(path)
 	if got := c.Snapshot(); got.TotalClientReq != 151 || got.TotalClientCompleted != 2 || got.TotalClientSuccess != 1 {
 		t.Fatalf("request outcomes did not survive restart: %+v", got)
 	}
-	epoch := c.RecordClientRequest()
+	epoch := c.RecordClientRequest("in-flight")
 	c.Reset()
 	c.RecordClientOutcome(epoch, true)
 	if got := c.Snapshot(); got.TotalClientReq != 0 || got.TotalClientCompleted != 0 || got.TotalClientSuccess != 0 {
@@ -124,7 +126,7 @@ func TestResetZeroesCountersButKeepsProviders(t *testing.T) {
 	c := New("")
 	c.Record("req-1", "provider", "model", 1, true, 200, "", 25*time.Millisecond)
 	c.Record("req-2", "provider", "model", 1, false, 503, "upstream", 30*time.Millisecond)
-	c.RecordClientRequest()
+	c.RecordClientRequest("req-3")
 
 	c.Reset()
 
@@ -149,6 +151,36 @@ func TestResetZeroesCountersButKeepsProviders(t *testing.T) {
 	}
 	if len(snap.LatencyCurve) != 0 {
 		t.Fatalf("latency curve = %d, want 0", len(snap.LatencyCurve))
+	}
+	if snap.TrendRequestSeq != 0 || len(snap.ModelLatencyCurves) != 0 {
+		t.Fatalf("reset kept trend request sequence or per-model data: %+v", snap)
+	}
+}
+
+func TestTrendsAssociateAttemptsWithClientRequestsAndSuccessfulModels(t *testing.T) {
+	c := New("")
+	for i := 1; i <= 105; i++ {
+		c.RecordClientRequest(fmt.Sprintf("r%d", i))
+	}
+	c.Record("r105", "p", "model-a", 1, false, 429, "limit", time.Second)
+	c.Record("r105", "p", "model-a", 1, true, 200, "", 2*time.Second)
+	c.Record("r6", "q", "model-b", 2, true, 200, "", 3*time.Second)
+	c.Record("r5", "p", "model-a", 1, true, 200, "", 4*time.Second)
+	c.RecordCanceled("r104", "p", "model-a", 1, "client left", time.Second)
+
+	snapshot := c.Snapshot()
+	if snapshot.TrendRequestSeq != 105 || !slices.Equal(snapshot.Curves[0].Requests, []uint64{105, 105, 6, 0}) {
+		t.Fatalf("rate samples must use inbound request order for retries and late results: seq=%d, samples=%+v",
+			snapshot.TrendRequestSeq, snapshot.Curves[0])
+	}
+	if !slices.Equal(snapshot.LatencyCurves[0].Requests, []uint64{105, 6, 0}) {
+		t.Fatalf("latency curve must contain successful samples only: %+v", snapshot.LatencyCurves[0])
+	}
+	models := snapshot.ModelLatencyCurves
+	if len(models) != 2 || models[0].Model != "model-a" || !slices.Equal(models[0].Points, []float64{2, 4}) ||
+		!slices.Equal(models[0].Requests, []uint64{105, 0}) || models[1].Model != "model-b" ||
+		!slices.Equal(models[1].Points, []float64{3}) || !slices.Equal(models[1].Requests, []uint64{6}) {
+		t.Fatalf("model samples must preserve successful durations and request order: %+v", models)
 	}
 }
 

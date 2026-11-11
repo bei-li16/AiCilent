@@ -142,9 +142,11 @@ test('request timing is independent of attempts and preserves local failures', (
 test('log timings preserve the event clock and separate different elapsed time scopes', () => {
   const prefix = '[2026-11-10 12:53:17.398] [req] ';
   for (const [body, label, ms] of [
+    ['INBOUND | POST / | msg=total=2s', '请求起点', 0],
     ['PROVIDER | [P2][3/3] acct | FAIL | 1.3810652s | API error (status 429)', '单次尝试', 1381.0652],
     ['TTFB | acct[P2] | upstream header=3.010456s | status=200', '上游响应头', 3010.456],
     ['FIRST_RESPONSE | elapsed=7.02s', '请求首响', 7020],
+    ['STREAM | answered=true terminal_written=true | request_elapsed=9s | end_reason=protocol_complete', '请求至流结束', 9000],
     ['SUMMARY | result=SUCCESS | provider=acct | rr=1 | total=1m2.5s', '路由耗时', 62500],
     ['ACCESS | POST /chat/completions | 200 | 45.5µs | format=openai', '请求总耗时', .0455]
   ]) {
@@ -154,7 +156,7 @@ test('log timings preserve the event clock and separate different elapsed time s
     assert.ok(Math.abs(row.timingMs - ms) < 0.000001);
     assert.equal(row.raw, prefix + body);
   }
-  assert.equal(C.parseLog(prefix + 'INBOUND | POST / | msg=total=2s', 1).timingMs, null);
+  assert.equal(C.parseLog(prefix + 'STREAM | answered=true terminal_written=true | end_reason=protocol_complete', 1).timingMs, null);
 });
 test('success rate axis follows only the plotted values and stays within percentage bounds', () => {
   assert.deepEqual(C.rateAxis([0, 24, 100]), { minimum: 0, maximum: 100 });
@@ -175,5 +177,20 @@ test('log milestones are distinct from outcomes and retry gap is separate from a
   assert.equal(parse('INBOUND | POST /chat/completions | model=P2').milestone.tone, 'request-start');
   assert.equal(parse('FIRST_RESPONSE | elapsed=1s').milestone.tone, 'request-first');
   assert.equal(parse('STREAM | answered=true terminal_written=true | end_reason=protocol_complete').milestone.tone, 'request-end');
+  assert.equal(parse('STREAM | answered=true terminal_written=true | request_elapsed=9s | end_reason=protocol_complete').milestone.tone, 'request-end');
   assert.equal(parse('STREAM | answered=true terminal_written=false | end_reason=unexpected EOF').milestone, null);
+  assert.equal(parse('PROVIDER | [P2][1/3] acct | OK | 3s').label, '尝试成功');
+  assert.equal(parse('SUMMARY | result=SUCCESS | provider=acct | total=3s').label, '请求成功');
+});
+
+test('trend windows count client requests and use the same range for model latency', () => {
+  const attempts = { priority: 0, requests: [20, 21, 70, 71, 71, 120, 0], points: [1, 2, 3, 4, 5, 6, 7] };
+  const latency = { priority: 0, requests: [21, 120, 71, 20, 0], points: [2, 6, 5, 1, 7] };
+  const model = { model: 'glm', requests: [21, 71, 20], points: [2, 5, 1] };
+  const data = { trend_request_seq: 120, curves: [attempts], latency_curves: [latency], model_latency_curves: [model] };
+  assert.deepEqual(C.chartSeries(data, 'rate')[0].points, attempts.points);
+  assert.deepEqual(C.chartSeries(data, 'rate', 50)[0].points, [4, 5, 6]);
+  assert.deepEqual(C.chartSeries(data, 'rate', 100)[0].points, [2, 3, 4, 5, 6]);
+  assert.deepEqual(C.chartSeries(data, 'latency', 50)[0].points, [6, 5]);
+  assert.deepEqual(C.modelLatencySeries(data, 100), [{ model: 'glm', points: [2, 5] }]);
 });

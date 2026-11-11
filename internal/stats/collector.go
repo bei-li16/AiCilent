@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,6 +50,13 @@ type CBState struct {
 type HitRateCurve struct {
 	Priority int       `json:"priority"` // 0 = 全部请求
 	Points   []float64 `json:"points"`   // 每个=最近 hitWindowSize 次尝试的成功率(%)
+	Requests []uint64  `json:"requests"` // corresponding client request sequence, 0 = unknown
+}
+
+type ModelLatencyCurve struct {
+	Model    string    `json:"model"`
+	Points   []float64 `json:"points"`
+	Requests []uint64  `json:"requests"`
 }
 
 const (
@@ -94,9 +102,15 @@ func (r *rollingHit) rate() float64 {
 	return float64(r.sum) / float64(n) * 100
 }
 
-// pushSeries appends v to a capped series, shifting left when full so the
-// underlying array stays bounded (no unbounded slice growth).
-func pushSeries(s []float64, v float64) []float64 {
+type trendPoint struct {
+	value   float64
+	request uint64
+}
+
+type trendSeries []trendPoint
+
+func (s trendSeries) push(value float64, request uint64) trendSeries {
+	v := trendPoint{value, request}
 	if len(s) < hitSeriesCap {
 		return append(s, v)
 	}
@@ -105,26 +119,36 @@ func pushSeries(s []float64, v float64) []float64 {
 	return s
 }
 
+func (s trendSeries) snapshot(priority int) HitRateCurve {
+	curve := HitRateCurve{Priority: priority, Points: make([]float64, len(s)), Requests: make([]uint64, len(s))}
+	for i, point := range s {
+		curve.Points[i], curve.Requests[i] = point.value, point.request
+	}
+	return curve
+}
+
 type Snapshot struct {
-	Providers            []ProviderStats `json:"providers"`
-	TotalReq             int64           `json:"total_req"`        // 上游尝试次数（含重试/降级）
-	TotalClientReq       int64           `json:"total_client_req"` // 客户端请求数
-	TotalClientCompleted int64           `json:"total_client_completed"`
-	TotalClientSuccess   int64           `json:"total_client_success"`
-	TotalSuccess         int64           `json:"total_success"`
-	TotalFail            int64           `json:"total_fail"`
-	TotalCanceled        int64           `json:"total_canceled"`
-	TotalRate            float64         `json:"total_rate"`
-	Running              bool            `json:"running"`
-	StartTime            time.Time       `json:"start_time"`
-	Uptime               string          `json:"uptime"`
-	CB                   []CBState       `json:"cb"`
-	Curves               []HitRateCurve  `json:"curves"`
-	LatencyCurve         []float64       `json:"latency_curve"`         // 命中成功耗时序列（秒），每个点=一次成功尝试的耗时
-	LatencyCurves        []HitRateCurve  `json:"latency_curves"`        // 同一成功样本口径，0=汇总，其余按优先级独立采样
-	ConfiguredPriorities []int           `json:"configured_priorities"` // 由运行中的 YAML 配置填充，历史记录不参与
-	RecentAttempts       []AttemptStats  `json:"recent_attempts"`
-	RecentRequests       []RequestTiming `json:"recent_requests"`
+	Providers            []ProviderStats     `json:"providers"`
+	TotalReq             int64               `json:"total_req"`        // 上游尝试次数（含重试/降级）
+	TotalClientReq       int64               `json:"total_client_req"` // 客户端请求数
+	TotalClientCompleted int64               `json:"total_client_completed"`
+	TotalClientSuccess   int64               `json:"total_client_success"`
+	TotalSuccess         int64               `json:"total_success"`
+	TotalFail            int64               `json:"total_fail"`
+	TotalCanceled        int64               `json:"total_canceled"`
+	TotalRate            float64             `json:"total_rate"`
+	Running              bool                `json:"running"`
+	StartTime            time.Time           `json:"start_time"`
+	Uptime               string              `json:"uptime"`
+	CB                   []CBState           `json:"cb"`
+	Curves               []HitRateCurve      `json:"curves"`
+	LatencyCurve         []float64           `json:"latency_curve"`  // 命中成功耗时序列（秒），每个点=一次成功尝试的耗时
+	LatencyCurves        []HitRateCurve      `json:"latency_curves"` // 同一成功样本口径，0=汇总，其余按优先级独立采样
+	ModelLatencyCurves   []ModelLatencyCurve `json:"model_latency_curves"`
+	TrendRequestSeq      uint64              `json:"trend_request_seq"`
+	ConfiguredPriorities []int               `json:"configured_priorities"` // 由运行中的 YAML 配置填充，历史记录不参与
+	RecentAttempts       []AttemptStats      `json:"recent_attempts"`
+	RecentRequests       []RequestTiming     `json:"recent_requests"`
 }
 
 type RequestTiming struct {
@@ -149,6 +173,7 @@ type AttemptStats struct {
 }
 
 const recentAttemptsCap = 200
+const trendRequestCap = 100
 
 type Collector struct {
 	mu              sync.Mutex
@@ -169,22 +194,28 @@ type Collector struct {
 	// rolling success rates. priority 0 = overall.
 	overallWin     rollingHit
 	prioWin        map[int]*rollingHit
-	overallSeries  []float64
-	prioSeries     map[int][]float64
-	latencySeries  []float64 // 成功命中耗时序列（秒，≤240）
-	prioLatency    map[int][]float64
+	overallSeries  trendSeries
+	prioSeries     map[int]trendSeries
+	latencySeries  trendSeries // 成功命中耗时序列（秒，≤240）
+	prioLatency    map[int]trendSeries
+	modelLatency   map[string]trendSeries
+	trendSeq       uint64
+	trendRecent    [trendRequestCap]string
+	trendIDs       map[string]uint64
 	recentAttempts []AttemptStats
 	recentRequests []RequestTiming
 }
 
 func New(statsPath string) *Collector {
 	c := &Collector{
-		providers:   make(map[string]*ProviderStats),
-		startTime:   time.Now(),
-		statsPath:   statsPath,
-		prioWin:     make(map[int]*rollingHit),
-		prioSeries:  make(map[int][]float64),
-		prioLatency: make(map[int][]float64),
+		providers:    make(map[string]*ProviderStats),
+		startTime:    time.Now(),
+		statsPath:    statsPath,
+		prioWin:      make(map[int]*rollingHit),
+		prioSeries:   make(map[int]trendSeries),
+		prioLatency:  make(map[int]trendSeries),
+		modelLatency: make(map[string]trendSeries),
+		trendIDs:     make(map[string]uint64),
 	}
 	c.running.Store(true)
 	c.load()
@@ -307,19 +338,24 @@ func (c *Collector) record(requestID, name, modelID string, priority int, succes
 		}
 
 		// Update health-rate windows under the same lock as counters.
+		requestSeq := c.trendIDs[requestID]
 		c.overallWin.push(success)
-		c.overallSeries = pushSeries(c.overallSeries, c.overallWin.rate())
+		c.overallSeries = c.overallSeries.push(c.overallWin.rate(), requestSeq)
 		pw, ok := c.prioWin[priority]
 		if !ok {
 			pw = &rollingHit{}
 			c.prioWin[priority] = pw
 		}
 		pw.push(success)
-		c.prioSeries[priority] = pushSeries(c.prioSeries[priority], pw.rate())
+		c.prioSeries[priority] = c.prioSeries[priority].push(pw.rate(), requestSeq)
 		// Latency curve: only successful attempts ("hit") record their duration.
 		if success {
-			c.latencySeries = pushSeries(c.latencySeries, latency.Seconds())
-			c.prioLatency[priority] = pushSeries(c.prioLatency[priority], latency.Seconds())
+			seconds := latency.Seconds()
+			c.latencySeries = c.latencySeries.push(seconds, requestSeq)
+			c.prioLatency[priority] = c.prioLatency[priority].push(seconds, requestSeq)
+			if modelID != "" {
+				c.modelLatency[modelID] = c.modelLatency[modelID].push(seconds, requestSeq)
+			}
 		}
 	}
 }
@@ -327,10 +363,17 @@ func (c *Collector) record(requestID, name, modelID string, priority int, succes
 // RecordClientRequest increments the client-side request counter once per
 // inbound client request (distinct from upstream attempts, which include
 // retries and degradation).
-func (c *Collector) RecordClientRequest() uint64 {
+func (c *Collector) RecordClientRequest(requestID string) uint64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.totalClient.Add(1)
+	c.trendSeq++
+	slot := (c.trendSeq - 1) % trendRequestCap
+	delete(c.trendIDs, c.trendRecent[slot])
+	c.trendRecent[slot] = requestID
+	if requestID != "" {
+		c.trendIDs[requestID] = c.trendSeq
+	}
 	return c.clientEpoch
 }
 
@@ -357,7 +400,7 @@ func (c *Collector) Snapshot() Snapshot {
 	// Build hit-rate curves: overall first (priority 0), then per-priority sorted.
 	// Done under the lock because Record mutates these slices concurrently.
 	curves := make([]HitRateCurve, 0, 1+len(c.prioSeries))
-	curves = append(curves, HitRateCurve{Priority: 0, Points: copySeries(c.overallSeries)})
+	curves = append(curves, c.overallSeries.snapshot(0))
 	prios := make([]int, 0, len(c.prioSeries))
 	for p := range c.prioSeries {
 		prios = append(prios, p)
@@ -368,13 +411,19 @@ func (c *Collector) Snapshot() Snapshot {
 		}
 	}
 	for _, p := range prios {
-		curves = append(curves, HitRateCurve{Priority: p, Points: copySeries(c.prioSeries[p])})
+		curves = append(curves, c.prioSeries[p].snapshot(p))
 	}
-	latencyCurve := copySeries(c.latencySeries)
-	latencyCurves := []HitRateCurve{{Priority: 0, Points: copySeries(c.latencySeries)}}
+	latencyCurves := []HitRateCurve{c.latencySeries.snapshot(0)}
 	for _, p := range prios {
-		latencyCurves = append(latencyCurves, HitRateCurve{Priority: p, Points: copySeries(c.prioLatency[p])})
+		latencyCurves = append(latencyCurves, c.prioLatency[p].snapshot(p))
 	}
+	models := make([]ModelLatencyCurve, 0, len(c.modelLatency))
+	for model, series := range c.modelLatency {
+		sample := series.snapshot(0)
+		models = append(models, ModelLatencyCurve{Model: model, Points: sample.Points, Requests: sample.Requests})
+	}
+	sort.Slice(models, func(i, j int) bool { return models[i].Model < models[j].Model })
+	trendSeq := c.trendSeq
 	recentAttempts := append([]AttemptStats(nil), c.recentAttempts...)
 	recentRequests := append([]RequestTiming(nil), c.recentRequests...)
 	totalReq := c.totalReq.Load()
@@ -405,8 +454,10 @@ func (c *Collector) Snapshot() Snapshot {
 		StartTime:            c.startTime,
 		Uptime:               uptime,
 		Curves:               curves,
-		LatencyCurve:         latencyCurve,
+		LatencyCurve:         latencyCurves[0].Points,
 		LatencyCurves:        latencyCurves,
+		ModelLatencyCurves:   models,
+		TrendRequestSeq:      trendSeq,
 		RecentAttempts:       recentAttempts,
 		RecentRequests:       recentRequests,
 	}
@@ -421,15 +472,6 @@ func (c *Collector) RecordRequestTiming(sample RequestTiming) {
 		c.recentRequests = c.recentRequests[:recentAttemptsCap-1]
 	}
 	c.recentRequests = append(c.recentRequests, sample)
-}
-
-func copySeries(s []float64) []float64 {
-	if len(s) == 0 {
-		return []float64{}
-	}
-	out := make([]float64, len(s))
-	copy(out, s)
-	return out
 }
 
 func (c *Collector) SetRunning(v bool) {
@@ -460,9 +502,13 @@ func (c *Collector) Reset() {
 	c.overallWin = rollingHit{}
 	c.prioWin = make(map[int]*rollingHit)
 	c.overallSeries = nil
-	c.prioSeries = make(map[int][]float64)
+	c.prioSeries = make(map[int]trendSeries)
 	c.latencySeries = nil
-	c.prioLatency = make(map[int][]float64)
+	c.prioLatency = make(map[int]trendSeries)
+	c.modelLatency = make(map[string]trendSeries)
+	c.trendSeq = 0
+	c.trendRecent = [trendRequestCap]string{}
+	clear(c.trendIDs)
 	c.recentAttempts = nil
 	c.recentRequests = nil
 	c.totalReq.Store(0)

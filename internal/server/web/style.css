@@ -262,6 +262,10 @@ tbody tr:nth-child(even) td{background:#14223666}tbody tr:hover td{background:#1
 .filter-options > label:has(#resultFilter) { flex-basis: 7.5rem; }
 .filter-options .button { flex: none; padding-inline: 8px; }
 .filter-options :focus-visible { outline-offset: -2px; }
+.trend-controls { display:flex; flex:none; align-items:center; justify-content:space-between; gap:8px; padding:0 2px; font-size:12px; color:var(--muted); }
+.trend-controls select, .quantiles select { min-height:26px; padding-block:3px; width:auto; max-width:100%; }
+.trend-controls select { width:10rem; }
+.quantiles select { width:min(100%, 8.5rem); }
 select { white-space: nowrap; text-overflow: ellipsis; }
 select option, select optgroup { white-space: nowrap; }
 .group-mode { width: min(100%, 8.5rem); }

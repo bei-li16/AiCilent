@@ -253,7 +253,7 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 	}
 	// Count every accepted client request, including requests that later fail
 	// because no provider matches the detected protocol.
-	epoch := e.stats.RecordClientRequest()
+	epoch := e.stats.RecordClientRequest(middleware.GetReqID(c))
 	defer func() { e.stats.RecordClientOutcome(epoch, c.GetBool(clientRequestSucceededKey)) }()
 
 	// Capture the immutable config snapshot before applying model rules. Reloads
@@ -1021,7 +1021,14 @@ func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat
 	if err != nil && (errors.As(err, &writeErr) || isRequestCanceled(c, err)) {
 		err = fmt.Errorf("%w: %v", errClientGoneIncomplete, err)
 	}
-	tr.LogStreamEnd(tracker.Answered(), tracker.Terminated(), err)
+	requestStart := middleware.RequestStartedAt(c)
+	if requestStart.IsZero() {
+		requestStart, _ = c.Request.Context().Value(startTimeKey).(time.Time)
+		if requestStart.IsZero() {
+			requestStart = streamStart
+		}
+	}
+	tr.LogStreamEnd(tracker.Answered(), tracker.Terminated(), time.Since(requestStart), err)
 	// An upstream failure may be reported inside an already committed stream.
 	// A disconnected downstream must not receive an additional error event.
 	if err != nil && c.Writer.Written() && !errors.Is(err, errClientGoneIncomplete) {

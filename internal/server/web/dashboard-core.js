@@ -40,11 +40,22 @@
       [...(data.providers || []).map(p => p.priority), ...(data.cb || []).map(p => p.priority)];
     return [...new Set(values.map(Number).filter(p => Number.isInteger(p) && p > 0))].sort((a, b) => a - b);
   }
-  function chartSeries(data, kind) {
+  function trendPoints(series, requestSeq, requestWindow) {
+    const minSeq = Math.max(1, number(requestSeq) - requestWindow + 1);
+    return (series?.points || []).filter((v, i) => Number.isFinite(v) && v >= 0 &&
+      (!requestWindow || (series.requests?.[i] >= minSeq && series.requests[i] <= requestSeq))).slice(-240);
+  }
+  function chartSeries(data, kind, requestWindow = 0) {
     const source = kind === 'rate' ? data.curves : Array.isArray(data.latency_curves) ? data.latency_curves : [{ priority: 0, points: data.latency_curve }];
-    const byPriority = new Map((source || []).filter(c => c && Array.isArray(c.points)).map(c => [Number(c.priority), c.points]));
+    const byPriority = new Map((source || []).filter(c => c && Array.isArray(c.points)).map(c => [Number(c.priority), c]));
     return [0, ...activePriorities(data)].map(priority => ({ priority, label: priority === 0 ? '汇总' : 'P' + priority,
-      color: priorityColor(priority), points: (byPriority.get(priority) || []).filter(v => Number.isFinite(v) && v >= 0).slice(-240).map(v => kind === 'rate' ? Math.min(100, v) : v) }));
+      color: priorityColor(priority), points: trendPoints(byPriority.get(priority), data.trend_request_seq, requestWindow)
+        .map(v => kind === 'rate' ? Math.min(100, v) : v) }));
+  }
+  function modelLatencySeries(data, requestWindow = 0) {
+    const models = Array.isArray(data.model_latency_curves) ? data.model_latency_curves : [];
+    return models.filter(c => c && typeof c.model === 'string' && c.model && Array.isArray(c.points))
+      .map(c => ({ model: c.model, points: trendPoints(c, data.trend_request_seq, requestWindow) }));
   }
   // null means the first visit: show every curve. An explicit [] means the
   // user hid every curve and must survive polling/reloads unchanged.
@@ -205,10 +216,13 @@
         attemptError = reason;
         detail = elapsed[1] + (reason ? ' | ' + reason : '');
       }
+    } else if (event === 'INBOUND') {
+      timingLabel = '请求起点';
     } else {
       const rules = {
         TTFB: [/\s*\|\s*upstream header=(\S+)/, '上游响应头'],
         FIRST_RESPONSE: [/^elapsed=(\S+)$/, '请求首响'],
+        STREAM: [/\s*\|\s*request_elapsed=(\S+)(?=\s*\|\s*end_reason=)/, '请求至流结束'],
         SUMMARY: [/\s*\|\s*total=(\S+)$/, '路由耗时'],
         ACCESS: [/\s*\|\s*\d{3}\s*\|\s*(\S+)(?=\s*\|)/, '请求总耗时']
       };
@@ -231,7 +245,9 @@
     else if (attempt && elapsed?.[1] === 'FAIL' && status === 429) { key = 'limited'; label = '限流 429'; }
     else if (event === 'ACCESS' && status === 429) { key = 'client-limited'; label = '返回 429'; }
     else if (/\|\s*FAIL\s*\||result=FAIL|stream interrupted/i.test(resultBody) || status >= 400) { key = 'failed'; label = status ? '失败 ' + status : '失败'; }
-    else if (/\|\s*OK\s*\||result=SUCCESS/.test(resultBody)) { key = 'success'; label = '成功'; }
+    else if (attempt ? elapsed?.[1] === 'OK' : /\|\s*OK\s*\||result=SUCCESS/.test(resultBody)) {
+      key = 'success'; label = attempt ? '尝试成功' : event === 'SUMMARY' ? '请求成功' : '成功';
+    }
     // The backend emits event categories rather than a severity field. Keep
     // user-supplied request/body text from creating false ERROR/WARN levels.
     const explicit = ['DEBUG', 'INFO', 'WARN', 'WARNING', 'ERROR', 'FATAL'].includes(event) ? event :
@@ -244,11 +260,11 @@
     else if (['ROUTER', 'QUEUE', 'TTFB', 'STREAM'].includes(event) && key !== 'canceled') level = 'debug';
     const milestone = event === 'INBOUND' ? { label: '请求发起', tone: 'request-start' } :
       event === 'FIRST_RESPONSE' ? { label: '首次成功响应', tone: 'request-first' } :
-      event === 'STREAM' && /\bterminal_written=true\s*\|\s*end_reason=protocol_complete$/.test(body) ?
+      event === 'STREAM' && /\bterminal_written=true\s*\|\s*(?:request_elapsed=\S+\s*\|\s*)?end_reason=protocol_complete$/.test(body) ?
         { label: '流式结束', tone: 'request-end' } : null;
     return { id, raw, body, time: match ? match[1].slice(11) : '—', requestId: match && match[2] !== '-' ? match[2] : '',
       event, provider, providerRole, priority, status, key, label, level, detail, milestone, attemptNumber: attempt?.[2] || null,
-      retryGapMs, timingLabel, timingMs: timingLabel ? durationMs(elapsed[2]) : null };
+      retryGapMs, timingLabel, timingMs: event === 'INBOUND' ? 0 : timingLabel ? durationMs(elapsed[2]) : null };
   }
   function logProviderIndex(providers, attempts) {
     const models = new Map(providers.map(p => [p.name, p.model_id]));
@@ -295,6 +311,6 @@
     return normalized;
   }
   return { ATTEMPT_LIMIT, LOG_LIMIT, LOG_VIEW_LIMIT, PAGE_SIZE, number, count, ratio, formatCount, formatRate,
-    formatDuration, formatUptime, timestamp, priorityColor, activePriorities, chartSeries, chartSelection, rateAxis, quantile, attemptOutcome, providerOutcome, providerLabel,
+    formatDuration, formatUptime, timestamp, priorityColor, activePriorities, chartSeries, modelLatencySeries, chartSelection, rateAxis, quantile, attemptOutcome, providerOutcome, providerLabel,
     providerStreak, providerMatchesView, filterProviders, sortProviders, groupRequests, filterRequests, parseLog, logProviderIndex, filterLogs, LogBuffer, validateSnapshot };
 });

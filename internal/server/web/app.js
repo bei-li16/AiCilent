@@ -7,7 +7,7 @@
     providerView: 'all', groupBy: 'model',
     providerPage: 1, requestPage: 1, sort: 'priority', requests: [], requestSignature: '', logs: new C.LogBuffer(), follow: true,
     unread: 0, stopped: false, eventSource: null, selectedProvider: null, selectedRequest: null,
-    chartSelections: {}, chartCache: {}, confirm: null
+    chartSelections: {}, chartCache: {}, trendWindow: 0, latencyModel: '', confirm: null
   };
   let pollTimer, freshnessTimer, logFrame, toastTimer, statsController, chartResizeTimer;
   const setText = (element, text) => { if (element && element.textContent !== String(text)) element.textContent = String(text); };
@@ -269,7 +269,7 @@
   function drawCharts(force) {
     if (!state.data) return;
     for (const kind of ['rate', 'latency']) {
-      const curves = C.chartSeries(state.data, kind);
+      const curves = C.chartSeries(state.data, kind, state.trendWindow);
       if (!state.chartSelections[kind]) {
         let saved = null;
         try { saved = JSON.parse(localStorage.getItem('ai-dashboard.curves.' + kind)); } catch (_) { /* Storage can be disabled. */ }
@@ -288,12 +288,20 @@
         button.title = c.label + ' · ' + c.points.length + ' 个独立采样点；点击显示或隐藏，可多选';
       });
       const selected = curves.filter(c => selection.has(c.priority));
-      text(kind + 'Caption', selected.length ? '独立样本序号 · 非时间轴' + (kind === 'latency' ? ' · 秒 / 不含退避' : ' · 50 次滚动窗口') : '点击图例选择一条或多条曲线');
+      text(kind + 'Caption', selected.length ? '独立样本序号 · 非时间轴' + (kind === 'latency' ? ' · 秒 / 不含退避' : ' · 按 50 次上游尝试滚动计算') : '点击图例选择一条或多条曲线');
       setText($(kind + 'Empty').querySelector('strong'), !selected.length ? '未选择曲线' : kind === 'rate' ? '暂无成功率样本' : '暂无成功耗时样本');
       drawChart(kind, selected.filter(c => c.points.length), force);
     }
-    const values = C.chartSeries(state.data, 'latency')[0].points;
-    text('latencySample', '汇总 ' + values.length + ' 次成功尝试');
+    drawLatencyQuantiles();
+  }
+  function drawLatencyQuantiles() {
+    if (!state.data) return;
+    const models = C.modelLatencySeries(state.data, state.trendWindow);
+    if (state.latencyModel && !models.some(c => c.model === state.latencyModel)) state.latencyModel = '';
+    setOptions($('latencyModel'), [['', '全部模型'], ...models.map(c => [c.model, c.model])], state.latencyModel);
+    const values = state.latencyModel ? models.find(c => c.model === state.latencyModel).points :
+      C.chartSeries(state.data, 'latency', state.trendWindow)[0].points;
+    text('latencySample', values.length + ' 次成功尝试');
     const p50 = C.quantile(values, .5), p95 = C.quantile(values, .95);
     text('latencyP50', p50 === null ? '—' : C.formatDuration(p50 * 1000)); text('latencyP95', p95 === null ? '—' : C.formatDuration(p95 * 1000));
   }
@@ -659,6 +667,14 @@
     $(kind + 'Overall').addEventListener('click', () => { state.chartSelections[kind] = new Set([0]); save(); drawCharts(true); });
   }
   for (const kind of ['rate', 'latency']) bindChart(kind);
+  $('trendRequestWindow').addEventListener('change', () => {
+    state.trendWindow = Number($('trendRequestWindow').value);
+    drawCharts(true);
+  });
+  $('latencyModel').addEventListener('change', () => {
+    state.latencyModel = $('latencyModel').value;
+    drawLatencyQuantiles();
+  });
   $('logRows').addEventListener('click', event => {
     const button = event.target.closest('[data-copy-id]'); if (!button?.dataset.copyId) return;
     event.preventDefault(); event.stopPropagation(); copyText(button.dataset.copyId);

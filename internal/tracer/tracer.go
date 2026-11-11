@@ -124,14 +124,15 @@ func attemptTiming(latency, startGap time.Duration, attempt int) string {
 	return latency.String()
 }
 
-func (r *Recorder) LogStreamEnd(answered, terminated bool, err error) {
+func (r *Recorder) LogStreamEnd(answered, terminated bool, requestElapsed time.Duration, err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	reason := "protocol_complete"
 	if err != nil {
 		reason = err.Error()
 	}
-	fmt.Fprintf(r.logWriter, "%s STREAM   | answered=%t terminal_written=%t | end_reason=%s\n", r.prefix(), answered, terminated, reason)
+	fmt.Fprintf(r.logWriter, "%s STREAM   | answered=%t terminal_written=%t | request_elapsed=%v | end_reason=%s\n",
+		r.prefix(), answered, terminated, requestElapsed, reason)
 }
 
 func (r *Recorder) LogDegradeProvider(providerName string, priority int, reason string) {
