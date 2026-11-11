@@ -441,7 +441,9 @@
     if (state.pane !== 'logs') return;
     const modelFor = state.logModelFor || (() => '');
     const rows = state.logs.rows;
-    const previous = incremental && state.logView;
+    const priorityFor = C.logPriorityIndex(rows, state.data?.recent_attempts);
+    // A new attempt can resolve the priority of an earlier summary row.
+    const previous = incremental && !state.filters.priority && state.logView;
     let matching;
     if (previous) {
       let from = rows.length;
@@ -450,8 +452,8 @@
       let expired = 0;
       while (expired < matching.length && matching[expired].id < (rows[0]?.id ?? Infinity)) expired++;
       if (expired) matching.splice(0, expired);
-      matching.push(...C.filterLogs(rows.slice(from), state.filters, modelFor));
-    } else matching = C.filterLogs(rows, state.filters, modelFor);
+      matching.push(...C.filterLogs(rows.slice(from), state.filters, modelFor, priorityFor));
+    } else matching = C.filterLogs(rows, state.filters, modelFor, priorityFor);
     state.logView = { matching, lastId: rows.at(-1)?.id ?? 0 };
     const visible = matching.slice(-C.LOG_VIEW_LIMIT);
     const container = $('logRows'), scrollTop = container.scrollTop;
@@ -464,33 +466,42 @@
       const time = node('span', 'log-timestamp');
       time.append(node('span', 'log-time', log.time), node('span', 'log-event', log.event));
       const provider = node('span', 'log-provider');
+      if (log.provider) {
+        const heading = node('span', 'log-provider-heading');
+        const priority = node('span', 'badge log-priority'); priority.hidden = true;
+        heading.append(priority, node('span', 'log-provider-model'));
+        provider.append(heading);
+      }
       const providerName = node('span', 'log-provider-name', log.provider || '—');
       if (log.provider) providerName.title = log.provider;
       provider.append(providerName);
-      if (log.provider) {
-        provider.append(node('span', 'log-provider-model'));
-        if (log.providerRole) provider.append(node('span', 'log-provider-role', log.providerRole));
-      }
+      if (log.provider && log.providerRole) provider.append(node('span', 'log-provider-role', log.providerRole));
       const result = node('span', 'log-result');
       result.append(node('span', 'log-severity level-' + log.level, log.level.toUpperCase()));
       if (log.key !== 'neutral') {
-        const resultBadge = badge({ tone: log.key, label: log.label });
+        const resultBadge = badge({ tone: log.tone, label: log.label });
         const meanings = { limited: '这一行发出了上游请求，收到 HTTP 429', 'route-switch': '仅记录切换决定，这一行没有发出请求',
           'route-skip': '仅记录跳过原因，这一行没有发出请求', 'client-limited': '这是代理返回给客户端的状态，不另计一次上游尝试' };
-        if (meanings[log.key]) resultBadge.title = meanings[log.key];
+        if (meanings[log.key] || log.description) resultBadge.title = meanings[log.key] || log.description;
         result.append(resultBadge);
       }
       if (log.milestone) {
         details.classList.add(log.milestone.tone);
-        result.append(badge(log.milestone));
+        const milestone = badge(log.milestone);
+        if (log.description) milestone.title = log.description;
+        result.append(milestone);
       }
       const elapsed = node('span', 'log-elapsed');
-      if (log.timingLabel) elapsed.append(node('span', 'log-elapsed-label', log.timingLabel), node('span', '', timingText(log.timingMs)));
+      if (log.timingLabel) {
+        const value = node('span', '', C.formatLogDuration(log.timingMs));
+        value.title = log.timingDescription + (Number.isFinite(log.timingMs) ? ' 原始耗时：' + log.timingMs.toLocaleString('zh-CN', { maximumFractionDigits: 6 }) + ' ms。' : '');
+        elapsed.append(node('span', 'log-elapsed-label', log.timingLabel), value);
+      }
       else setText(elapsed, '—');
       if (log.retryGapMs !== null) {
         const label = node('span', 'log-elapsed-label log-retry-gap', '重试发起间隔');
         label.title = '同一账号上一次尝试发起到本次发起的实际间隔';
-        elapsed.append(label, node('span', '', timingText(log.retryGapMs)));
+        elapsed.append(label, node('span', '', C.formatLogDuration(log.retryGapMs)));
       }
       const attempt = node('span', 'log-attempt mono', log.attemptNumber || '—');
       if (log.attemptNumber) attempt.title = '本账号第几次尝试 / 本账号最大尝试次数（含首次）';
@@ -501,19 +512,33 @@
     };
     const update = (row, log) => {
       if (!log.provider) return;
-      const model = modelFor(log) || '模型未知';
+      const knownModel = modelFor(log), model = knownModel || '模型未知';
       const label = row.querySelector('.log-provider-model');
-      const display = log.priority ? model + ' · P' + log.priority : model;
-      setText(label, display);
-      if (label.title !== display) label.title = display;
+      setText(label, model);
+      if (label.title !== model) label.title = model;
+      const priority = priorityFor(log), tag = row.querySelector('.log-priority');
+      row.dataset.logPriority = String(priority);
+      row.classList.toggle('log-model-row', Boolean(knownModel));
+      row.style.setProperty('--log-priority-color', C.priorityColor(priority));
+      tag.hidden = priority <= 0;
+      if (priority > 0) {
+        setText(tag, 'P' + priority);
+        tag.style.setProperty('--priority-color', C.priorityColor(priority));
+        tag.title = '优先级 P' + priority + (log.priority ? '' : '（关联同一请求、同一供应商的尝试记录）');
+      }
     };
     if (previous) {
       const oldest = visible[0]?.id ?? Infinity;
       while (entries.firstElementChild && Number(entries.firstElementChild.dataset.key) < oldest) entries.firstElementChild.remove();
       const newest = Number(entries.lastElementChild?.dataset.key || 0);
+      const existing = new Map(Array.from(entries.children, row => [Number(row.dataset.key), row]));
       const additions = document.createDocumentFragment();
       for (const log of visible) {
-        if (log.id <= newest) continue;
+        if (log.id <= newest) {
+          const row = existing.get(log.id);
+          if (row && row.dataset.logPriority !== String(priorityFor(log))) update(row, log);
+          continue;
+        }
         const row = create(log); row.dataset.key = String(log.id); update(row, log); additions.append(row);
       }
       entries.append(additions);

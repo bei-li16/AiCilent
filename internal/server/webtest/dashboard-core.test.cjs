@@ -179,8 +179,49 @@ test('log milestones are distinct from outcomes and retry gap is separate from a
   assert.equal(parse('STREAM | answered=true terminal_written=true | end_reason=protocol_complete').milestone.tone, 'request-end');
   assert.equal(parse('STREAM | answered=true terminal_written=true | request_elapsed=9s | end_reason=protocol_complete').milestone.tone, 'request-end');
   assert.equal(parse('STREAM | answered=true terminal_written=false | end_reason=unexpected EOF').milestone, null);
-  assert.equal(parse('PROVIDER | [P2][1/3] acct | OK | 3s').label, '尝试成功');
-  assert.equal(parse('SUMMARY | result=SUCCESS | provider=acct | total=3s').label, '请求成功');
+  assert.equal(parse('PROVIDER | [P2][1/3] acct | OK | 3s').label, '上游成功');
+  assert.equal(parse('SUMMARY | result=SUCCESS | provider=acct | total=3s').label, '路由成功');
+});
+
+test('attempt, route and stream completion have distinct presentation without extra success counts', () => {
+  const parse = body => C.parseLog('[2026-11-12 01:35:28.677] [req] ' + body, 1);
+  const attempt = parse('PROVIDER | [P2][2/3] acct | OK | 25.001234s');
+  const summary = parse('SUMMARY | model=P1 | result=SUCCESS | provider=acct | rr=1 | total=25.002345s');
+  const stream = parse('STREAM | answered=true terminal_written=true | request_elapsed=25.201234s | end_reason=protocol_complete');
+  assert.deepEqual([attempt.label, summary.label, stream.milestone.label], ['上游成功', '路由成功', '流式完成']);
+  assert.deepEqual([attempt.tone, summary.tone, stream.milestone.tone], ['attempt-success', 'route-success', 'request-end']);
+  assert.deepEqual([attempt.key, summary.key, stream.key], ['success', 'success', 'neutral']);
+  assert.ok(attempt.description.includes('一次上游'));
+  assert.ok(summary.timingDescription.includes('重试、退避'));
+  assert.ok(stream.description.includes('不另计一次成功'));
+  assert.deepEqual([attempt, summary, stream].map(log => log.time), Array(3).fill('01:35:28.677'));
+  assert.deepEqual([attempt, summary, stream].map(log => C.formatLogDuration(log.timingMs)), ['25.001 s', '25.002 s', '25.201 s']);
+  assert.equal(parse('STREAM | answered=true terminal_written=false | end_reason=unexpected EOF').milestone, null);
+});
+
+test('summary priority follows the actual request/provider rather than the requested group or current config', () => {
+  const parse = (request, body) => C.parseLog('[2026-11-12 01:35:28.677] [' + request + '] ' + body, 1);
+  const first = parse('req', 'PROVIDER | [P1][1/3] a | FAIL | 1s');
+  const last = parse('req', 'PROVIDER | [P3][1/3] b | OK | 2s');
+  const summary = parse('req', 'SUMMARY | model=P1 | result=SUCCESS | provider=b | rr=0 | total=3s');
+  const unknown = parse('other', 'SUMMARY | model=P1 | result=SUCCESS | provider=b | rr=0 | total=3s');
+  const rows = [first, last, summary, unknown];
+  const priorityFor = C.logPriorityIndex(rows, [{ request_id: 'req', provider: 'b', priority: 2 }]);
+  assert.equal(priorityFor(summary), 3);
+  assert.equal(priorityFor(unknown), 0);
+  assert.equal(summary.priority, 0, 'do not change the original parsed record');
+  assert.deepEqual(C.filterLogs(rows, { priority: '3' }, () => '', priorityFor), [last, summary]);
+  assert.equal(C.logPriorityIndex([summary], [{ request_id: 'req', provider: 'b', priority: 3 }])(summary), 3);
+  assert.equal(C.logPriorityIndex([summary])(summary), 0);
+});
+
+test('log duration precision preserves milliseconds without changing compact chart durations', () => {
+  assert.equal(C.formatLogDuration(0), '0 ms');
+  assert.equal(C.formatLogDuration(.0455), '45.500 µs');
+  assert.equal(C.formatLogDuration(930.123456), '930.123 ms');
+  assert.equal(C.formatLogDuration(62500), '62.500 s');
+  for (const value of [null, undefined, NaN, -1]) assert.equal(C.formatLogDuration(value), '—');
+  assert.equal(C.formatDuration(25001.234), '25.0 s');
 });
 
 test('trend windows count client requests and use the same range for model latency', () => {

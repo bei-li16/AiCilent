@@ -20,6 +20,11 @@
     if (ms < 60000) return (ms / 1000).toFixed(ms < 10000 ? 2 : 1) + ' s';
     return Math.floor(ms / 60000) + 'm ' + Math.round(ms % 60000 / 1000) + 's';
   }
+  function formatLogDuration(ms) {
+    if (!Number.isFinite(ms) || ms < 0) return '—';
+    if (ms < 1 && ms > 0) return (ms * 1000).toFixed(3) + ' µs';
+    return ms < 1000 ? Number(ms.toFixed(3)) + ' ms' : (ms / 1000).toFixed(3) + ' s';
+  }
   function formatUptime(text) {
     if (!text) return '运行时长未知';
     const hours = Number((String(text).match(/(\d+)h/) || [])[1] || 0);
@@ -246,7 +251,7 @@
     else if (event === 'ACCESS' && status === 429) { key = 'client-limited'; label = '返回 429'; }
     else if (/\|\s*FAIL\s*\||result=FAIL|stream interrupted/i.test(resultBody) || status >= 400) { key = 'failed'; label = status ? '失败 ' + status : '失败'; }
     else if (attempt ? elapsed?.[1] === 'OK' : /\|\s*OK\s*\||result=SUCCESS/.test(resultBody)) {
-      key = 'success'; label = attempt ? '尝试成功' : event === 'SUMMARY' ? '请求成功' : '成功';
+      key = 'success'; label = attempt ? '上游成功' : event === 'SUMMARY' ? '路由成功' : '成功';
     }
     // The backend emits event categories rather than a severity field. Keep
     // user-supplied request/body text from creating false ERROR/WARN levels.
@@ -261,9 +266,21 @@
     const milestone = event === 'INBOUND' ? { label: '请求发起', tone: 'request-start' } :
       event === 'FIRST_RESPONSE' ? { label: '首次成功响应', tone: 'request-first' } :
       event === 'STREAM' && /\bterminal_written=true\s*\|\s*(?:request_elapsed=\S+\s*\|\s*)?end_reason=protocol_complete$/.test(body) ?
-        { label: '流式结束', tone: 'request-end' } : null;
+        { label: '流式完成', tone: 'request-end' } : null;
+    const tone = key === 'success' && attempt ? 'attempt-success' : key === 'success' && event === 'SUMMARY' ? 'route-success' : key;
+    const description = attempt ? '本账号的一次上游调用结果；流式调用包含读取、转换和向客户端写出。仅计一次上游尝试。' :
+      event === 'SUMMARY' ? '整个路由的汇总结果，包含此前的重试、退避和换号；不是另一次上游尝试。请求处理总耗时见 ACCESS。' :
+      event === 'STREAM' ? '本次流式转发的协议终止状态；完成表示已写出结束标记，不代表客户端应用已经消费完响应，也不另计一次成功。' : '';
+    const timingDescription = {
+      PROVIDER: '本次账号尝试开始到转发返回，包含本次流式传输，不含此前尝试和两次尝试之间的退避。',
+      SUMMARY: '从路由记录器创建到输出汇总，包含重试、退避及换号，不是最后一个账号的单次耗时。',
+      STREAM: '从代理接收客户端请求到本次流式转发结束，不是纯传输时间。',
+      ACCESS: '从代理接收客户端请求到请求处理结束，包含请求解析、路由、重试及收尾。',
+      FIRST_RESPONSE: '从代理接收客户端请求到首次写出 HTTP 2xx 响应正文，不代表完整响应已结束。',
+      TTFB: '从本次上游 HTTP 调用开始到收到响应头，不包含后续响应正文传输。'
+    }[event] || '';
     return { id, raw, body, time: match ? match[1].slice(11) : '—', requestId: match && match[2] !== '-' ? match[2] : '',
-      event, provider, providerRole, priority, status, key, label, level, detail, milestone, attemptNumber: attempt?.[2] || null,
+      event, provider, providerRole, priority, status, key, label, tone, description, timingDescription, level, detail, milestone, attemptNumber: attempt?.[2] || null,
       retryGapMs, timingLabel, timingMs: event === 'INBOUND' ? 0 : timingLabel ? durationMs(elapsed[2]) : null };
   }
   function logProviderIndex(providers, attempts) {
@@ -277,12 +294,23 @@
     }
     return log => requestModels.get(log.requestId)?.get(log.provider) || models.get(log.provider) || '';
   }
-  function filterLogs(logs, filter, modelFor = () => '') {
+  function logPriorityIndex(logs, attempts = []) {
+    const byRequest = new Map();
+    const remember = (requestId, provider, priority) => {
+      if (!requestId || !provider || !Number.isInteger(priority) || priority <= 0) return;
+      if (!byRequest.has(requestId)) byRequest.set(requestId, new Map());
+      byRequest.get(requestId).set(provider, priority);
+    };
+    for (const attempt of attempts) remember(attempt.request_id, attempt.provider, Number(attempt.priority));
+    for (const log of logs) remember(log.requestId, log.provider, log.priority);
+    return log => log.priority > 0 ? log.priority : byRequest.get(log.requestId)?.get(log.provider) || 0;
+  }
+  function filterLogs(logs, filter, modelFor = () => '', priorityFor = log => log.priority) {
     const query = String(filter.query || '').trim().toLowerCase();
     return logs.filter(log => {
       const model = modelFor(log);
       return (!query || log.raw.toLowerCase().includes(query) || model.toLowerCase().includes(query)) &&
-        (!filter.priority || log.priority === Number(filter.priority)) && (!filter.result || log.key === filter.result) &&
+        (!filter.priority || priorityFor(log) === Number(filter.priority)) && (!filter.result || log.key === filter.result) &&
         (!filter.model || (model ? model === filter.model : log.raw.includes(filter.model))) &&
         (!filter.level || (filter.level === 'warn+' ? ['warn', 'error'].includes(log.level) : log.level === filter.level));
     });
@@ -311,6 +339,6 @@
     return normalized;
   }
   return { ATTEMPT_LIMIT, LOG_LIMIT, LOG_VIEW_LIMIT, PAGE_SIZE, number, count, ratio, formatCount, formatRate,
-    formatDuration, formatUptime, timestamp, priorityColor, activePriorities, chartSeries, modelLatencySeries, chartSelection, rateAxis, quantile, attemptOutcome, providerOutcome, providerLabel,
-    providerStreak, providerMatchesView, filterProviders, sortProviders, groupRequests, filterRequests, parseLog, logProviderIndex, filterLogs, LogBuffer, validateSnapshot };
+    formatDuration, formatLogDuration, formatUptime, timestamp, priorityColor, activePriorities, chartSeries, modelLatencySeries, chartSelection, rateAxis, quantile, attemptOutcome, providerOutcome, providerLabel,
+    providerStreak, providerMatchesView, filterProviders, sortProviders, groupRequests, filterRequests, parseLog, logProviderIndex, logPriorityIndex, filterLogs, LogBuffer, validateSnapshot };
 });

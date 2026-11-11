@@ -113,14 +113,28 @@ tbody tr:nth-child(even) td{background:#14223666}tbody tr:hover td{background:#1
 .log-timestamp { grid-area: time; }
 #logEntries .request-id { grid-area: request; }
 .log-provider { grid-area: provider; overflow-wrap: anywhere; }
+.log-provider-heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+}
+.log-priority {
+  flex: none;
+  color: var(--priority-color);
+  background: #1b293b;
+  border-color: var(--priority-color);
+}
 .log-provider-name, .log-provider-model {
+  min-width: 0;
   max-inline-size: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.log-provider-name { color: var(--text); font-weight: 650; }
-.log-provider-model { color: #a6c8ff; }
+.log-provider-name { color: var(--muted); }
+.log-provider-model { color: var(--text); font-weight: 650; }
 .log-provider-role { color: var(--muted); font-size: 10px; }
 .log-result { grid-area: result; }
 .log-attempt { grid-area: attempt; color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -130,6 +144,15 @@ tbody tr:nth-child(even) td{background:#14223666}tbody tr:hover td{background:#1
 #logEntries .log-message { grid-area: detail; }
 .log-result .badge { margin-top: 1px; }
 .log-result .level-warn { color: #e8e6da; }
+.log-row.log-model-row {
+  background: color-mix(in srgb, var(--log-priority-color) 11%, transparent);
+  box-shadow: inset 3px 0 var(--log-priority-color);
+}
+.log-model-row > summary:hover, .log-model-row[open] > summary {
+  background: color-mix(in srgb, var(--log-priority-color) 9%, transparent);
+}
+.badge.attempt-success { color:#8be1a8;background:#173927;border-color:#3c7852; }
+.badge.route-success { color:#a9c9ff;background:#1b3053;border-color:#5279b2; }
 .badge.route-switch { color:#ffc0e7;background:#45263f;border-color:#9e6589; }
 .badge.route-skip { color:#c6cedd;background:#2b3444;border-color:#4a596e; }
 .badge.client-limited { color:#f6bac6;background:#402736;border-color:#805268; }
