@@ -109,6 +109,8 @@ type Snapshot struct {
 	Providers            []ProviderStats `json:"providers"`
 	TotalReq             int64           `json:"total_req"`        // 上游尝试次数（含重试/降级）
 	TotalClientReq       int64           `json:"total_client_req"` // 客户端请求数
+	TotalClientCompleted int64           `json:"total_client_completed"`
+	TotalClientSuccess   int64           `json:"total_client_success"`
 	TotalSuccess         int64           `json:"total_success"`
 	TotalFail            int64           `json:"total_fail"`
 	TotalCanceled        int64           `json:"total_canceled"`
@@ -122,6 +124,16 @@ type Snapshot struct {
 	LatencyCurves        []HitRateCurve  `json:"latency_curves"`        // 同一成功样本口径，0=汇总，其余按优先级独立采样
 	ConfiguredPriorities []int           `json:"configured_priorities"` // 由运行中的 YAML 配置填充，历史记录不参与
 	RecentAttempts       []AttemptStats  `json:"recent_attempts"`
+	RecentRequests       []RequestTiming `json:"recent_requests"`
+}
+
+type RequestTiming struct {
+	RequestID       string    `json:"request_id"`
+	Model           string    `json:"model"`
+	EndedAt         time.Time `json:"ended_at"`
+	StatusCode      int       `json:"status_code"`
+	FirstResponseMs *float64  `json:"first_response_ms"`
+	TotalMs         float64   `json:"total_ms"`
 }
 
 type AttemptStats struct {
@@ -139,17 +151,20 @@ type AttemptStats struct {
 const recentAttemptsCap = 200
 
 type Collector struct {
-	mu            sync.Mutex
-	providers     map[string]*ProviderStats
-	totalReq      atomic.Int64 // 上游尝试次数
-	totalClient   atomic.Int64 // 客户端请求数
-	totalSuccess  atomic.Int64
-	totalFail     atomic.Int64
-	totalCanceled atomic.Int64
-	startTime     time.Time
-	running       atomic.Bool
-	statsPath     string
-	fileMu        sync.Mutex
+	mu              sync.Mutex
+	providers       map[string]*ProviderStats
+	totalReq        atomic.Int64 // 上游尝试次数
+	totalClient     atomic.Int64 // 客户端请求数
+	clientCompleted int64
+	clientSuccess   int64
+	clientEpoch     uint64
+	totalSuccess    atomic.Int64
+	totalFail       atomic.Int64
+	totalCanceled   atomic.Int64
+	startTime       time.Time
+	running         atomic.Bool
+	statsPath       string
+	fileMu          sync.Mutex
 	// Hit-rate rolling windows (last hitWindowSize outcomes) + time series of
 	// rolling success rates. priority 0 = overall.
 	overallWin     rollingHit
@@ -159,6 +174,7 @@ type Collector struct {
 	latencySeries  []float64 // 成功命中耗时序列（秒，≤240）
 	prioLatency    map[int][]float64
 	recentAttempts []AttemptStats
+	recentRequests []RequestTiming
 }
 
 func New(statsPath string) *Collector {
@@ -311,8 +327,25 @@ func (c *Collector) record(requestID, name, modelID string, priority int, succes
 // RecordClientRequest increments the client-side request counter once per
 // inbound client request (distinct from upstream attempts, which include
 // retries and degradation).
-func (c *Collector) RecordClientRequest() {
+func (c *Collector) RecordClientRequest() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.totalClient.Add(1)
+	return c.clientEpoch
+}
+
+// RecordClientOutcome counts the result once per accepted request.
+// Requests in flight during reset belong to the previous counting period.
+func (c *Collector) RecordClientOutcome(epoch uint64, success bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if epoch != c.clientEpoch {
+		return
+	}
+	c.clientCompleted++
+	if success {
+		c.clientSuccess++
+	}
 }
 
 func (c *Collector) Snapshot() Snapshot {
@@ -343,8 +376,10 @@ func (c *Collector) Snapshot() Snapshot {
 		latencyCurves = append(latencyCurves, HitRateCurve{Priority: p, Points: copySeries(c.prioLatency[p])})
 	}
 	recentAttempts := append([]AttemptStats(nil), c.recentAttempts...)
+	recentRequests := append([]RequestTiming(nil), c.recentRequests...)
 	totalReq := c.totalReq.Load()
 	totalClient := c.totalClient.Load()
+	clientCompleted, clientSuccess := c.clientCompleted, c.clientSuccess
 	totalSuccess := c.totalSuccess.Load()
 	totalFail := c.totalFail.Load()
 	totalCanceled := c.totalCanceled.Load()
@@ -357,21 +392,35 @@ func (c *Collector) Snapshot() Snapshot {
 	uptime := time.Since(c.startTime).Round(time.Second).String()
 
 	return Snapshot{
-		Providers:      providers,
-		TotalReq:       totalReq,
-		TotalClientReq: totalClient,
-		TotalSuccess:   totalSuccess,
-		TotalFail:      totalFail,
-		TotalCanceled:  totalCanceled,
-		TotalRate:      totalRate,
-		Running:        running,
-		StartTime:      c.startTime,
-		Uptime:         uptime,
-		Curves:         curves,
-		LatencyCurve:   latencyCurve,
-		LatencyCurves:  latencyCurves,
-		RecentAttempts: recentAttempts,
+		Providers:            providers,
+		TotalReq:             totalReq,
+		TotalClientReq:       totalClient,
+		TotalClientCompleted: clientCompleted,
+		TotalClientSuccess:   clientSuccess,
+		TotalSuccess:         totalSuccess,
+		TotalFail:            totalFail,
+		TotalCanceled:        totalCanceled,
+		TotalRate:            totalRate,
+		Running:              running,
+		StartTime:            c.startTime,
+		Uptime:               uptime,
+		Curves:               curves,
+		LatencyCurve:         latencyCurve,
+		LatencyCurves:        latencyCurves,
+		RecentAttempts:       recentAttempts,
+		RecentRequests:       recentRequests,
 	}
+}
+
+// RecordRequestTiming retains bounded request-level samples in memory.
+func (c *Collector) RecordRequestTiming(sample RequestTiming) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.recentRequests) == recentAttemptsCap {
+		copy(c.recentRequests, c.recentRequests[1:])
+		c.recentRequests = c.recentRequests[:recentAttemptsCap-1]
+	}
+	c.recentRequests = append(c.recentRequests, sample)
 }
 
 func copySeries(s []float64) []float64 {
@@ -415,8 +464,11 @@ func (c *Collector) Reset() {
 	c.latencySeries = nil
 	c.prioLatency = make(map[int][]float64)
 	c.recentAttempts = nil
+	c.recentRequests = nil
 	c.totalReq.Store(0)
 	c.totalClient.Store(0)
+	c.clientCompleted, c.clientSuccess = 0, 0
+	c.clientEpoch++
 	c.totalSuccess.Store(0)
 	c.totalFail.Store(0)
 	c.totalCanceled.Store(0)
@@ -451,12 +503,14 @@ type persistedProvider struct {
 }
 
 type persistedState struct {
-	Providers     []persistedProvider `json:"providers"`
-	TotalReq      int64               `json:"total_req"`
-	TotalClient   int64               `json:"total_client_req"`
-	TotalSuccess  int64               `json:"total_success"`
-	TotalFail     int64               `json:"total_fail"`
-	TotalCanceled int64               `json:"total_canceled"`
+	Providers       []persistedProvider `json:"providers"`
+	TotalReq        int64               `json:"total_req"`
+	TotalClient     int64               `json:"total_client_req"`
+	ClientCompleted int64               `json:"total_client_completed"`
+	ClientSuccess   int64               `json:"total_client_success"`
+	TotalSuccess    int64               `json:"total_success"`
+	TotalFail       int64               `json:"total_fail"`
+	TotalCanceled   int64               `json:"total_canceled"`
 }
 
 func (c *Collector) Save() {
@@ -467,12 +521,14 @@ func (c *Collector) Save() {
 	defer c.fileMu.Unlock()
 	c.mu.Lock()
 	state := persistedState{
-		TotalReq:      c.totalReq.Load(),
-		TotalClient:   c.totalClient.Load(),
-		TotalSuccess:  c.totalSuccess.Load(),
-		TotalFail:     c.totalFail.Load(),
-		TotalCanceled: c.totalCanceled.Load(),
-		Providers:     make([]persistedProvider, 0, len(c.providers)),
+		TotalReq:        c.totalReq.Load(),
+		TotalClient:     c.totalClient.Load(),
+		ClientCompleted: c.clientCompleted,
+		ClientSuccess:   c.clientSuccess,
+		TotalSuccess:    c.totalSuccess.Load(),
+		TotalFail:       c.totalFail.Load(),
+		TotalCanceled:   c.totalCanceled.Load(),
+		Providers:       make([]persistedProvider, 0, len(c.providers)),
 	}
 	for _, ps := range c.providers {
 		state.Providers = append(state.Providers, persistedProvider{
@@ -545,6 +601,8 @@ func (c *Collector) load() {
 		}
 		c.providers[p.Name] = ps
 	}
+	c.clientCompleted = state.ClientCompleted
+	c.clientSuccess = state.ClientSuccess
 	c.mu.Unlock()
 	// Older drafts excluded cancellations from the global attempt count.
 	if state.TotalCanceled < canceled {

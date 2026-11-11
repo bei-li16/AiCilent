@@ -53,11 +53,10 @@ func New(cfg *config.Config, configPath string) *Instance {
 		fileW = os.Stdout
 	}
 	combinedW := io.MultiWriter(fileW, sseHub)
-	gin.DefaultWriter = combinedW
 
 	r := gin.New()
 
-	r.Use(middleware.Logger())
+	r.Use(middleware.Logger(combinedW))
 	r.Use(middleware.DetectFormat())
 
 	engine := router.NewEngine(cfg, configPath, combinedW, fileW, statsCollector)
@@ -78,13 +77,14 @@ func New(cfg *config.Config, configPath string) *Instance {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
 
-	r.POST("/v1/chat/completions", engine.HandleRequest)
-	r.POST("/chat/completions", engine.HandleRequest)
-	r.POST("/v1/messages", engine.HandleRequest)
-	r.POST("/v1/responses", engine.HandleRequest)
+	timing := middleware.RequestTiming(combinedW, statsCollector.RecordRequestTiming)
+	r.POST("/v1/chat/completions", timing, engine.HandleRequest)
+	r.POST("/chat/completions", timing, engine.HandleRequest)
+	r.POST("/v1/messages", timing, engine.HandleRequest)
+	r.POST("/v1/responses", timing, engine.HandleRequest)
 	// Some OpenAI-compatible clients (including Codex) append /responses
 	// directly to the configured base URL instead of using the /v1 prefix.
-	r.POST("/responses", engine.HandleRequest)
+	r.POST("/responses", timing, engine.HandleRequest)
 
 	r.GET("/", serveWeb("web/index.html", "text/html; charset=utf-8"))
 	r.GET("/style.css", serveWeb("web/style.css", "text/css; charset=utf-8"))

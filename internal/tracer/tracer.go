@@ -48,12 +48,13 @@ func (r *Recorder) prefix() string {
 
 // LogRequest logs the inbound request line. The level controls how the body
 // is rendered:
-//   "off"     — body omitted entirely
-//   "snippet" — body is a short single-line snippet (printed as msg=<snippet>)
-//   "full"    — the full pretty-printed request structure is written to the
-//               file-only sink (NOT the SSE stream, to avoid flooding the live
-//               console with potentially huge bodies). The SSE/header line gets
-//               a placeholder so the live console still shows a request arrived.
+//
+//	"off"     — body omitted entirely
+//	"snippet" — body is a short single-line snippet (printed as msg=<snippet>)
+//	"full"    — the full pretty-printed request structure is written to the
+//	            file-only sink (NOT the SSE stream, to avoid flooding the live
+//	            console with potentially huge bodies). The SSE/header line gets
+//	            a placeholder so the live console still shows a request arrived.
 func (r *Recorder) LogRequest(method, path, level, body string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -83,7 +84,7 @@ func (r *Recorder) LogRoute(mode string, filter string, matched []string) {
 	fmt.Fprint(r.logWriter, msg)
 }
 
-func (r *Recorder) LogAttempt(providerName string, priority, attemptNum, maxRetries int, success bool, errMsg string, latency time.Duration) {
+func (r *Recorder) LogAttempt(providerName string, priority, attemptNum, maxRetries int, success bool, errMsg string, latency, startGap time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -91,11 +92,9 @@ func (r *Recorder) LogAttempt(providerName string, priority, attemptNum, maxRetr
 	if !success {
 		status = "FAIL"
 	}
-	detail := ""
-	if success {
-		detail = fmt.Sprintf("%v", latency)
-	} else {
-		detail = fmt.Sprintf("%v | %s", latency, errMsg)
+	detail := attemptTiming(latency, startGap, attemptNum)
+	if !success {
+		detail += " | " + errMsg
 	}
 
 	msg := fmt.Sprintf("%s PROVIDER | [P%d][%d/%d] %s | %s | %s\n",
@@ -111,11 +110,18 @@ func (r *Recorder) LogSkipRetry(providerName string, priority int, statusCode in
 	fmt.Fprint(r.logWriter, msg)
 }
 
-func (r *Recorder) LogAttemptCanceled(providerName string, priority, attempt, max int, latency time.Duration) {
+func (r *Recorder) LogAttemptCanceled(providerName string, priority, attempt, max int, latency, startGap time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	fmt.Fprintf(r.logWriter, "%s PROVIDER | [P%d][%d/%d] %s | CANCELED | %v | downstream disconnected\n",
-		r.prefix(), priority, attempt, max, providerName, latency)
+	fmt.Fprintf(r.logWriter, "%s PROVIDER | [P%d][%d/%d] %s | CANCELED | %s | downstream disconnected\n",
+		r.prefix(), priority, attempt, max, providerName, attemptTiming(latency, startGap, attempt))
+}
+
+func attemptTiming(latency, startGap time.Duration, attempt int) string {
+	if attempt > 1 {
+		return fmt.Sprintf("%v | retry_start_gap=%v", latency, startGap)
+	}
+	return latency.String()
 }
 
 func (r *Recorder) LogStreamEnd(answered, terminated bool, err error) {

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -12,16 +13,19 @@ import (
 )
 
 const CtxReqIDKey = "req_id"
+const requestStartKey = "request_start"
+const requestEndKey = "request_end"
 
 var reqCounter uint64
 
-func Logger() gin.HandlerFunc {
+func Logger(writer io.Writer) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		reqID := newRequestID()
 		c.Set(CtxReqIDKey, reqID)
 		c.Header("X-Request-ID", reqID)
 
 		start := time.Now()
+		c.Set(requestStartKey, start)
 		path := c.Request.URL.Path
 
 		c.Next()
@@ -31,11 +35,14 @@ func Logger() gin.HandlerFunc {
 		}
 
 		latency := time.Since(start)
+		if end, ok := c.Get(requestEndKey); ok {
+			latency = end.(time.Time).Sub(start)
+		}
 		status := c.Writer.Status()
 		method := c.Request.Method
 		format := GetRequestFormat(c)
 
-		fmt.Fprintf(gin.DefaultWriter, "[%s] [%s] ACCESS   | %s %s | %d | %v | format=%s\n",
+		fmt.Fprintf(writer, "[%s] [%s] ACCESS   | %s %s | %d | %v | format=%s\n",
 			time.Now().Format("2006-01-02 15:04:05.000"),
 			reqID,
 			method, path, status, latency, format)

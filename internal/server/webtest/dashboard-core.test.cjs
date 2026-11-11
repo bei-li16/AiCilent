@@ -60,7 +60,7 @@ test('bounded logs count evictions, truncate long lines and keep untrusted text 
   assert.equal(buffer.rows.length,3); assert.equal(buffer.dropped,7);
   assert.equal(buffer.rows[0].body,'line 7');
   assert.ok(C.parseLog('x'.repeat(20000),1).raw.length<16500);
-  const row=C.parseLog('[2026-11-06 10:00:00.000] [full-id] ATTEMPT | [P2][1/3] provider-a | API error (status 429): <script>bad</script>',1);
+  const row=C.parseLog('[2026-11-06 10:00:00.000] [full-id] PROVIDER | [P2][1/3] provider-a | FAIL | 20ms | API error (status 429): <script>bad</script>',1);
   assert.equal(row.key,'limited'); assert.equal(row.priority,2); assert.equal(row.provider,'provider-a'); assert.ok(row.body.includes('<script>'));
   buffer.clear(); assert.equal(buffer.rows.length,0); assert.equal(buffer.dropped,0);
 });
@@ -83,7 +83,7 @@ test('failure streak views and sorting preserve unknown historical state', () =>
 });
 test('log levels distinguish diagnostics, rate limits, failures, success and cancellation', () => {
   const raw=(event,body)=>`[2026-11-06 10:00:00.000] [full-id] ${event} | ${body}`;
-  const rows=[C.parseLog(raw('ROUTER','mode=P1'),1),C.parseLog(raw('PROVIDER','[P1][1/3] a | FAIL | status 429'),2),C.parseLog(raw('PROVIDER','[P1][2/3] a | FAIL | status 502'),3),C.parseLog(raw('SUMMARY','result=SUCCESS'),4),C.parseLog(raw('PROVIDER','CANCELED'),5)];
+  const rows=[C.parseLog(raw('ROUTER','mode=P1'),1),C.parseLog(raw('PROVIDER','[P1][1/3] a | FAIL | 10ms | API error (status 429)'),2),C.parseLog(raw('PROVIDER','[P1][2/3] a | FAIL | 20ms | API error (status 502)'),3),C.parseLog(raw('SUMMARY','result=SUCCESS'),4),C.parseLog(raw('PROVIDER','[P1][3/3] a | CANCELED | 0s'),5)];
   assert.deepEqual(rows.map(l=>l.level),['debug','warn','error','info','info']);
   assert.equal(C.filterLogs(rows,{level:'warn+'}).length,2);
   assert.equal(C.filterLogs(rows,{level:'error'})[0].status,502);
@@ -98,6 +98,9 @@ test('rate-limit logs distinguish the failed attempt from the next provider and 
   const attempt = C.parseLog(prefix + 'PROVIDER | [P2][3/3] account-a | FAIL | 373ms | API error (status 429)', 1);
   const next = C.parseLog(prefix + 'ROUTER | degrade to next provider | account-b [P3] | reason=API error (status 429)', 2);
   const skip = C.parseLog(prefix + 'QUEUE | [P3] | provider account-b skipping (API error (status 429)) | rr=2 size=15', 3);
+  const access = C.parseLog(prefix + 'ACCESS | POST /chat/completions | 429 | 2s | format=openai', 4);
+  const other = C.parseLog(prefix + 'PROVIDER | [P2][1/3] account-a | FAIL | 12ms | protocol error: text says status 429', 5);
+  const rows = [attempt, next, skip, access, other];
   const modelFor = C.logProviderIndex(
     [{ name: 'account-a', model_id: 'old-model' }, { name: 'account-b', model_id: 'deepseek-flash' }],
     [{ request_id: 'request-1', provider: 'account-a', model_id: 'glm-5.3' }]
@@ -105,14 +108,72 @@ test('rate-limit logs distinguish the failed attempt from the next provider and 
 
   assert.equal(attempt.provider, 'account-a');
   assert.equal(attempt.label, '限流 429');
-  assert.match(attempt.detail, /^尝试 3\/3/);
+  assert.equal(attempt.attemptNumber, '3/3');
+  assert.match(attempt.detail, /^FAIL \| API error/);
   assert.equal(next.provider, 'account-b');
   assert.equal(next.providerRole, '切换目标');
-  assert.equal(next.label, '切换 · 429');
+  assert.equal(next.label, '限流转接');
   assert.equal(next.priority, 3);
   assert.equal(skip.providerRole, '跳过对象');
-  assert.equal(skip.label, '跳过 · 429');
+  assert.equal(skip.label, '因 429 跳过');
+  assert.deepEqual([next, skip, access].map(l => l.attemptNumber), [null, null, null]);
   assert.equal(modelFor(next), 'deepseek-flash');
-  assert.deepEqual(C.filterLogs([attempt, next, skip], { query: 'glm-5.3', result: 'limited' }, modelFor), [attempt]);
-  assert.deepEqual(C.filterLogs([attempt, next, skip], { model: 'deepseek-flash', result: 'limited' }, modelFor), [next, skip]);
+  assert.deepEqual(C.filterLogs(rows, { result: 'limited' }, modelFor), [attempt]);
+  assert.deepEqual(C.filterLogs(rows, { model: 'deepseek-flash', result: 'route-switch' }, modelFor), [next]);
+  assert.deepEqual(C.filterLogs(rows, { result: 'route-skip' }, modelFor), [skip]);
+  assert.deepEqual(C.filterLogs(rows, { result: 'client-limited' }, modelFor), [access]);
+  assert.deepEqual(C.filterLogs(rows, { result: 'failed' }, modelFor), [other]);
+});
+test('request timing is independent of attempts and preserves local failures', () => {
+  const groups = C.groupRequests([
+    { request_id: 'ok', provider: 'p1', model_id: 'glm', priority: 2, latency_ms: 500, status_code: 429 },
+    { request_id: 'ok', provider: 'p2', model_id: 'glm', priority: 2, latency_ms: 3000, success: true }
+  ], [
+    { request_id: 'ok', model: 'P2', ended_at: '2026-11-10T00:00:01Z', status_code: 200, first_response_ms: 1800, total_ms: 4300 },
+    { request_id: 'bad', model: 'P6', ended_at: '2026-11-10T00:00:02Z', status_code: 503, first_response_ms: null, total_ms: 12 }
+  ]);
+  assert.equal(groups[0].outcome.key, 'failed');
+  assert.equal(groups[0].timing.first_response_ms, null);
+  assert.deepEqual(groups[0].priorities, [6]);
+  assert.equal(groups[1].timing.first_response_ms, 1800);
+  assert.equal(groups[1].timing.total_ms, 4300);
+});
+
+test('log timings preserve the event clock and separate different elapsed time scopes', () => {
+  const prefix = '[2026-11-10 12:53:17.398] [req] ';
+  for (const [body, label, ms] of [
+    ['PROVIDER | [P2][3/3] acct | FAIL | 1.3810652s | API error (status 429)', '单次尝试', 1381.0652],
+    ['TTFB | acct[P2] | upstream header=3.010456s | status=200', '上游响应头', 3010.456],
+    ['FIRST_RESPONSE | elapsed=7.02s', '请求首响', 7020],
+    ['SUMMARY | result=SUCCESS | provider=acct | rr=1 | total=1m2.5s', '路由耗时', 62500],
+    ['ACCESS | POST /chat/completions | 200 | 45.5µs | format=openai', '请求总耗时', .0455]
+  ]) {
+    const row = C.parseLog(prefix + body, 1);
+    assert.equal(row.time, '12:53:17.398');
+    assert.equal(row.timingLabel, label);
+    assert.ok(Math.abs(row.timingMs - ms) < 0.000001);
+    assert.equal(row.raw, prefix + body);
+  }
+  assert.equal(C.parseLog(prefix + 'INBOUND | POST / | msg=total=2s', 1).timingMs, null);
+});
+test('success rate axis follows only the plotted values and stays within percentage bounds', () => {
+  assert.deepEqual(C.rateAxis([0, 24, 100]), { minimum: 0, maximum: 100 });
+  assert.deepEqual(C.rateAxis([12, 14, 21]), { minimum: 10, maximum: 25 });
+  assert.ok(C.rateAxis([96, 100]).minimum >= 90);
+  for (const n of [0, 50, 100]) {
+    const { minimum, maximum } = C.rateAxis([n]);
+    assert.ok(minimum >= 0 && minimum <= n && n <= maximum && maximum <= 100 && minimum < maximum);
+  }
+});
+
+test('log milestones are distinct from outcomes and retry gap is separate from attempt duration', () => {
+  const parse = body => C.parseLog('[2026-11-11 09:57:46.197] [req] ' + body, 1);
+  const retry = parse('PROVIDER | [P2][2/3] acct | FAIL | 556ms | retry_start_gap=1.001s | API error (status 429)');
+  assert.equal(retry.timingMs, 556);
+  assert.ok(Math.abs(retry.retryGapMs - 1001) < 1e-6);
+  assert.equal(retry.key, 'limited');
+  assert.equal(parse('INBOUND | POST /chat/completions | model=P2').milestone.tone, 'request-start');
+  assert.equal(parse('FIRST_RESPONSE | elapsed=1s').milestone.tone, 'request-first');
+  assert.equal(parse('STREAM | answered=true terminal_written=true | end_reason=protocol_complete').milestone.tone, 'request-end');
+  assert.equal(parse('STREAM | answered=true terminal_written=false | end_reason=unexpected EOF').milestone, null);
 });

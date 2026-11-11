@@ -23,15 +23,11 @@
         <span class="badge neutral" id="serviceStatus"><i></i>服务状态待获取</span>
         <span class="connection" id="logStatus"><i></i>日志连接中</span>
         <span class="connection" id="statsStatus"><i></i>统计连接中</span>
-        <details class="management" id="managementMenu">
-          <summary class="button secondary">服务管理 <span aria-hidden="true">⌄</span></summary>
-          <div class="management-menu">
-            <p>管理操作会影响当前服务</p>
-            <button type="button" id="serviceControl">获取服务状态中…</button>
-            <button type="button" id="resetStats" class="danger-text">重置服务端统计…</button>
-            <button type="button" id="clearServerLogs" class="danger-text">清空服务端日志文件…</button>
-          </div>
-        </details>
+        <div class="management-actions" role="group" aria-label="服务管理">
+          <button type="button" id="serviceControl" class="button secondary" disabled>等待状态</button>
+          <button type="button" id="resetStats" class="button secondary" title="重置服务端统计">重置统计</button>
+          <button type="button" id="clearServerLogs" class="button secondary" title="清空服务端日志文件">清空日志</button>
+        </div>
       </div>
     </header>
 
@@ -41,6 +37,7 @@
         <div id="dataNotice" class="data-notice" role="status" hidden></div>
         <div class="metrics">
           <article class="metric"><div class="metric-label">客户端请求 <span class="info" title="累计进入网关的请求，不等于最终已完成请求数">i</span></div><div class="metric-value" id="totalClient">—</div><p>累计进入网关的请求</p></article>
+          <article class="metric" title="按客户端请求统计，完整成功只计一次。旧版没有保存的结果不会回填，尚未结束的请求不计入结果。"><div class="metric-label">客户端请求成功</div><div class="metric-value client-success-value" id="totalClientSuccess">—</div><p id="clientSuccessScope">从本次升级开始记录结果</p></article>
           <article class="metric"><div class="metric-label">上游尝试</div><div class="metric-value" id="totalAttempts">—</div><p id="attemptAverage">包含重试与账号切换</p></article>
           <article class="metric featured"><div class="metric-label">上游尝试成功率</div><div class="metric-value" id="attemptRate">—</div><p id="rateFraction">成功 /（成功 + 失败）</p><span class="metric-footnote">取消尝试不计入分母</span></article>
           <article class="metric"><div class="metric-label">失败尝试</div><div class="metric-value warning-text" id="totalFailed">—</div><p>包含限流、超时及其他失败</p></article>
@@ -80,23 +77,25 @@
 
       <section class="panel workspace" id="workspace" aria-labelledby="workspaceTitle">
         <div class="workspace-header">
-        <div class="workspace-heading"><div><p class="eyebrow">INVESTIGATE</p><h2 id="workspaceTitle">排障工作区</h2></div><span class="scope-label" id="workspaceScope">供应商累计统计</span></div>
+        <div class="workspace-heading"><div><p class="eyebrow">INVESTIGATE</p><h2 id="workspaceTitle">排障工作区</h2></div><span class="scope-label" id="workspaceScope">当前浏览器有界缓存</span></div>
         <div class="workspace-tabs" role="tablist" aria-label="排障视图">
-          <button type="button" role="tab" id="tabProviders" aria-selected="true" aria-controls="paneProviders" data-pane="providers">供应商统计 <span id="providerTabCount">0</span></button>
+          <button type="button" role="tab" id="tabLogs" aria-selected="true" aria-controls="paneLogs" data-pane="logs">原始日志 <span id="logTabCount">0</span></button>
+          <button type="button" role="tab" id="tabProviders" aria-selected="false" aria-controls="paneProviders" data-pane="providers" tabindex="-1">供应商统计 <span id="providerTabCount">0</span></button>
           <button type="button" role="tab" id="tabRequests" aria-selected="false" aria-controls="paneRequests" data-pane="requests" tabindex="-1">请求追踪 <span id="requestTabCount">0</span></button>
-          <button type="button" role="tab" id="tabLogs" aria-selected="false" aria-controls="paneLogs" data-pane="logs" tabindex="-1">原始日志 <span id="logTabCount">0</span></button>
         </div>
         </div>
         <form class="filter-bar" id="filterForm" role="search">
           <label class="search-control"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4 4"/></svg><input id="searchInput" type="search" aria-label="搜索供应商、模型、请求 ID 或日志" placeholder="搜索供应商、模型、请求 ID…" autocomplete="off"></label>
+          <div class="filter-options" role="group" aria-label="筛选选项">
           <label><span class="sr-only">优先级</span><select id="priorityFilter" aria-label="筛选优先级"><option value="">全部优先级</option></select></label>
           <label><span class="sr-only">模型</span><select id="modelFilter" aria-label="筛选模型"><option value="">全部模型</option></select></label>
           <label><span class="sr-only">结果</span><select id="resultFilter" aria-label="筛选结果"><option value="">全部结果</option><option value="success">成功记录</option><option value="limited">限流 429</option><option value="failed">其他失败</option><option value="canceled">取消</option><option value="unseen">暂无尝试</option></select></label>
           <label id="logLevelControl" hidden><span class="sr-only">日志级别</span><select id="logLevelFilter" aria-label="筛选日志级别" title="按事件和结果归类；原始日志没有统一的级别字段"><option value="">全部级别</option><option value="warn+">WARN 及以上</option><option value="error">ERROR · 错误</option><option value="warn">WARN · 警告</option><option value="info">INFO · 常规</option><option value="debug">DEBUG · 诊断</option></select></label>
           <button type="button" class="button ghost" id="resetFilters">重置筛选</button>
+          </div>
         </form>
 
-        <div id="paneProviders" role="tabpanel" aria-labelledby="tabProviders">
+        <div id="paneProviders" role="tabpanel" aria-labelledby="tabProviders" hidden>
           <div class="provider-navigation">
             <div class="provider-rule-row"><span class="navigation-label">快捷视图</span><div id="providerViews" class="filter-chips" aria-label="供应商快捷视图"></div></div>
             <div class="provider-rule-row"><label class="group-mode"><span class="sr-only">供应商分组方式</span><select id="providerGroupBy" aria-label="供应商分组方式"><option value="model">按模型切换</option><option value="priority">按优先级切换</option></select></label><div id="providerGroups" class="filter-chips" aria-label="供应商分组"></div></div>
@@ -108,18 +107,18 @@
         </div>
 
         <div id="paneRequests" role="tabpanel" aria-labelledby="tabRequests" hidden>
-          <div class="table-toolbar"><p id="requestCount">仅最近 200 条尝试中的请求分组</p><button type="button" class="button secondary" id="refreshRequests">更新请求列表</button></div>
-          <p class="scope-note">按请求 ID 聚合已知记录；起点、结尾及退避可能不在样本中，不能据此推算完整请求成功率。</p>
-          <div class="table-scroll" id="requestScroll"><table id="requestTable"><caption class="sr-only">最近上游尝试中的请求分组</caption><thead><tr><th>请求 ID</th><th>模型 / 优先级</th><th class="number">已知尝试</th><th>涉及账号</th><th>样本中观察到的结果</th><th class="number" title="仅相加已记录的上游尝试耗时，不含退避和记录外阶段">记录耗时 Σ</th><th>最近记录</th><th><span class="sr-only">详情</span></th></tr></thead><tbody id="requestBody"></tbody></table></div>
+          <div class="table-toolbar"><p id="requestCount">等待近期请求计时和尝试记录</p><button type="button" class="button secondary" id="refreshRequests">更新请求列表</button></div>
+          <p class="scope-note">从代理接收请求开始计时，包含排队、重试等待和换号。首响是首次写出 HTTP 2xx 正文，总耗时截至代理处理结束；无测量值显示 —。</p>
+          <div class="table-scroll" id="requestScroll"><table id="requestTable"><caption class="sr-only">近期请求计时与上游尝试</caption><thead><tr><th>请求 ID</th><th>模型 / 优先级</th><th class="number">已知尝试</th><th>涉及账号</th><th>样本中观察到的结果</th><th class="number" title="从代理接收请求到首次写出成功响应正文">首次成功响应</th><th class="number" title="从代理接收请求到处理结束，含退避和换号">请求总耗时</th><th>最近记录</th><th><span class="sr-only">详情</span></th></tr></thead><tbody id="requestBody"></tbody></table></div>
           <div class="empty-state" id="requestEmpty" hidden><strong>没有匹配的请求记录</strong><p>最近记录保留有限，不代表历史中没有请求。</p></div>
           <div class="pagination"><span id="requestPageInfo">0 组</span><div><button class="button secondary" id="requestPrev" type="button" aria-label="请求上一页">← 上一页</button><span id="requestPageNumber">0 / 0</span><button class="button secondary" id="requestNext" type="button" aria-label="请求下一页">下一页 →</button></div></div>
         </div>
 
-        <div id="paneLogs" role="tabpanel" aria-labelledby="tabLogs" hidden>
+        <div id="paneLogs" role="tabpanel" aria-labelledby="tabLogs">
           <div class="log-toolbar"><div><span class="badge neutral" id="logFollowState">自动跟随</span><span id="logBufferInfo" class="muted">等待日志</span></div><div><button type="button" class="button secondary" id="pauseFollow">暂停跟随</button><button type="button" class="button secondary" id="jumpLatest" hidden>跳到最新</button><button type="button" class="button ghost" id="clearLogView">清空当前视图</button></div></div>
           <div id="logRows" class="log-rows" tabindex="0" aria-label="原始日志，向上阅读会暂停跟随">
             <div class="log-column-header" aria-hidden="true">
-              <span>时间 / 事件</span><span>请求 ID</span><span>供应商 / 模型</span><span>结果</span><span>详情</span>
+              <span title="代理记录该行的本机时刻">时刻 / 事件</span><span>请求 ID</span><span>供应商 / 模型</span><span>结果</span><span title="本账号第几次尝试 / 本账号最大尝试次数（含首次）">尝试次数</span><span>事件耗时</span><span>详情</span>
             </div>
             <div id="logEntries"></div>
           </div>

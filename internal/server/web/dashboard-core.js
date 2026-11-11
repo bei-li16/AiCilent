@@ -51,6 +51,17 @@
   function chartSelection(available, saved) {
     return new Set(Array.isArray(saved) ? saved.map(Number).filter(p => available.includes(p)) : available);
   }
+  function rateAxis(values, steps = 4) {
+    if (!values.length) return { minimum: 0, maximum: 100 };
+    const low = Math.min(...values), high = Math.max(...values);
+    const margin = Math.max(2, (high - low) * .08);
+    const lower = Math.max(0, low - margin), upper = Math.min(100, high + margin);
+    const ideal = (upper - lower) / steps;
+    const power = 10 ** Math.floor(Math.log10(ideal));
+    const step = [1, 2, 2.5, 5, 10].map(n => n * power).find(n => n >= ideal);
+    return { minimum: Math.max(0, Math.floor(lower / step) * step),
+      maximum: Math.min(100, Math.ceil(upper / step) * step) };
+  }
   function quantile(values, p) {
     const sorted = (values || []).filter(v => Number.isFinite(v) && v >= 0).slice().sort((a, b) => a - b);
     if (!sorted.length) return null;
@@ -108,17 +119,29 @@
       return (Number.isFinite(delta) ? delta : (delta === Infinity ? 1 : delta === -Infinity ? -1 : 0)) || nameOrder(a, b);
     });
   }
-  function groupRequests(attempts) {
+  function groupRequests(attempts, timings = []) {
     const groups = new Map();
+    const group = (id, missingId = false) => {
+      if (!groups.has(id)) groups.set(id, { id, missingId, attempts: [], latest: 0, duration: 0, providers: [], models: [], priorities: [], timing: null });
+      return groups.get(id);
+    };
     (attempts || []).slice(-ATTEMPT_LIMIT).forEach((a, i) => {
       const id = a.request_id || 'missing-id-' + i;
-      if (!groups.has(id)) groups.set(id, { id, missingId: !a.request_id, attempts: [], latest: 0, duration: 0, providers: [], models: [], priorities: [] });
-      const g = groups.get(id);
+      const g = group(id, !a.request_id);
       g.attempts.push(a); g.latest = Math.max(g.latest, timestamp(a.timestamp)); g.duration += number(a.latency_ms);
       if (!g.providers.includes(a.provider)) g.providers.push(a.provider);
       if (!g.models.includes(a.model_id)) g.models.push(a.model_id);
       if (!g.priorities.includes(a.priority)) g.priorities.push(a.priority);
     });
+    for (const timing of timings) {
+      if (!timing.request_id) continue;
+      const g = group(timing.request_id);
+      g.timing = timing;
+      g.latest = Math.max(g.latest, timestamp(timing.ended_at));
+      if (!g.models.length && timing.model) g.models.push(timing.model);
+      const priority = /^P([1-9]\d*)$/i.exec(timing.model || '');
+      if (!g.priorities.length && priority) g.priorities.push(Number(priority[1]));
+    }
     return Array.from(groups.values()).map(g => {
       g.attempts.sort((a, b) => timestamp(a.timestamp) - timestamp(b.timestamp));
       g.knownRetries = 0; g.knownSwitches = 0;
@@ -130,7 +153,9 @@
       const success = g.attempts.some(a => attemptOutcome(a).key === 'success');
       const canceled = g.attempts.some(a => attemptOutcome(a).key === 'canceled');
       g.outcome = success ? { key: 'success', label: '观察到成功', tone: 'success' } : canceled ?
-        { key: 'canceled', label: '观察到取消', tone: 'canceled' } : { key: 'unknown', label: '最终结果未知', tone: 'neutral' };
+        { key: 'canceled', label: '观察到取消', tone: 'canceled' } : g.timing?.status_code === 429 ?
+        { key: 'limited', label: '请求限流 429', tone: 'limited' } : g.timing?.status_code >= 400 ?
+        { key: 'failed', label: '请求失败 ' + g.timing.status_code, tone: 'failed' } : { key: 'unknown', label: '最终结果未知', tone: 'neutral' };
       return g;
     }).sort((a, b) => b.latest - a.latest || a.id.localeCompare(b.id));
   }
@@ -139,7 +164,14 @@
     return groups.filter(g => (!q || [g.id, ...g.providers, ...g.models].join(' ').toLowerCase().includes(q)) &&
       (!filter.priority || g.priorities.some(p => Number(p) === Number(filter.priority))) &&
       (!filter.model || g.models.includes(filter.model)) &&
-      (!filter.result || g.attempts.some(a => attemptOutcome(a).key === filter.result)));
+      (!filter.result || g.outcome.key === filter.result || g.attempts.some(a => attemptOutcome(a).key === filter.result)));
+  }
+  function durationMs(text) {
+    if (!text) return null;
+    const unit = { h: 3600000, m: 60000, s: 1000, ms: 1, 'µs': .001, 'μs': .001, us: .001, ns: .000001 };
+    const parts = [...text.matchAll(/(\d+(?:\.\d+)?)(ms|[µμu]s|ns|h|m|s)/g)];
+    if (!parts.length || parts.map(part => part[0]).join('') !== text) return null;
+    return parts.reduce((sum, [, value, scale]) => sum + Number(value) * unit[scale], 0);
   }
   function parseLog(raw, id) {
     raw = String(raw || '');
@@ -148,7 +180,7 @@
     const body = match ? match[4] : raw;
     const event = match ? match[3].toUpperCase() : 'TEXT';
     const resultBody = ['INBOUND', 'TEXT'].includes(event) ? '' : body;
-    const attempt = resultBody.match(/^\[P(\d+)\]\[(\d+\/\d+)\]\s+(.+?)\s*\|\s*(.*)$/s);
+    const attempt = event === 'PROVIDER' && body.match(/^\[P(\d+)\]\[(\d+\/\d+)\]\s+(.+?)\s*\|\s*(.*)$/s);
     const next = event === 'ROUTER' && body.match(/^degrade to next provider\s*\|\s*(.+?)\s+\[P(\d+)\]\s*\|\s*reason=(.*)$/s);
     const skipped = event === 'QUEUE' && body.match(/^\[P(\d+)\]\s*\|\s*provider (.+?) skipping \((.*)\)\s*\|\s*rr=/s);
     const ttfb = event === 'TTFB' && body.match(/^(.+?)\s*\[P(\d+)\]\s*\|/);
@@ -158,12 +190,46 @@
     const priority = Number(attempt?.[1] || next?.[2] || skipped?.[1] || ttfb?.[2] || retry?.[2] ||
       (resultBody.match(/\[P(\d+)\]/) || [])[1] || 0);
     const providerRole = next ? '切换目标' : skipped ? '跳过对象' : '';
-    const detail = attempt ? '尝试 ' + attempt[2] + ' · ' + attempt[4] :
+    let detail = attempt ? attempt[4] :
       next ? '切换原因：' + next[3] : skipped ? '跳过原因：' + skipped[3] : body;
-    const status = Number((resultBody.match(/status\s*[= ]\s*(\d{3})/) || [])[1] || (resultBody.match(/\|\s+(\d{3})\s+\|/) || [])[1] || 0);
+    let elapsed, timingLabel, retryGapMs = null, attemptError = '';
+    if (attempt) {
+      elapsed = /^(OK|FAIL|CANCELED)\s*\|\s*(\S+)(?:\s*\|\s*(.*))?$/s.exec(attempt[4]);
+      if (elapsed && durationMs(elapsed[2]) !== null) {
+        timingLabel = '单次尝试';
+        let reason = elapsed[3] || '';
+        const gap = /^retry_start_gap=(\S+)(?:\s*\|\s*(.*))?$/s.exec(reason);
+        if (gap && durationMs(gap[1]) !== null) {
+          retryGapMs = durationMs(gap[1]); reason = gap[2] || '';
+        }
+        attemptError = reason;
+        detail = elapsed[1] + (reason ? ' | ' + reason : '');
+      }
+    } else {
+      const rules = {
+        TTFB: [/\s*\|\s*upstream header=(\S+)/, '上游响应头'],
+        FIRST_RESPONSE: [/^elapsed=(\S+)$/, '请求首响'],
+        SUMMARY: [/\s*\|\s*total=(\S+)$/, '路由耗时'],
+        ACCESS: [/\s*\|\s*\d{3}\s*\|\s*(\S+)(?=\s*\|)/, '请求总耗时']
+      };
+      const rule = rules[event];
+      const value = rule?.[0].exec(body);
+      if (value && durationMs(value[1]) !== null) {
+        timingLabel = rule[1];
+        elapsed = ['', '', value[1]];
+        if (event === 'ACCESS') detail = body.replace(/(\|\s*\d{3})\s*\|\s*\S+(?=\s*\|)/, '$1');
+        else if (event === 'FIRST_RESPONSE') detail = '首次写出 HTTP 2xx 响应正文';
+        else detail = body.replace(rule[0], '');
+      }
+    }
+    const status = attempt ? Number(/^API error \(status (\d{3})\)(?::|$)/.exec(attemptError)?.[1] || 0) :
+      Number((resultBody.match(/status\s*[= ]\s*(\d{3})/) || [])[1] || (resultBody.match(/\|\s+(\d{3})\s+\|/) || [])[1] || 0);
     let key = 'neutral', label = '信息';
-    if (/\bCANCELED\b/.test(resultBody)) { key = 'canceled'; label = '取消'; }
-    else if (status === 429) { key = 'limited'; label = next ? '切换 · 429' : skipped ? '跳过 · 429' : '限流 429'; }
+    if (next) { key = 'route-switch'; label = status === 429 ? '限流转接' : '账号转接'; }
+    else if (skipped) { key = 'route-skip'; label = status === 429 ? '因 429 跳过' : '跳过账号'; }
+    else if (attempt ? elapsed?.[1] === 'CANCELED' : /\bCANCELED\b/.test(resultBody)) { key = 'canceled'; label = '取消'; }
+    else if (attempt && elapsed?.[1] === 'FAIL' && status === 429) { key = 'limited'; label = '限流 429'; }
+    else if (event === 'ACCESS' && status === 429) { key = 'client-limited'; label = '返回 429'; }
     else if (/\|\s*FAIL\s*\||result=FAIL|stream interrupted/i.test(resultBody) || status >= 400) { key = 'failed'; label = status ? '失败 ' + status : '失败'; }
     else if (/\|\s*OK\s*\||result=SUCCESS/.test(resultBody)) { key = 'success'; label = '成功'; }
     // The backend emits event categories rather than a severity field. Keep
@@ -173,11 +239,16 @@
     let level = 'info';
     if (explicit) level = /ERROR|FATAL/.test(explicit) ? 'error' : /WARN/.test(explicit) ? 'warn' : explicit.toLowerCase();
     else if (!['INBOUND', 'TEXT'].includes(event) && key === 'failed') level = 'error';
-    else if (!['INBOUND', 'TEXT'].includes(event) && key === 'limited') level = 'warn';
+    else if (key === 'limited' || key === 'client-limited' || (status === 429 && (next || skipped))) level = 'warn';
     else if (event === 'CB' && /\b(?:OPEN|opened|tripped)\b/.test(body)) level = 'warn';
     else if (['ROUTER', 'QUEUE', 'TTFB', 'STREAM'].includes(event) && key !== 'canceled') level = 'debug';
+    const milestone = event === 'INBOUND' ? { label: '请求发起', tone: 'request-start' } :
+      event === 'FIRST_RESPONSE' ? { label: '首次成功响应', tone: 'request-first' } :
+      event === 'STREAM' && /\bterminal_written=true\s*\|\s*end_reason=protocol_complete$/.test(body) ?
+        { label: '流式结束', tone: 'request-end' } : null;
     return { id, raw, body, time: match ? match[1].slice(11) : '—', requestId: match && match[2] !== '-' ? match[2] : '',
-      event, provider, providerRole, priority, status, key, label, level, detail };
+      event, provider, providerRole, priority, status, key, label, level, detail, milestone, attemptNumber: attempt?.[2] || null,
+      retryGapMs, timingLabel, timingMs: timingLabel ? durationMs(elapsed[2]) : null };
   }
   function logProviderIndex(providers, attempts) {
     const models = new Map(providers.map(p => [p.name, p.model_id]));
@@ -217,11 +288,13 @@
       if (typeof data[key] !== 'number' || !Number.isFinite(data[key]) || data[key] < 0) throw new Error('统计字段无效：' + key);
     }
     // Go encodes its empty recent-attempt slice as null after startup/reset.
-    const normalized = data.recent_attempts === null ? { ...data, recent_attempts: [] } : data;
+    let normalized = data.recent_attempts === null ? { ...data, recent_attempts: [] } : data;
+    if (normalized.recent_requests === null) normalized = { ...normalized, recent_requests: [] };
+    if (normalized.recent_requests !== undefined && !Array.isArray(normalized.recent_requests)) throw new Error('请求计时字段无效');
     if (!Array.isArray(normalized.providers) || !Array.isArray(normalized.recent_attempts) || !Array.isArray(normalized.curves) || !Array.isArray(normalized.latency_curve)) throw new Error('统计样本字段缺失');
     return normalized;
   }
   return { ATTEMPT_LIMIT, LOG_LIMIT, LOG_VIEW_LIMIT, PAGE_SIZE, number, count, ratio, formatCount, formatRate,
-    formatDuration, formatUptime, timestamp, priorityColor, activePriorities, chartSeries, chartSelection, quantile, attemptOutcome, providerOutcome, providerLabel,
+    formatDuration, formatUptime, timestamp, priorityColor, activePriorities, chartSeries, chartSelection, rateAxis, quantile, attemptOutcome, providerOutcome, providerLabel,
     providerStreak, providerMatchesView, filterProviders, sortProviders, groupRequests, filterRequests, parseLog, logProviderIndex, filterLogs, LogBuffer, validateSnapshot };
 });

@@ -11,9 +11,7 @@ import (
 
 func TestRequestIDsAreUniqueAndReturnedToClient(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	oldWriter := gin.DefaultWriter
-	gin.DefaultWriter = io.Discard
-	defer func() { gin.DefaultWriter = oldWriter }()
+	logRequest := Logger(io.Discard)
 
 	const count = 500
 	ids := make(chan string, count)
@@ -26,7 +24,7 @@ func TestRequestIDsAreUniqueAndReturnedToClient(t *testing.T) {
 			req := httptest.NewRequest("GET", "/health", nil)
 			c, _ := gin.CreateTestContext(w)
 			c.Request = req
-			Logger()(c)
+			logRequest(c)
 			ids <- GetReqID(c)
 			if w.Header().Get("X-Request-ID") == "" {
 				t.Errorf("request ID response header is missing")

@@ -1,11 +1,36 @@
 package stats
 
 import (
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestClientOutcomesPersistWithoutGuessingLegacyResults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stats.json")
+	if err := os.WriteFile(path, []byte(`{"total_client_req":149,"total_success":132}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c := New(path)
+	if got := c.Snapshot(); got.TotalClientReq != 149 || got.TotalClientCompleted != 0 || got.TotalClientSuccess != 0 {
+		t.Fatalf("legacy attempts must not be treated as client outcomes: %+v", got)
+	}
+	c.RecordClientOutcome(c.RecordClientRequest(), true)
+	c.RecordClientOutcome(c.RecordClientRequest(), false)
+	c.Save()
+	c = New(path)
+	if got := c.Snapshot(); got.TotalClientReq != 151 || got.TotalClientCompleted != 2 || got.TotalClientSuccess != 1 {
+		t.Fatalf("request outcomes did not survive restart: %+v", got)
+	}
+	epoch := c.RecordClientRequest()
+	c.Reset()
+	c.RecordClientOutcome(epoch, true)
+	if got := c.Snapshot(); got.TotalClientReq != 0 || got.TotalClientCompleted != 0 || got.TotalClientSuccess != 0 {
+		t.Fatalf("request from before reset counted in the new period: %+v", got)
+	}
+}
 
 func TestSnapshotIncludesRecentAttemptsByRequestID(t *testing.T) {
 	c := New("")

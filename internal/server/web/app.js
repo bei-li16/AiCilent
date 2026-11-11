@@ -3,15 +3,17 @@
   const C = window.AiDashboardCore;
   const $ = id => document.getElementById(id);
   const state = {
-    data: null, lastGood: 0, statsError: '', fetching: false, pane: 'providers', filters: { query: '', priority: '', model: '', result: '', level: '' },
+    data: null, lastGood: 0, statsError: '', fetching: false, pane: 'logs', filters: { query: '', priority: '', model: '', result: '', level: '' },
     providerView: 'all', groupBy: 'model',
     providerPage: 1, requestPage: 1, sort: 'priority', requests: [], requestSignature: '', logs: new C.LogBuffer(), follow: true,
-    unread: 0, logDirty: false, stopped: false, eventSource: null, selectedProvider: null, selectedRequest: null,
+    unread: 0, stopped: false, eventSource: null, selectedProvider: null, selectedRequest: null,
     chartSelections: {}, chartCache: {}, confirm: null
   };
-  let pollTimer, freshnessTimer, logTimer, toastTimer, statsController, chartResizeTimer;
+  let pollTimer, freshnessTimer, logFrame, toastTimer, statsController, chartResizeTimer;
   const setText = (element, text) => { if (element && element.textContent !== String(text)) element.textContent = String(text); };
   const text = (id, value) => setText($(id), value);
+  const timingText = ms => Number.isFinite(ms) ? C.formatDuration(ms) : '—';
+  const requestSignature = data => JSON.stringify([data.recent_attempts, data.recent_requests]);
   function node(tag, className, content) {
     const el = document.createElement(tag);
     if (className) el.className = className;
@@ -54,15 +56,17 @@
       if (!response.ok) throw new Error('HTTP ' + response.status);
       const data = C.validateSnapshot(await response.json());
       state.data = data; state.lastGood = Date.now(); state.statsError = '';
+      state.logModelFor = C.logProviderIndex(data.providers, data.recent_attempts);
+      state.logView = null;
       renderMetrics(); syncFilters(); renderDiagnostic(); renderPriorities(); renderProviders();
-      const signature = JSON.stringify(data.recent_attempts);
+      const signature = requestSignature(data);
       if (!state.requestSignature) refreshRequestView();
       else if (signature !== state.requestSignature) {
         text('refreshRequests', '有新记录 · 更新列表'); $('refreshRequests').classList.add('warning-text');
       }
       if (state.selectedProvider) renderProviderDetail(state.selectedProvider, false);
       drawCharts();
-      if (state.pane === 'logs' && state.follow) renderLogs();
+      if (state.pane === 'logs' && state.follow) scheduleLogFrame();
     } catch (error) {
       if (!state.stopped) state.statsError = error.name === 'AbortError' ? '请求超过 8 秒' : error.message;
     } finally {
@@ -87,6 +91,9 @@
   function renderMetrics() {
     const d = state.data, rate = C.ratio(d.total_success, d.total_fail);
     text('totalClient', C.formatCount(d.total_client_req)); text('totalAttempts', C.formatCount(d.total_req));
+    const completed = C.count(d.total_client_completed);
+    text('totalClientSuccess', C.formatCount(d.total_client_success));
+    text('clientSuccessScope', completed ? '已记录结果 ' + C.formatCount(completed) + ' 笔' : '暂无已记录的请求结果');
     text('totalFailed', C.formatCount(d.total_fail)); text('totalCanceled', C.formatCount(d.total_canceled));
     text('attemptRate', C.formatRate(rate));
     $('attemptRate').classList.toggle('warning-text', rate !== null && rate < 50);
@@ -94,7 +101,8 @@
     text('attemptAverage', d.total_client_req > 0 ? '平均 ' + (d.total_req / d.total_client_req).toFixed(2) + ' 次上游尝试 / 请求' : '暂无客户端请求样本');
     const service = $('serviceStatus'); service.className = 'badge ' + (d.running ? 'success' : 'neutral');
     service.replaceChildren(node('i'), document.createTextNode(d.running ? '请求转发运行中' : '请求转发已停用'));
-    text('serviceControl', d.running ? '停用请求转发…' : '启用请求转发…');
+    text('serviceControl', d.running ? '停用转发' : '启用转发');
+    $('serviceControl').disabled = false;
     text('uptime', C.formatUptime(d.uptime)); $('uptime').title = '服务启动：' + timeLabel(d.start_time, true) + ' · 原始时长：' + d.uptime;
   }
   function setOptions(el, options, selected) {
@@ -135,8 +143,12 @@
     setOptions($('priorityFilter'), [['', '全部优先级'], ...Array.from(priorities).filter(p => p > 0).sort((a, b) => a - b).map(p => [String(p), priorityFilterLabel(p, active)])], state.filters.priority);
     setOptions($('modelFilter'), [['', '全部模型'], ...Array.from(models).sort().map(m => [m, m])], state.filters.model);
     const labels = state.pane === 'providers' ? ['全部最近状态', '最近成功', '最近限流 429', '最近其他失败', '最近取消', '暂无尝试'] :
-      state.pane === 'requests' ? ['全部样本结果', '含成功尝试', '含限流 429', '含其他失败', '含取消', '暂无尝试'] : ['全部日志结果', '成功', '限流 429', '其他失败', '取消', '暂无尝试'];
-    setOptions($('resultFilter'), ['', 'success', 'limited', 'failed', 'canceled', 'unseen'].map((key, i) => [key, labels[i]]), state.filters.result);
+      ['全部样本结果', '含成功尝试', '含限流 429', '含其他失败', '含取消', '暂无尝试'];
+    const options = state.pane === 'logs' ? [
+      ['', '全部日志结果'], ['success', '成功'], ['limited', '限流 429'],
+      ['route-switch', '账号转接'], ['route-skip', '跳过账号'], ['client-limited', '返回 429'], ['failed', '其他失败'], ['canceled', '取消']
+    ] : ['', 'success', 'limited', 'failed', 'canceled', 'unseen'].map((key, i) => [key, labels[i]]);
+    setOptions($('resultFilter'), options, state.filters.result);
   }
   function renderDiagnostic() {
     const attempts = state.data.recent_attempts.slice(-C.ATTEMPT_LIMIT), counts = { limited: 0, failed: 0, canceled: 0, success: 0 };
@@ -147,7 +159,7 @@
     text('diagnosticTitle', attempts.length ? counts.limited ? '最近样本存在限流，检查重试与账号切换' : counts.failed ? '最近样本存在上游失败' : counts.canceled ? '最近样本包含客户端取消' : '最近样本未观察到上游失败' : '暂无最近尝试样本');
     text('diagnosticText', attempts.length ? '最近 ' + attempts.length + ' 条尝试：成功 ' + counts.success + ' · 限流 ' + counts.limited + ' · 其他失败 ' + counts.failed + ' · 取消 ' + counts.canceled + '。该窗口不代表全部历史或客户端最终结果。' : '历史累计计数与最近尝试窗口独立；真实尝试发生后可在这里检查。');
     $('inspectDiagnostic').disabled = !attempts.length; $('inspectDiagnostic').dataset.result = issue;
-    text('providerTabCount', state.data.providers.length); text('requestTabCount', C.groupRequests(attempts).length);
+    text('providerTabCount', state.data.providers.length); text('requestTabCount', C.groupRequests(attempts, state.data.recent_requests).length);
   }
   function renderPriorities() {
     const grid = $('priorityGrid'), d = state.data, states = new Map((d.cb || []).map(c => [Number(c.priority), c]));
@@ -229,27 +241,27 @@
   }
   function refreshRequestView() {
     if (!state.data) return;
-    state.requests = C.groupRequests(state.data.recent_attempts); state.requestSignature = JSON.stringify(state.data.recent_attempts);
+    state.requests = C.groupRequests(state.data.recent_attempts, state.data.recent_requests); state.requestSignature = requestSignature(state.data);
     text('refreshRequests', '更新请求列表'); $('refreshRequests').classList.remove('warning-text'); renderRequests();
   }
   function renderRequests() {
     const all = C.filterRequests(state.requests, state.filters);
     state.requestPage = Math.min(state.requestPage, Math.max(1, Math.ceil(all.length / C.PAGE_SIZE)));
     const page = all.slice((state.requestPage - 1) * C.PAGE_SIZE, state.requestPage * C.PAGE_SIZE);
-    text('requestCount', '匹配 ' + all.length + ' 组 · 来自本次列表快照的最近 ' + state.requests.reduce((n, g) => n + g.attempts.length, 0) + ' 条尝试');
+    text('requestCount', '匹配 ' + all.length + ' 组 · 本次快照含 ' + state.requests.filter(g => g.timing).length + ' 条请求计时及 ' + state.requests.reduce((n, g) => n + g.attempts.length, 0) + ' 条上游尝试');
     $('requestEmpty').hidden = all.length > 0; $('requestTable').hidden = all.length === 0;
     reconcile($('requestBody'), page, g => g.id, () => {
-      const row = tableRow(8), id = node('button', 'table-link request-id'); id.type = 'button'; id.dataset.action = 'request'; row.cells[0].append(id);
+      const row = tableRow(9), id = node('button', 'table-link request-id'); id.type = 'button'; id.dataset.action = 'request'; row.cells[0].append(id);
       row.cells[1].append(node('span', 'provider-name'), node('span', 'provider-model'));
-      row.cells[2].className = 'number'; row.cells[4].append(badge({ tone: 'neutral', label: '' })); row.cells[5].className = 'number';
-      const button = node('button', 'row-detail', '↗'); button.type = 'button'; button.dataset.action = 'request'; row.cells[7].append(button);
+      row.cells[2].className = 'number'; row.cells[4].append(badge({ tone: 'neutral', label: '' })); row.cells[5].className = row.cells[6].className = 'number';
+      const button = node('button', 'row-detail', '↗'); button.type = 'button'; button.dataset.action = 'request'; row.cells[8].append(button);
       return row;
     }, (row, g) => {
       const id = row.cells[0].firstChild; setText(id, g.missingId ? '未提供请求 ID' : g.id.slice(0, 12)); id.dataset.id = g.id; id.title = g.id;
       setText(row.cells[1].firstChild, g.models.join(' / ') || '模型未知'); setText(row.cells[1].lastChild, g.priorities.map(p => 'P' + p).join(' / '));
       setText(row.cells[2], g.attempts.length); setText(row.cells[3], g.providers.length + ' 个账号'); replaceBadge(row.cells[4].firstChild, g.outcome);
-      setText(row.cells[5], C.formatDuration(g.duration)); setText(row.cells[6], timeLabel(g.latest));
-      row.cells[7].firstChild.dataset.id = g.id; row.cells[7].firstChild.setAttribute('aria-label', '查看请求 ' + g.id + ' 的已知尝试');
+      setText(row.cells[5], timingText(g.timing?.first_response_ms)); setText(row.cells[6], timingText(g.timing?.total_ms)); setText(row.cells[7], timeLabel(g.latest));
+      row.cells[8].firstChild.dataset.id = g.id; row.cells[8].firstChild.setAttribute('aria-label', '查看请求 ' + g.id + ' 的已知尝试');
     });
     pagination('request', state.requestPage, all.length, '组');
   }
@@ -292,23 +304,24 @@
     if (!force && state.chartCache[kind]?.signature === signature) return;
     const maxLength = Math.max(0, ...series.map(s => s.points.length)), pad = { left: 38, right: 13, top: 8, bottom: 23 };
     const plotWidth = width - pad.left - pad.right, plotHeight = height - pad.top - pad.bottom;
-    const rawMax = Math.max(0, ...series.flatMap(s => s.points));
+    const points = series.flatMap(s => s.points), rawMax = Math.max(0, ...points);
     const scale = Math.pow(10, Math.floor(Math.log10(Math.max(.01, rawMax))));
     const multiple = rawMax / scale;
-    const maximum = kind === 'rate' ? 100 : Math.max(.01, (multiple > 5 ? 10 : multiple > 2 ? 5 : multiple > 1 ? 2 : 1) * scale);
+    const steps = height < 110 ? 2 : 4;
+    const { minimum, maximum } = kind === 'rate' ? C.rateAxis(points, steps) :
+      { minimum: 0, maximum: Math.max(.01, (multiple > 5 ? 10 : multiple > 2 ? 5 : multiple > 1 ? 2 : 1) * scale) };
     state.chartCache[kind] = { signature, width, height, series, maxLength, pad, plotWidth, maximum, active: 0 };
     empty.hidden = maxLength > 0;
     if (!maxLength) { svg.replaceChildren(); svg.setAttribute('aria-label', kind === 'rate' ? '暂无成功率样本' : '暂无成功耗时样本'); $(kind + 'Tooltip').hidden = true; return; }
     const x = i => pad.left + plotWidth * i / Math.max(1, maxLength - 1);
-    const y = value => pad.top + plotHeight - value / maximum * plotHeight;
+    const y = value => pad.top + plotHeight - (value - minimum) / (maximum - minimum) * plotHeight;
     svg.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
     svg.setAttribute('aria-label', (kind === 'rate' ? '上游尝试成功率' : '成功上游尝试耗时') + '，' + maxLength + ' 个独立采样点。左右方向键查看数值。');
     let markup = '';
-    const steps = height < 110 ? 2 : 4;
     for (let i = 0; i <= steps; i++) {
-      const value = maximum * i / steps, at = y(value);
+      const value = minimum + (maximum - minimum) * i / steps, at = y(value);
       markup += '<line x1="' + pad.left + '" y1="' + at + '" x2="' + (width - pad.right) + '" y2="' + at + '" stroke="#273448" stroke-width="1"/>';
-      markup += '<text x="' + (pad.left - 7) + '" y="' + (at + 3) + '" fill="#a5b9d2" font-size="10" text-anchor="end">' + (kind === 'rate' ? value + '%' : Number(value.toFixed(2)) + 's') + '</text>';
+      markup += '<text x="' + (pad.left - 7) + '" y="' + (at + 3) + '" fill="#a5b9d2" font-size="10" text-anchor="end">' + Number(value.toFixed(2)) + (kind === 'rate' ? '%' : 's') + '</text>';
     }
     const ticks = Array.from(new Set([0, Math.floor((maxLength - 1) / 2), maxLength - 1]));
     for (const index of ticks) markup += '<text x="' + x(index) + '" y="' + (height - 10) + '" fill="#91a3bb" font-size="10" text-anchor="middle">#' + (index + 1) + '</text>';
@@ -401,8 +414,8 @@
       timeline.append(entry);
     });
     showDetail('请求追踪 · 最近记录', g.missingId ? '未提供请求 ID' : g.id.slice(0, 12), [badge(g.outcome), actions, fullId, note,
-      detailGrid([['已知尝试', g.attempts.length], ['涉及账号', g.providers.length], ['同账号重试（可见记录）', g.knownRetries], ['账号切换（可见记录）', g.knownSwitches], ['记录耗时合计', C.formatDuration(g.duration)], ['最近记录', timeLabel(g.latest, true)]]),
-      node('p', 'detail-description', '耗时合计只相加已记录的上游尝试，不含退避与记录外阶段，不能解释为完整请求耗时。'), timeline]);
+      detailGrid([['已知尝试', g.attempts.length], ['涉及账号', g.providers.length], ['同账号重试（可见记录）', g.knownRetries], ['账号切换（可见记录）', g.knownSwitches], ['首次成功响应', timingText(g.timing?.first_response_ms)], ['请求总耗时', timingText(g.timing?.total_ms)], ['最近记录', timeLabel(g.latest, true)]]),
+      node('p', 'detail-description', '请求计时包含排队、重试和换号。首响是代理首次写出 HTTP 2xx 正文；请求总耗时截至代理处理结束。无测量值显示 —。'), timeline]);
   }
 
   function updateLogControls() {
@@ -415,44 +428,102 @@
     text('logBufferInfo', '缓存 ' + buffer.rows.length + '/' + C.LOG_LIMIT + ' · 最多显示 ' + C.LOG_VIEW_LIMIT + ' 条' +
       (buffer.dropped ? ' · 已丢弃 ' + C.formatCount(buffer.dropped) + ' 条更早记录' : '') + (state.logReconnected ? ' · 重连期间可能有缺口' : ''));
   }
-  function renderLogs() {
+  function renderLogs(incremental = false) {
     updateLogControls();
     if (state.pane !== 'logs') return;
-    const modelFor = C.logProviderIndex(state.data?.providers || [], state.data?.recent_attempts || []);
-    const matching = C.filterLogs(state.logs.rows, state.filters, modelFor);
+    const modelFor = state.logModelFor || (() => '');
+    const rows = state.logs.rows;
+    const previous = incremental && state.logView;
+    let matching;
+    if (previous) {
+      let from = rows.length;
+      while (from > 0 && rows[from - 1].id > previous.lastId) from--;
+      matching = previous.matching;
+      let expired = 0;
+      while (expired < matching.length && matching[expired].id < (rows[0]?.id ?? Infinity)) expired++;
+      if (expired) matching.splice(0, expired);
+      matching.push(...C.filterLogs(rows.slice(from), state.filters, modelFor));
+    } else matching = C.filterLogs(rows, state.filters, modelFor);
+    state.logView = { matching, lastId: rows.at(-1)?.id ?? 0 };
     const visible = matching.slice(-C.LOG_VIEW_LIMIT);
     const container = $('logRows'), scrollTop = container.scrollTop;
     text('logFilterInfo', '匹配 ' + matching.length + ' 条 · 当前显示 ' + visible.length + ' 条。级别按事件和结果归类；仅当前浏览器缓存，点击行展开原文。');
     $('logEmpty').hidden = visible.length > 0; container.hidden = visible.length === 0;
-    reconcile($('logEntries'), visible, log => String(log.id), log => {
+    const entries = $('logEntries');
+    const create = log => {
       const details = node('details', 'log-row'), summary = node('summary');
       const id = node('button', 'table-link request-id'); id.type = 'button'; id.dataset.copyId = log.requestId; id.title = '复制完整请求 ID';
       const time = node('span', 'log-timestamp');
       time.append(node('span', 'log-time', log.time), node('span', 'log-event', log.event));
       const provider = node('span', 'log-provider');
-      provider.append(node('span', 'log-provider-name', log.provider || '—'));
+      const providerName = node('span', 'log-provider-name', log.provider || '—');
+      if (log.provider) providerName.title = log.provider;
+      provider.append(providerName);
       if (log.provider) {
         provider.append(node('span', 'log-provider-model'));
         if (log.providerRole) provider.append(node('span', 'log-provider-role', log.providerRole));
       }
       const result = node('span', 'log-result');
       result.append(node('span', 'log-severity level-' + log.level, log.level.toUpperCase()));
-      if (log.key !== 'neutral') result.append(badge({ tone: log.key, label: log.label }));
-      summary.append(time, id, provider, result, node('span', 'log-message', log.detail.slice(0, 450)));
+      if (log.key !== 'neutral') {
+        const resultBadge = badge({ tone: log.key, label: log.label });
+        const meanings = { limited: '这一行发出了上游请求，收到 HTTP 429', 'route-switch': '仅记录切换决定，这一行没有发出请求',
+          'route-skip': '仅记录跳过原因，这一行没有发出请求', 'client-limited': '这是代理返回给客户端的状态，不另计一次上游尝试' };
+        if (meanings[log.key]) resultBadge.title = meanings[log.key];
+        result.append(resultBadge);
+      }
+      if (log.milestone) {
+        details.classList.add(log.milestone.tone);
+        result.append(badge(log.milestone));
+      }
+      const elapsed = node('span', 'log-elapsed');
+      if (log.timingLabel) elapsed.append(node('span', 'log-elapsed-label', log.timingLabel), node('span', '', timingText(log.timingMs)));
+      else setText(elapsed, '—');
+      if (log.retryGapMs !== null) {
+        const label = node('span', 'log-elapsed-label log-retry-gap', '重试发起间隔');
+        label.title = '同一账号上一次尝试发起到本次发起的实际间隔';
+        elapsed.append(label, node('span', '', timingText(log.retryGapMs)));
+      }
+      const attempt = node('span', 'log-attempt mono', log.attemptNumber || '—');
+      if (log.attemptNumber) attempt.title = '本账号第几次尝试 / 本账号最大尝试次数（含首次）';
+      summary.append(time, id, provider, result, attempt, elapsed, node('span', 'log-message', log.detail.slice(0, 450)));
       setText(id, log.requestId ? log.requestId.slice(0, 10) : '—'); id.disabled = !log.requestId;
       details.append(summary, node('pre', '', log.raw));
       return details;
-    }, (row, log) => {
+    };
+    const update = (row, log) => {
       if (!log.provider) return;
       const model = modelFor(log) || '模型未知';
-      setText(row.querySelector('.log-provider-model'), log.priority ? model + ' · P' + log.priority : model);
-    });
-    state.logDirty = false;
+      const label = row.querySelector('.log-provider-model');
+      const display = log.priority ? model + ' · P' + log.priority : model;
+      setText(label, display);
+      if (label.title !== display) label.title = display;
+    };
+    if (previous) {
+      const oldest = visible[0]?.id ?? Infinity;
+      while (entries.firstElementChild && Number(entries.firstElementChild.dataset.key) < oldest) entries.firstElementChild.remove();
+      const newest = Number(entries.lastElementChild?.dataset.key || 0);
+      const additions = document.createDocumentFragment();
+      for (const log of visible) {
+        if (log.id <= newest) continue;
+        const row = create(log); row.dataset.key = String(log.id); update(row, log); additions.append(row);
+      }
+      entries.append(additions);
+    } else reconcile(entries, visible, log => String(log.id), create, update);
     if (state.follow) {
       state.unread = 0; state.adjustingLogScroll = true; container.scrollTop = container.scrollHeight;
       requestAnimationFrame(() => { state.adjustingLogScroll = false; });
     } else container.scrollTop = scrollTop;
     updateLogControls();
+  }
+  function scheduleLogFrame() {
+    if (logFrame !== undefined || state.stopped || document.hidden) return;
+    logFrame = requestAnimationFrame(() => {
+      logFrame = undefined;
+      if (state.stopped || document.hidden) return;
+      if (state.follow && state.pane === 'logs') renderLogs(true);
+      else updateLogControls();
+    });
   }
   function receiveLog(line) {
     if (!line.trim()) return;
@@ -463,7 +534,7 @@
     const row = state.logs.push(line);
     if (structured && row) state.logSeen.add(row.raw);
     if (!state.follow) state.unread++;
-    state.logDirty = true;
+    scheduleLogFrame();
   }
   function startLogStream() {
     if (state.stopped || (state.eventSource && state.eventSource.readyState !== EventSource.CLOSED)) return;
@@ -476,8 +547,10 @@
     source.onerror = () => setConnection('logStatus', '日志重连中', 'warning');
   }
   function setPane(pane, focus = false) {
+    if ((pane !== 'logs' && ['route-switch', 'route-skip', 'client-limited'].includes(state.filters.result)) ||
+        (pane === 'logs' && state.filters.result === 'unseen')) state.filters.result = '';
     state.pane = pane;
-    $('logLevelControl').hidden = pane !== 'logs'; $('filterForm').classList.toggle('log-filters', pane === 'logs');
+    $('logLevelControl').hidden = pane !== 'logs';
     const names = { providers: '供应商累计统计 · 结果按最近状态', requests: '最近尝试窗口 · 非完整请求历史', logs: '当前浏览器有界缓存' };
     text('workspaceScope', names[pane]);
     document.querySelectorAll('[role="tab"]').forEach(button => {
@@ -495,7 +568,7 @@
     else if (state.pane === 'requests') renderRequests();
     else renderLogs();
   }
-  function openConfirm(kind) {
+  function openConfirm(kind, trigger) {
     if (!state.data && kind === 'service') { toast('服务状态尚不可用，请稍后重试。'); return; }
     const actions = {
       service: { title: state.data?.running ? '停用请求转发？' : '启用请求转发？', message: state.data?.running ?
@@ -503,7 +576,7 @@
       reset: { title: '重置服务端统计？', message: '累计统计和最近尝试样本将被清零，操作不可恢复。不会删除 YAML 配置或日志文件。', endpoint: '/api/stats/reset' },
       logs: { title: '清空服务端日志文件？', message: '将截断服务端当前日志文件，操作不可恢复；现存备份文件保留。其他浏览器的日志缓存不会因此自动清空。', endpoint: '/api/logs/clear' }
     };
-    state.confirm = { ...actions[kind], kind, busy: false }; $('managementMenu').open = false;
+    state.confirm = { ...actions[kind], kind, trigger, busy: false };
     text('confirmTitle', state.confirm.title); text('confirmMessage', state.confirm.message); $('confirmError').hidden = true;
     text('confirmAction', kind === 'service' ? '确认' : '确认并执行'); $('confirmDialog').showModal();
   }
@@ -559,7 +632,7 @@
   document.querySelectorAll('[role="tab"]').forEach(button => {
     button.addEventListener('click', () => setPane(button.dataset.pane));
     button.addEventListener('keydown', event => {
-      const panes = ['providers', 'requests', 'logs']; let index = panes.indexOf(state.pane);
+      const panes = ['logs', 'providers', 'requests']; let index = panes.indexOf(state.pane);
       if (event.key === 'ArrowRight') index = (index + 1) % 3;
       else if (event.key === 'ArrowLeft') index = (index + 2) % 3;
       else if (event.key === 'Home') index = 0;
@@ -591,30 +664,34 @@
     event.preventDefault(); event.stopPropagation(); copyText(button.dataset.copyId);
   });
   $('logRows').addEventListener('scroll', () => {
-    if (!state.follow || state.adjustingLogScroll || state.pane !== 'logs') return;
-    const el = $('logRows'); if (el.scrollHeight - el.scrollTop - el.clientHeight > 30) { state.follow = false; updateLogControls(); }
+    if (state.manualLogPause || state.adjustingLogScroll || state.pane !== 'logs') return;
+    const el = $('logRows'), atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= 30;
+    if (state.follow && !atBottom) { state.follow = false; updateLogControls(); }
+    else if (!state.follow && atBottom) { state.follow = true; renderLogs(); }
   }, { passive: true });
-  $('pauseFollow').addEventListener('click', () => { state.follow = !state.follow; if (state.follow) renderLogs(); else updateLogControls(); });
-  $('jumpLatest').addEventListener('click', () => { state.follow = true; renderLogs(); });
+  $('pauseFollow').addEventListener('click', () => { state.follow = !state.follow; state.manualLogPause = !state.follow; if (state.follow) renderLogs(); else updateLogControls(); });
+  $('jumpLatest').addEventListener('click', () => { state.manualLogPause = false; state.follow = true; renderLogs(); });
   $('clearLogView').addEventListener('click', () => { state.logs.clear(); state.logSeen?.clear(); state.unread = 0; renderLogs(); toast('当前浏览器视图已清空，服务端日志保留。'); });
-  $('serviceControl').addEventListener('click', () => openConfirm('service'));
-  $('resetStats').addEventListener('click', () => openConfirm('reset'));
-  $('clearServerLogs').addEventListener('click', () => openConfirm('logs'));
+  $('serviceControl').addEventListener('click', event => openConfirm('service', event.currentTarget));
+  $('resetStats').addEventListener('click', event => openConfirm('reset', event.currentTarget));
+  $('clearServerLogs').addEventListener('click', event => openConfirm('logs', event.currentTarget));
   $('confirmAction').addEventListener('click', confirmAction);
   $('cancelAction').addEventListener('click', () => $('confirmDialog').close());
   $('confirmDialog').addEventListener('cancel', event => { if (state.confirm?.busy) event.preventDefault(); });
-  $('confirmDialog').addEventListener('close', () => $('managementMenu').querySelector('summary').focus());
+  $('confirmDialog').addEventListener('close', () => {
+    state.confirm?.trigger?.focus();
+    state.confirm = null;
+  });
   const resize = new ResizeObserver(() => { clearTimeout(chartResizeTimer); chartResizeTimer = setTimeout(() => drawCharts(true), 100); });
   resize.observe($('rateCanvas')); resize.observe($('latencyCanvas'));
   function start() {
-    state.stopped = false; fetchStats(); fetchVersion(); startLogStream();
+    state.stopped = false; setPane(state.pane); fetchStats(); fetchVersion(); startLogStream();
     clearInterval(freshnessTimer); freshnessTimer = setInterval(updateFreshness, 1000);
-    clearInterval(logTimer); logTimer = setInterval(() => { if (state.logDirty) { if (state.follow && state.pane === 'logs' && !document.hidden) renderLogs(); else updateLogControls(); } }, 250);
   }
   window.addEventListener('pagehide', () => {
-    state.stopped = true; state.eventSource?.close(); statsController?.abort(); clearTimeout(pollTimer); clearInterval(freshnessTimer); clearInterval(logTimer); clearTimeout(searchTimer); clearTimeout(chartResizeTimer);
+    state.stopped = true; state.eventSource?.close(); statsController?.abort(); clearTimeout(pollTimer); clearInterval(freshnessTimer); cancelAnimationFrame(logFrame); logFrame = undefined; clearTimeout(searchTimer); clearTimeout(chartResizeTimer);
   });
   window.addEventListener('pageshow', event => { if (event.persisted) start(); });
-  document.addEventListener('visibilitychange', () => { if (!document.hidden && !state.stopped) { fetchStats(); if (state.follow && state.pane === 'logs') renderLogs(); } });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && !state.stopped) { fetchStats(); scheduleLogFrame(); } });
   start();
 })();

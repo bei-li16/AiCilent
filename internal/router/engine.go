@@ -222,6 +222,8 @@ func (e *Engine) reloadConfig() error {
 	return nil
 }
 
+const clientRequestSucceededKey = "client_request_succeeded"
+
 func (e *Engine) HandleRequest(c *gin.Context) {
 	if !e.stats.IsRunning() {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "proxy is disabled"})
@@ -244,13 +246,15 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 	requestFormat := middleware.GetRequestFormat(c)
 
 	modelName := extractModel(body)
+	c.Set(middleware.CtxRequestedModel, modelName)
 	if modelName == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot extract model from request"})
 		return
 	}
 	// Count every accepted client request, including requests that later fail
 	// because no provider matches the detected protocol.
-	e.stats.RecordClientRequest()
+	epoch := e.stats.RecordClientRequest()
+	defer func() { e.stats.RecordClientOutcome(epoch, c.GetBool(clientRequestSucceededKey)) }()
 
 	// Capture the immutable config snapshot before applying model rules. Reloads
 	// replace the config pointer, so reading it without this lock is a race.
@@ -421,12 +425,18 @@ func (e *Engine) tryGroup(c *gin.Context, body []byte, requestFormat string, str
 
 		maxRetries := provider.Retry.MaxRetries
 		rm := retry.NewManager(maxRetries, provider.Retry.RetryInterval, provider.Retry.BackoffFactor)
+		var previousStart time.Time
 		for rm.ShouldRetry() {
 			if ctx.Err() != nil {
 				break
 			}
 			attempt := rm.Attempt()
 			start := time.Now()
+			var startGap time.Duration
+			if !previousStart.IsZero() {
+				startGap = start.Sub(previousStart)
+			}
+			previousStart = start
 
 			var fwdErr error
 			if streaming {
@@ -438,8 +448,9 @@ func (e *Engine) tryGroup(c *gin.Context, body []byte, requestFormat string, str
 			latency := time.Since(start)
 
 			if fwdErr == nil {
+				c.Set(clientRequestSucceededKey, true)
 				e.stats.Record(middleware.GetReqID(c), provider.Name, provider.ModelID, priority, true, http.StatusOK, "", latency)
-				tr.LogAttempt(provider.Name, priority, attempt, maxRetries+1, true, "", latency)
+				tr.LogAttempt(provider.Name, priority, attempt, maxRetries+1, true, "", latency, startGap)
 				e.closeCircuitBreaker(priority, modelName, tr,
 					cfg.Global.CBThreshold, cfg.Global.CBCooldown, cfg.Global.CBSkipRequests)
 				tr.LogResult(true, provider.Name, idx)
@@ -463,7 +474,7 @@ func (e *Engine) tryGroup(c *gin.Context, body []byte, requestFormat string, str
 			// (nobody to write to) and no circuit-breaker penalty.
 			if errors.Is(fwdErr, errClientGoneIncomplete) || isRequestCanceled(c, fwdErr) {
 				e.stats.RecordCanceled(middleware.GetReqID(c), provider.Name, provider.ModelID, priority, "client disconnected", latency)
-				tr.LogAttemptCanceled(provider.Name, priority, attempt, maxRetries+1, latency)
+				tr.LogAttemptCanceled(provider.Name, priority, attempt, maxRetries+1, latency, startGap)
 				tr.LogQueue(priority, "released (client disconnected)", idx, len(group))
 				tr.LogCanceled(provider.Name, idx)
 				fmt.Fprint(e.logWriter, tr.Dump())
@@ -472,7 +483,7 @@ func (e *Engine) tryGroup(c *gin.Context, body []byte, requestFormat string, str
 
 			statusCode, errMsg := errorDetail(fwdErr)
 			e.stats.Record(middleware.GetReqID(c), provider.Name, provider.ModelID, priority, false, statusCode, errMsg, latency)
-			tr.LogAttempt(provider.Name, priority, attempt, maxRetries+1, false, fwdErr.Error(), latency)
+			tr.LogAttempt(provider.Name, priority, attempt, maxRetries+1, false, fwdErr.Error(), latency, startGap)
 			lastErr = fwdErr
 			upstreamFailed = upstreamFailed || breakerFailure(fwdErr)
 
@@ -501,9 +512,11 @@ func (e *Engine) tryGroup(c *gin.Context, body []byte, requestFormat string, str
 				break
 			}
 
-			// Only wait if there is a next retry (skip after final attempt)
+			// Pace the next attempt from this attempt's start, not its end: a
+			// slow response that already covered the interval retries immediately,
+			// an early one waits only the remainder. Skipped after the final attempt.
 			if attempt < maxRetries+1 {
-				if err := rm.Wait(ctx); err != nil {
+				if err := rm.WaitPaced(ctx, latency); err != nil {
 					break
 				}
 			}
