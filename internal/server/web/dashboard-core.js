@@ -50,12 +50,25 @@
     return (series?.points || []).filter((v, i) => Number.isFinite(v) && v >= 0 &&
       (!requestWindow || (series.requests?.[i] >= minSeq && series.requests[i] <= requestSeq))).slice(-240);
   }
+  function rateTrendPoints(series, requestSeq, requestWindow) {
+    if (!requestWindow || !Array.isArray(series?.successes)) {
+      return trendPoints(series, requestSeq, requestWindow).map(value => Math.min(100, value));
+    }
+    const minSeq = Math.max(1, requestSeq - requestWindow + 1);
+    const outcomes = series.successes.filter((_, i) => series.requests?.[i] >= minSeq && series.requests[i] <= requestSeq);
+    let successes = 0;
+    return outcomes.map((success, i) => {
+      successes += Number(success);
+      if (i >= 50) successes -= Number(outcomes[i - 50]);
+      return successes * 100 / Math.min(50, i + 1);
+    });
+  }
   function chartSeries(data, kind, requestWindow = 0) {
     const source = kind === 'rate' ? data.curves : Array.isArray(data.latency_curves) ? data.latency_curves : [{ priority: 0, points: data.latency_curve }];
     const byPriority = new Map((source || []).filter(c => c && Array.isArray(c.points)).map(c => [Number(c.priority), c]));
     return [0, ...activePriorities(data)].map(priority => ({ priority, label: priority === 0 ? '汇总' : 'P' + priority,
-      color: priorityColor(priority), points: trendPoints(byPriority.get(priority), data.trend_request_seq, requestWindow)
-        .map(v => kind === 'rate' ? Math.min(100, v) : v) }));
+      color: priorityColor(priority), points: (kind === 'rate' ? rateTrendPoints : trendPoints)
+        (byPriority.get(priority), data.trend_request_seq, requestWindow) }));
   }
   function modelLatencySeries(data, requestWindow = 0) {
     const models = Array.isArray(data.model_latency_curves) ? data.model_latency_curves : [];

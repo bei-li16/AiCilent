@@ -20,6 +20,56 @@
     if (content !== undefined) el.textContent = String(content);
     return el;
   }
+  const hoverTip = node('div', 'hover-tooltip');
+  hoverTip.id = 'hoverTooltip';
+  hoverTip.setAttribute('role', 'tooltip');
+  hoverTip.hidden = true;
+  let tooltipOwner = null;
+  function hideTooltip(owner = tooltipOwner) {
+    if (!owner || owner !== tooltipOwner) return;
+    const ids = (owner.getAttribute('aria-describedby') || '').split(/\s+/).filter(id => id && id !== hoverTip.id);
+    if (ids.length) owner.setAttribute('aria-describedby', ids.join(' '));
+    else owner.removeAttribute('aria-describedby');
+    hoverTip.hidden = true;
+    tooltipOwner = null;
+  }
+  function showTooltip(owner, message, point) {
+    if (!message) return;
+    if (tooltipOwner !== owner) {
+      hideTooltip();
+      tooltipOwner = owner;
+      const ids = (owner.getAttribute('aria-describedby') || '').trim();
+      owner.setAttribute('aria-describedby', ids ? ids + ' ' + hoverTip.id : hoverTip.id);
+      (owner.closest('dialog[open]') || document.body).append(hoverTip);
+    }
+    setText(hoverTip, message);
+    hoverTip.hidden = false;
+    const anchor = owner.getBoundingClientRect();
+    const x = point?.clientX ?? anchor.left, y = point?.clientY ?? anchor.bottom;
+    const width = hoverTip.offsetWidth, height = hoverTip.offsetHeight, gap = 12, margin = 8;
+    const left = x + gap + width <= window.innerWidth - margin ? x + gap : x - gap - width;
+    const top = y + gap + height <= window.innerHeight - margin ? y + gap : (point ? y : anchor.top) - gap - height;
+    hoverTip.style.left = Math.max(margin, Math.min(left, window.innerWidth - width - margin)) + 'px';
+    hoverTip.style.top = Math.max(margin, Math.min(top, window.innerHeight - height - margin)) + 'px';
+  }
+  document.addEventListener('pointermove', event => {
+    const owner = event.target.closest?.('[data-tooltip]');
+    if (owner?.dataset.tooltip) showTooltip(owner, owner.dataset.tooltip, event);
+    else if (!tooltipOwner?.contains(event.target)) hideTooltip();
+  });
+  document.addEventListener('pointerout', event => {
+    if (tooltipOwner?.contains(event.target) && !tooltipOwner.contains(event.relatedTarget)) hideTooltip();
+  });
+  document.addEventListener('focusin', event => {
+    const owner = event.target.closest?.('[data-tooltip]');
+    if (owner?.dataset.tooltip) showTooltip(owner, owner.dataset.tooltip);
+  });
+  document.addEventListener('focusout', event => {
+    if (tooltipOwner?.contains(event.target)) hideTooltip();
+  });
+  document.addEventListener('keydown', event => { if (event.key === 'Escape') hideTooltip(); });
+  document.addEventListener('scroll', () => hideTooltip(), true);
+  window.addEventListener('resize', () => hideTooltip());
   function badge(outcome) { return node('span', 'badge ' + outcome.tone, outcome.label); }
   function replaceBadge(el, outcome) { el.className = 'badge ' + outcome.tone; setText(el, outcome.label); }
   function timeLabel(value, full) {
@@ -82,7 +132,7 @@
       const version = await response.json();
       const build = version.build_date && version.build_date !== 'unknown' ? timeLabel(version.build_date, true) : '构建时间未知';
       text('buildInfo', (version.version || '版本未知') + ' · ' + (version.commit || 'commit 未知') + ' · 构建 ' + build);
-      $('buildInfo').title = '构建时间原值：' + (version.build_date || 'unknown');
+      $('buildInfo').dataset.tooltip = '构建时间原值：' + (version.build_date || 'unknown');
       const embedded = document.querySelector('meta[name="dashboard-build"]').content;
       if (embedded !== version.version) toast('页面资源与服务版本不一致，请刷新页面。');
     } catch (_) { text('buildInfo', '版本信息不可用'); }
@@ -102,7 +152,7 @@
     service.replaceChildren(node('i'), document.createTextNode(d.running ? '请求转发运行中' : '请求转发已停用'));
     text('serviceControl', d.running ? '停用转发' : '启用转发');
     $('serviceControl').disabled = false;
-    text('uptime', C.formatUptime(d.uptime)); $('uptime').title = '服务启动：' + timeLabel(d.start_time, true) + ' · 原始时长：' + d.uptime;
+    text('uptime', C.formatUptime(d.uptime)); $('uptime').dataset.tooltip = '服务启动：' + timeLabel(d.start_time, true) + ' · 原始时长：' + d.uptime;
   }
   function setOptions(el, options, selected) {
     const signature = JSON.stringify(options);
@@ -130,15 +180,22 @@
     reconcile($('providerGroups'), groups, v => v.key, create, (button, v) => {
       button.dataset.group = v.key; button.setAttribute('aria-pressed', String(selected === v.key));
       setText(button.firstChild, v.label); setText(button.lastChild, v.count);
-      button.title = v.label + ' · ' + v.count + ' 个已记录供应商；点击切换该分组';
+      button.dataset.tooltip = v.label + ' · ' + v.count + ' 个已配置供应商；点击切换该分组';
     });
   }
   const priorityFilterLabel = (priority, active) => 'P' + priority + (active.has(priority) ? '' : '（历史）');
   function syncFilters() {
     const d = state.data;
     const active = new Set(C.activePriorities(d));
-    const priorities = new Set([...active, ...d.providers.map(p => Number(p.priority)), ...d.recent_attempts.map(a => Number(a.priority))]);
-    const models = new Set([...d.providers.map(p => p.model_id), ...d.recent_attempts.map(a => a.model_id)].filter(Boolean));
+    const entries = state.pane === 'providers' ? d.providers : [...d.providers, ...d.recent_attempts];
+    const priorities = new Set(entries.map(p => Number(p.priority)));
+    const models = new Set(entries.map(p => p.model_id).filter(Boolean));
+    if (state.pane === 'providers') {
+      if (!priorities.has(Number(state.filters.priority))) state.filters.priority = '';
+      if (!models.has(state.filters.model)) state.filters.model = '';
+    } else {
+      for (const p of active) priorities.add(p);
+    }
     setOptions($('priorityFilter'), [['', '全部优先级'], ...Array.from(priorities).filter(p => p > 0).sort((a, b) => a - b).map(p => [String(p), priorityFilterLabel(p, active)])], state.filters.priority);
     setOptions($('modelFilter'), [['', '全部模型'], ...Array.from(models).sort().map(m => [m, m])], state.filters.model);
     const labels = state.pane === 'providers' ? ['全部最近状态', '最近成功', '最近限流 429', '最近其他失败', '最近取消', '暂无尝试'] :
@@ -181,7 +238,7 @@
       setText(lines.children[1], cb ? '失败记录 ' + C.count(cb.failures) + (cb.open ? ' · 冷却剩余 ' + C.count(cb.cooldown_rem_sec) + 's' : ' · 允许路由') : '不能据此判定健康');
       const quality = card.querySelector('.priority-state'); quality.className = 'priority-state' + (limited ? ' warning-text' : '');
       setText(quality, sample.length ? '近样本 ' + limited + ' 次限流' : '暂无近样本');
-      card.title = 'P' + priority + '：点击筛选最近尝试；熔断状态与上游质量分别统计。';
+      card.dataset.tooltip = 'P' + priority + '：点击筛选最近尝试；熔断状态与上游质量分别统计。';
     });
     Array.from(grid.children).forEach(child => { if (!retained.has(child.dataset.priority)) child.remove(); });
   }
@@ -225,12 +282,12 @@
       return row;
     }, (row, p) => {
       const priority = row.cells[0].firstChild; setText(priority, 'P' + p.priority); priority.style.setProperty('--priority-color', C.priorityColor(p.priority));
-      const name = row.cells[1].firstChild; setText(name, C.providerLabel(p)); name.title = p.name; name.dataset.name = p.name;
-      setText(row.cells[1].lastChild, p.model_id); row.cells[1].lastChild.title = p.model_id;
+      const name = row.cells[1].firstChild; setText(name, C.providerLabel(p)); name.dataset.tooltip = p.name; name.dataset.name = p.name;
+      setText(row.cells[1].lastChild, p.model_id); row.cells[1].lastChild.dataset.tooltip = p.model_id;
       [p.total, p.success, p.fail, p.client_abort].forEach((n, i) => setText(row.cells[i + 2], C.formatCount(n)));
       const streak = C.providerStreak(p); setText(row.cells[6], streak === null ? '—' : C.formatCount(streak));
       row.cells[6].classList.toggle('warning-text', streak > 0);
-      row.cells[6].title = streak === null ? '旧记录缺少最近状态，无法还原连续失败次数' : '成功后归零；取消不增加也不中断';
+      row.cells[6].dataset.tooltip = streak === null ? '旧记录缺少最近状态，无法还原连续失败次数' : '成功后归零；取消不增加也不中断';
       setText(row.cells[7], C.formatRate(C.ratio(p.success, p.fail)));
       setText(row.cells[8], p.latency_count > 0 ? C.formatDuration(p.latency_avg_ms) : '—');
       replaceBadge(row.cells[9].firstChild, C.providerOutcome(p));
@@ -256,7 +313,7 @@
       const button = node('button', 'row-detail', '↗'); button.type = 'button'; button.dataset.action = 'request'; row.cells[8].append(button);
       return row;
     }, (row, g) => {
-      const id = row.cells[0].firstChild; setText(id, g.missingId ? '未提供请求 ID' : g.id.slice(0, 12)); id.dataset.id = g.id; id.title = g.id;
+      const id = row.cells[0].firstChild; setText(id, g.missingId ? '未提供请求 ID' : g.id.slice(0, 12)); id.dataset.id = g.id; id.dataset.tooltip = g.id;
       setText(row.cells[1].firstChild, g.models.join(' / ') || '模型未知'); setText(row.cells[1].lastChild, g.priorities.map(p => 'P' + p).join(' / '));
       setText(row.cells[2], g.attempts.length); setText(row.cells[3], g.providers.length + ' 个账号'); replaceBadge(row.cells[4].firstChild, g.outcome);
       setText(row.cells[5], timingText(g.timing?.first_response_ms)); setText(row.cells[6], timingText(g.timing?.total_ms)); setText(row.cells[7], timeLabel(g.latest));
@@ -284,11 +341,14 @@
         setText(button.lastChild, c.label + ' ' + value);
         button.setAttribute('aria-pressed', String(selection.has(c.priority)));
         button.setAttribute('aria-label', c.label + '曲线');
-        button.title = c.label + ' · ' + c.points.length + ' 个独立采样点；点击显示或隐藏，可多选';
+        button.dataset.tooltip = (kind === 'latency' ? '图例显示所选范围内最近完成的一次成功上游尝试。计时从这一次尝试开始，到响应转发结束。' :
+          '图例显示所选范围内最后一个滚动成功率。分母只包含成功和失败的有效尝试。') +
+          '\n' + c.points.length + ' 个采样点。点击切换曲线。';
       });
       const selected = curves.filter(c => selection.has(c.priority));
       if (kind === 'latency') drawLatencyStatistics(selected);
-      text(kind + 'Caption', selected.length ? '独立样本序号 · 非时间轴' + (kind === 'latency' ? ' · 秒 / 不含退避' : ' · 按 50 次上游尝试滚动计算') : '点击图例选择一条或多条曲线');
+      text(kind + 'Caption', selected.length ? (kind === 'latency' ? '独立样本序号 · 图例为最近一次成功尝试 · 不含退避' :
+        '独立样本序号 · 所选范围内按 50 次有效尝试滚动') : '点击图例选择一条或多条曲线');
       setText($(kind + 'Empty').querySelector('strong'), !selected.length ? '未选择曲线' : kind === 'rate' ? '暂无成功率样本' : '暂无成功耗时样本');
       drawChart(kind, selected.filter(c => c.points.length), force);
     }
@@ -325,7 +385,7 @@
       { minimum: 0, maximum: Math.max(.01, (multiple > 5 ? 10 : multiple > 2 ? 5 : multiple > 1 ? 2 : 1) * scale) };
     state.chartCache[kind] = { signature, width, height, series, maxLength, pad, plotWidth, maximum, active: 0 };
     empty.hidden = maxLength > 0;
-    if (!maxLength) { svg.replaceChildren(); svg.setAttribute('aria-label', kind === 'rate' ? '暂无成功率样本' : '暂无成功耗时样本'); $(kind + 'Tooltip').hidden = true; return; }
+    if (!maxLength) { svg.replaceChildren(); svg.setAttribute('aria-label', kind === 'rate' ? '暂无成功率样本' : '暂无成功耗时样本'); hideTooltip(svg); return; }
     const x = i => pad.left + plotWidth * i / Math.max(1, maxLength - 1);
     const y = value => pad.top + plotHeight - (value - minimum) / (maximum - minimum) * plotHeight;
     svg.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
@@ -345,23 +405,23 @@
     }
     svg.innerHTML = markup; // Only finite geometry and generated colors enter this SVG.
   }
-  function chartTooltip(kind, index) {
+  function chartTooltip(kind, index, point) {
     const cache = state.chartCache[kind]; if (!cache?.maxLength) return;
     cache.active = Math.max(0, Math.min(cache.maxLength - 1, index));
     const lines = ['采样 #' + (cache.active + 1) + ' · 非时间轴'];
     cache.series.forEach(s => { if (cache.active < s.points.length) lines.push(s.label + '：' + (kind === 'rate' ? C.formatRate(s.points[cache.active]) : C.formatDuration(s.points[cache.active] * 1000))); });
-    text(kind + 'Tooltip', lines.join('\n')); $(kind + 'Tooltip').hidden = false;
+    showTooltip($(kind + 'Chart'), lines.join('\n'), point);
   }
   function bindChart(kind) {
     const svg = $(kind + 'Chart');
     svg.addEventListener('pointermove', event => {
       const cache = state.chartCache[kind]; if (!cache?.maxLength) return;
       const x = event.clientX - svg.getBoundingClientRect().left;
-      chartTooltip(kind, Math.round((x - cache.pad.left) / cache.plotWidth * (cache.maxLength - 1)));
+      chartTooltip(kind, Math.round((x - cache.pad.left) / cache.plotWidth * (cache.maxLength - 1)), event);
     });
-    svg.addEventListener('pointerleave', () => { $(kind + 'Tooltip').hidden = true; });
+    svg.addEventListener('pointerleave', () => hideTooltip(svg));
     svg.addEventListener('focus', () => chartTooltip(kind, (state.chartCache[kind]?.maxLength || 1) - 1));
-    svg.addEventListener('blur', () => { $(kind + 'Tooltip').hidden = true; });
+    svg.addEventListener('blur', () => hideTooltip(svg));
     svg.addEventListener('keydown', event => {
       const cache = state.chartCache[kind]; if (!cache?.maxLength) return;
       if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); chartTooltip(kind, cache.active + (event.key === 'ArrowLeft' ? -1 : 1)); }
@@ -407,7 +467,7 @@
       actionButton('查看关联日志', () => { $('detailDrawer').close(); filterTo('logs', { query: p.name }); }));
     const items = [['模型', p.model_id || '—'], ['优先级', 'P' + p.priority], ['已记录尝试', C.formatCount(p.total)], ['成功 / 失败', C.formatCount(p.success) + ' / ' + C.formatCount(p.fail)],
       ['取消尝试', C.formatCount(p.client_abort)], ['最近连续失败', C.providerStreak(p) === null ? '未知（旧存档无最近状态）' : C.formatCount(C.providerStreak(p))], ['有效成功率', C.formatRate(C.ratio(p.success, p.fail))], ['平均尝试耗时', p.latency_count > 0 ? C.formatDuration(p.latency_avg_ms) : '—'], ['最近活动', timeLabel(p.last_activity, true)]];
-    const note = node('p', 'detail-description', '打开时的数据快照。平均耗时包含所有已记录的上游尝试，不是客户端端到端耗时。');
+    const note = node('p', 'detail-description', $('providerLatencyHeading').dataset.tooltip);
     const error = node('pre', 'detail-raw', p.last_err || '当前快照没有最近错误。');
     showDetail('供应商详情 · 累计统计', C.providerLabel(p), [status, actions, title, detailGrid(items), note, node('h3', '', '最近错误原文'), error]);
   }
@@ -467,7 +527,7 @@
     const entries = $('logEntries');
     const create = log => {
       const details = node('details', 'log-row'), summary = node('summary');
-      const id = node('button', 'table-link request-id'); id.type = 'button'; id.dataset.copyId = log.requestId; id.title = '复制完整请求 ID';
+      const id = node('button', 'table-link request-id'); id.type = 'button'; id.dataset.copyId = log.requestId; id.dataset.tooltip = '复制完整请求 ID';
       const time = node('span', 'log-timestamp');
       time.append(node('span', 'log-time', log.time), node('span', 'log-event', log.event));
       const provider = node('span', 'log-provider');
@@ -478,7 +538,7 @@
         provider.append(heading);
       }
       const providerName = node('span', 'log-provider-name', log.provider || '—');
-      if (log.provider) providerName.title = log.provider;
+      if (log.provider) providerName.dataset.tooltip = log.provider;
       provider.append(providerName);
       if (log.provider && log.providerRole) provider.append(node('span', 'log-provider-role', log.providerRole));
       const result = node('span', 'log-result');
@@ -489,29 +549,29 @@
           'route-switch': '路由选中了下一个可尝试的账号。实际调用及其结果见后续的上游尝试日志。',
           'route-skip': '该候选账号未通过限流检查，本次请求直接略过该账号。每个略过的账号各有一条记录。',
           'client-limited': '这是代理返回给客户端的状态，不另计一次上游尝试' };
-        if (meanings[log.key] || log.description) resultBadge.title = meanings[log.key] || log.description;
+        if (meanings[log.key] || log.description) resultBadge.dataset.tooltip = meanings[log.key] || log.description;
         result.append(resultBadge);
       }
       if (log.milestone) {
         details.classList.add(log.milestone.tone);
         const milestone = badge(log.milestone);
-        if (log.description) milestone.title = log.description;
+        if (log.description) milestone.dataset.tooltip = log.description;
         result.append(milestone);
       }
       const elapsed = node('span', 'log-elapsed');
       if (log.timingLabel) {
         const value = node('span', '', C.formatLogDuration(log.timingMs));
-        value.title = log.timingDescription + (Number.isFinite(log.timingMs) ? ' 原始耗时：' + log.timingMs.toLocaleString('zh-CN', { maximumFractionDigits: 6 }) + ' ms。' : '');
+        value.dataset.tooltip = log.timingDescription + (Number.isFinite(log.timingMs) ? ' 原始耗时：' + log.timingMs.toLocaleString('zh-CN', { maximumFractionDigits: 6 }) + ' ms。' : '');
         elapsed.append(node('span', 'log-elapsed-label', log.timingLabel), value);
       }
       else setText(elapsed, '—');
       if (log.retryGapMs !== null) {
         const label = node('span', 'log-elapsed-label log-retry-gap', '重试发起间隔');
-        label.title = '同一账号上一次尝试发起到本次发起的实际间隔';
+        label.dataset.tooltip = '同一账号上一次尝试发起到本次发起的实际间隔';
         elapsed.append(label, node('span', '', C.formatLogDuration(log.retryGapMs)));
       }
       const attempt = node('span', 'log-attempt mono', log.attemptNumber || '—');
-      if (log.attemptNumber) attempt.title = '本账号第几次尝试 / 本账号最大尝试次数（含首次）';
+      if (log.attemptNumber) attempt.dataset.tooltip = '本账号第几次尝试 / 本账号最大尝试次数（含首次）';
       summary.append(time, id, provider, result, attempt, elapsed, node('span', 'log-message', log.detail.slice(0, 450)));
       setText(id, log.requestId ? log.requestId.slice(0, 10) : '—'); id.disabled = !log.requestId;
       details.append(summary, node('pre', '', log.raw));
@@ -522,7 +582,7 @@
       const knownModel = modelFor(log), model = knownModel || '模型未知';
       const label = row.querySelector('.log-provider-model');
       setText(label, model);
-      if (label.title !== model) label.title = model;
+      if (label.dataset.tooltip !== model) label.dataset.tooltip = model;
       const priority = priorityFor(log), tag = row.querySelector('.log-priority');
       row.dataset.logPriority = String(priority);
       row.classList.toggle('log-model-row', Boolean(knownModel));
@@ -531,7 +591,7 @@
       if (priority > 0) {
         setText(tag, 'P' + priority);
         tag.style.setProperty('--priority-color', C.priorityColor(priority));
-        tag.title = '优先级 P' + priority + (log.priority ? '' : '（关联同一请求、同一供应商的尝试记录）');
+        tag.dataset.tooltip = '优先级 P' + priority + (log.priority ? '' : '（关联同一请求、同一供应商的尝试记录）');
       }
     };
     if (previous) {
@@ -699,8 +759,11 @@
     $(kind + 'Overall').addEventListener('click', () => { state.chartSelections[kind] = new Set([0]); save(); drawCharts(true); });
   }
   for (const kind of ['rate', 'latency']) bindChart(kind);
-  $('trendRequestWindow').addEventListener('change', () => {
-    state.trendWindow = Number($('trendRequestWindow').value);
+  $('trendRange').addEventListener('click', event => {
+    const button = event.target.closest('button[data-window]');
+    if (!button) return;
+    state.trendWindow = Number(button.dataset.window);
+    for (const choice of $('trendRange').children) choice.setAttribute('aria-pressed', String(choice === button));
     drawCharts(true);
   });
   $('logRows').addEventListener('click', event => {

@@ -100,6 +100,7 @@ func New(cfg *config.Config, configPath string) *Instance {
 
 	r.GET("/api/stats", func(c *gin.Context) {
 		snap := statsCollector.Snapshot()
+		snap.UseConfiguredProviders(engine.ConfiguredProviders())
 		snap.CB = engine.CBSnapshot()
 		snap.ConfiguredPriorities = make([]int, 0, len(snap.CB))
 		for _, group := range snap.CB {

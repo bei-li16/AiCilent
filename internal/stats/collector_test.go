@@ -173,6 +173,9 @@ func TestTrendsAssociateAttemptsWithClientRequestsAndSuccessfulModels(t *testing
 		t.Fatalf("rate samples must use inbound request order for retries and late results: seq=%d, samples=%+v",
 			snapshot.TrendRequestSeq, snapshot.Curves[0])
 	}
+	if !slices.Equal(snapshot.Curves[0].Successes, []bool{false, true, true, true}) {
+		t.Fatalf("rate outcomes were not retained: %+v", snapshot.Curves[0])
+	}
 	if !slices.Equal(snapshot.LatencyCurves[0].Requests, []uint64{105, 6, 0}) {
 		t.Fatalf("latency curve must contain successful samples only: %+v", snapshot.LatencyCurves[0])
 	}
@@ -181,6 +184,37 @@ func TestTrendsAssociateAttemptsWithClientRequestsAndSuccessfulModels(t *testing
 		!slices.Equal(models[0].Requests, []uint64{105, 0}) || models[1].Model != "model-b" ||
 		!slices.Equal(models[1].Points, []float64{3}) || !slices.Equal(models[1].Requests, []uint64{6}) {
 		t.Fatalf("model samples must preserve successful durations and request order: %+v", models)
+	}
+}
+
+func TestProviderProjectionUsesCurrentModelAndPriority(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stats.json")
+	c := New(path)
+	c.Record("old", "account", "old-model", 6, false, 429, "limited", time.Second)
+	c.Record("removed", "removed-account", "other-model", 5, true, 200, "", time.Second)
+	c.Save()
+
+	c = New(path)
+	configured := []ProviderIdentity{{Name: "account", ModelID: "new-model", Priority: 2}}
+	snapshot := func() Snapshot {
+		s := c.Snapshot()
+		s.UseConfiguredProviders(configured)
+		return s
+	}
+	before := snapshot()
+	if len(before.Providers) != 1 || before.Providers[0].identity() != configured[0] ||
+		before.Providers[0].Total != 0 || before.TotalReq != 2 {
+		t.Fatalf("configured account should start empty, preserving global totals: %+v", before)
+	}
+	c.Record("new", "account", "new-model", 2, true, 200, "", 2*time.Second)
+	c.Record("late", "account", "old-model", 6, false, 429, "limited", time.Second)
+	if row := snapshot().Providers[0]; row.Total != 1 || row.Success != 1 || row.LatencyAvgMs != 2000 {
+		t.Fatalf("historical model leaked into the active account: %+v", row)
+	}
+	c.Reset()
+	after := snapshot()
+	if len(after.Providers) != 1 || after.Providers[0].identity() != configured[0] || after.Providers[0].Total != 0 {
+		t.Fatalf("reset should retain only the configured account in the dashboard: %+v", after.Providers)
 	}
 }
 

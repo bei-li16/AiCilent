@@ -25,8 +25,8 @@
         <span class="connection" id="statsStatus"><i></i>统计连接中</span>
         <div class="management-actions" role="group" aria-label="服务管理">
           <button type="button" id="serviceControl" class="button secondary" disabled>等待状态</button>
-          <button type="button" id="resetStats" class="button secondary" title="重置服务端统计">重置统计</button>
-          <button type="button" id="clearServerLogs" class="button secondary" title="清空服务端日志文件">清空日志</button>
+          <button type="button" id="resetStats" class="button secondary" data-tooltip="重置服务端统计">重置统计</button>
+          <button type="button" id="clearServerLogs" class="button secondary" data-tooltip="清空服务端日志文件">清空日志</button>
         </div>
       </div>
     </header>
@@ -36,10 +36,10 @@
         <div class="section-heading"><div><p class="eyebrow">运行总览</p><h2 id="overviewTitle">请求与上游质量</h2></div><div class="overview-meta"><span class="scope-label">累计统计 · 清零后重新计数</span><span id="updatedAt">等待首次更新</span></div></div>
         <div id="dataNotice" class="data-notice" role="status" hidden></div>
         <div class="metrics">
-          <article class="metric"><div class="metric-label">客户端请求 <span class="info" title="累计进入网关的请求，不等于最终已完成请求数">i</span></div><div class="metric-value" id="totalClient">—</div><p>累计进入网关的请求</p></article>
+          <article class="metric"><div class="metric-label">客户端请求 <span class="info" data-tooltip="累计进入网关的请求，不等于最终已完成请求数">i</span></div><div class="metric-value" id="totalClient">—</div><p>累计进入网关的请求</p></article>
           <article class="metric"><div class="metric-label">上游尝试</div><div class="metric-value" id="totalAttempts">—</div><p id="attemptAverage">包含重试与账号切换</p></article>
           <article class="metric"><div class="metric-label">失败尝试</div><div class="metric-value metric-failure-value" id="totalFailed">—</div><p>包含限流、超时及其他失败</p></article>
-          <article class="metric" title="按客户端请求统计，完整成功只计一次。旧版没有保存的结果不会回填，尚未结束的请求不计入结果。"><div class="metric-label">客户端请求成功</div><div class="metric-value metric-success-value" id="totalClientSuccess">—</div><p id="clientSuccessScope">从本次升级开始记录结果</p></article>
+          <article class="metric" data-tooltip="按客户端请求统计，完整成功只计一次。旧版没有保存的结果不会回填，尚未结束的请求不计入结果。"><div class="metric-label">客户端请求成功</div><div class="metric-value metric-success-value" id="totalClientSuccess">—</div><p id="clientSuccessScope">从本次升级开始记录结果</p></article>
           <article class="metric featured"><div class="metric-label">上游尝试成功率</div><div class="metric-value metric-success-value" id="attemptRate">—</div><p id="rateFraction">成功 /（成功 + 失败）</p><span class="metric-footnote">取消尝试不计入分母</span></article>
           <article class="metric"><div class="metric-label">取消尝试</div><div class="metric-value metric-failure-value" id="totalCanceled">—</div><p>单独记录，不作为上游失败</p></article>
         </div>
@@ -54,29 +54,31 @@
       <div class="operations">
       <aside class="telemetry" aria-label="趋势与优先级">
       <div class="trend-controls">
-        <label for="trendRequestWindow">趋势范围</label>
-        <select id="trendRequestWindow" title="两个图共用范围，最近 50/100 按客户端请求进入代理的顺序选取，全部为本次运行保留的样本">
-          <option value="0">全部保留样本</option><option value="50">最近 50 个请求</option><option value="100">最近 100 个请求</option>
-        </select>
+        <span id="trendRangeLabel">趋势范围</span>
+        <div class="trend-range" id="trendRange" role="group" aria-labelledby="trendRangeLabel" data-tooltip="两个图共用范围。最近 50 / 100 按客户端请求进入代理的顺序选取。">
+          <button type="button" data-window="0" aria-pressed="true">全部保留样本</button>
+          <button type="button" data-window="50" aria-pressed="false">最近 50 个请求</button>
+          <button type="button" data-window="100" aria-pressed="false">最近 100 个请求</button>
+        </div>
       </div>
       <section class="trends" aria-label="独立样本趋势">
         <article class="panel chart-panel">
           <div class="panel-heading"><div><p class="eyebrow">QUALITY / 尝试质量</p><h2>上游尝试成功率</h2></div><div class="chart-actions"><button type="button" id="rateAll">显示全部</button><button type="button" id="rateOverall">仅汇总</button></div></div>
           <div class="legend-row"><span class="legend-hint">多选</span><div class="chart-legend" id="rateLegend" aria-label="成功率曲线，可多选"></div></div>
-          <div class="chart-canvas" id="rateCanvas"><svg id="rateChart" role="img" aria-label="上游尝试成功率样本序列，方向键查看样本" tabindex="0"></svg><div class="chart-empty" id="rateEmpty"><span aria-hidden="true">⌁</span><strong>暂无成功率样本</strong><p>真实上游尝试发生后生成序列</p></div><div class="chart-tooltip" id="rateTooltip" hidden></div></div>
+          <div class="chart-canvas" id="rateCanvas"><svg id="rateChart" role="img" aria-label="上游尝试成功率样本序列，方向键查看样本" tabindex="0"></svg><div class="chart-empty" id="rateEmpty"><span aria-hidden="true">⌁</span><strong>暂无成功率样本</strong><p>真实上游尝试发生后生成序列</p></div></div>
           <p class="chart-caption" id="rateCaption">横轴为各序列独立采样序号，不表示同一时刻。</p>
         </article>
         <article class="panel chart-panel">
           <div class="panel-heading"><div><p class="eyebrow">LATENCY / 成功尝试耗时</p><h2>上游处理与传输</h2></div><div class="chart-actions"><button type="button" id="latencyAll">显示全部</button><button type="button" id="latencyOverall">仅汇总</button></div></div>
           <div class="legend-row latency-legend-row"><span class="legend-hint">多选</span><div class="chart-legend" id="latencyLegend" aria-label="耗时曲线，可多选"></div><div class="latency-samples" id="latencySamples" hidden><strong id="latencySampleCount" class="latency-number">0</strong> 次成功尝试</div></div>
-          <div class="chart-canvas" id="latencyCanvas"><svg id="latencyChart" role="img" aria-label="成功上游尝试耗时，方向键查看样本" tabindex="0"></svg><div class="chart-empty" id="latencyEmpty"><span aria-hidden="true">⌁</span><strong>暂无成功耗时样本</strong><p>不会用零值代替未知数据</p></div><div class="chart-tooltip" id="latencyTooltip" hidden></div></div>
-          <div class="latency-quantiles" id="latencyQuantiles" aria-label="所选曲线的成功尝试耗时分位数" hidden><span title="约一半的成功尝试在这个时间内完成">P50 <span id="latencyP50">—</span></span><span title="约 95% 的成功尝试在这个时间内完成">P95 <span id="latencyP95">—</span></span></div>
+          <div class="chart-canvas" id="latencyCanvas"><svg id="latencyChart" role="img" aria-label="成功上游尝试耗时，方向键查看样本" tabindex="0"></svg><div class="chart-empty" id="latencyEmpty"><span aria-hidden="true">⌁</span><strong>暂无成功耗时样本</strong><p>不会用零值代替未知数据</p></div></div>
+          <div class="latency-quantiles" id="latencyQuantiles" aria-label="所选曲线的成功尝试耗时分位数" hidden><span data-tooltip="约一半的成功尝试在这个时间内完成">P50 <span id="latencyP50">—</span></span><span data-tooltip="约 95% 的成功尝试在这个时间内完成">P95 <span id="latencyP95">—</span></span></div>
           <p class="chart-caption" id="latencyCaption">独立样本序号 · 单位秒，不含退避；非端到端或首字延迟。</p>
         </article>
       </section>
 
       <section class="priorities" aria-labelledby="priorityTitle">
-        <div class="section-heading compact"><h2 id="priorityTitle">优先级与熔断</h2><span class="muted" title="按当前运行 YAML 显示。熔断关闭不等于上游没有限流；点击卡片查看最近尝试。">当前配置 · 点击查看</span></div>
+        <div class="section-heading compact"><h2 id="priorityTitle">优先级与熔断</h2><span class="muted" data-tooltip="按当前运行 YAML 显示。熔断关闭不等于上游没有限流；点击卡片查看最近尝试。">当前配置 · 点击查看</span></div>
         <div class="priority-grid" id="priorityGrid"><p class="empty-inline">暂无优先级记录</p></div>
       </section>
       </aside>
@@ -96,7 +98,7 @@
           <label><span class="sr-only">优先级</span><select id="priorityFilter" aria-label="筛选优先级"><option value="">全部优先级</option></select></label>
           <label><span class="sr-only">模型</span><select id="modelFilter" aria-label="筛选模型"><option value="">全部模型</option></select></label>
           <label><span class="sr-only">结果</span><select id="resultFilter" aria-label="筛选结果"><option value="">全部结果</option><option value="success">成功记录</option><option value="limited">限流 429</option><option value="failed">其他失败</option><option value="canceled">取消</option><option value="unseen">暂无尝试</option></select></label>
-          <label id="logLevelControl" hidden><span class="sr-only">日志级别</span><select id="logLevelFilter" aria-label="筛选日志级别" title="按事件和结果归类；原始日志没有统一的级别字段"><option value="">全部级别</option><option value="warn+">WARN 及以上</option><option value="error">ERROR · 错误</option><option value="warn">WARN · 警告</option><option value="info">INFO · 常规</option><option value="debug">DEBUG · 诊断</option></select></label>
+          <label id="logLevelControl" hidden><span class="sr-only">日志级别</span><select id="logLevelFilter" aria-label="筛选日志级别" data-tooltip="按事件和结果归类；原始日志没有统一的级别字段"><option value="">全部级别</option><option value="warn+">WARN 及以上</option><option value="error">ERROR · 错误</option><option value="warn">WARN · 警告</option><option value="info">INFO · 常规</option><option value="debug">DEBUG · 诊断</option></select></label>
           <button type="button" class="button ghost" id="resetFilters">重置筛选</button>
           </div>
         </form>
@@ -107,7 +109,7 @@
             <div class="provider-rule-row"><label class="group-mode"><span class="sr-only">供应商分组方式</span><select id="providerGroupBy" aria-label="供应商分组方式"><option value="model">按模型切换</option><option value="priority">按优先级切换</option></select></label><div id="providerGroups" class="filter-chips" aria-label="供应商分组"></div></div>
           </div>
           <div class="table-toolbar"><p id="providerCount">等待供应商数据</p><label>排序 <select id="providerSort" aria-label="供应商排序"><option value="priority">优先级、名称</option><option value="streak">最近连续失败最多</option><option value="fail">累计失败最多</option><option value="rate">有效成功率最低</option><option value="latency">平均尝试耗时最长</option><option value="recent">最近活跃</option><option value="name">供应商名称</option></select></label></div>
-          <div class="table-scroll" id="providerScroll"><table id="providerTable"><caption class="sr-only">供应商累计上游尝试统计</caption><thead><tr><th>优先级</th><th>供应商 / 模型</th><th class="number">尝试</th><th class="number">成功</th><th class="number">失败</th><th class="number">取消</th><th class="number" title="成功后归零；客户端取消不增加也不中断上游失败计数。旧存档缺少最近状态时显示 —。">最近连续失败</th><th class="number">有效成功率</th><th class="number" title="单次上游尝试从开始到结束的平均耗时，含限流、失败和取消。成功流式响应计到传输结束，尝试之间的退避不计入。">平均尝试耗时</th><th>最近状态</th><th><span class="sr-only">详情</span></th></tr></thead><tbody id="providerBody"></tbody></table></div>
+          <div class="table-scroll" id="providerScroll"><table id="providerTable"><caption class="sr-only">供应商累计上游尝试统计</caption><thead><tr><th>优先级</th><th>供应商 / 模型</th><th class="number">尝试</th><th class="number">成功</th><th class="number">失败</th><th class="number">取消</th><th class="number" data-tooltip="成功后归零；客户端取消不增加也不中断上游失败计数。旧存档缺少最近状态时显示 —。">最近连续失败</th><th class="number">有效成功率</th><th id="providerLatencyHeading" class="number" tabindex="0" data-tooltip="该供应商已记录的每次尝试耗时之和 ÷ 尝试次数，包含成功、限流、失败和取消。&#10;起点：代理开始这一次上游尝试。成功流式响应计到向客户端转发结束；非流式计到写出响应。429、其他错误或取消计到该次尝试返回错误或停止。&#10;多次重试分别计时。账号之间的切换、重试退避和只跳过未尝试的账号不计入。">平均尝试耗时</th><th>最近状态</th><th><span class="sr-only">详情</span></th></tr></thead><tbody id="providerBody"></tbody></table></div>
           <div class="empty-state" id="providerEmpty" hidden><strong>没有匹配的供应商</strong><p>调整筛选条件，或等待真实尝试产生。</p></div>
           <div class="pagination"><span id="providerPageInfo">0 条</span><span class="mobile-hint">表格可左右滑动</span><div><button class="button secondary" id="providerPrev" type="button" aria-label="供应商上一页">← 上一页</button><span id="providerPageNumber">0 / 0</span><button class="button secondary" id="providerNext" type="button" aria-label="供应商下一页">下一页 →</button></div></div>
         </div>
@@ -115,7 +117,7 @@
         <div id="paneRequests" role="tabpanel" aria-labelledby="tabRequests" hidden>
           <div class="table-toolbar"><p id="requestCount">等待近期请求计时和尝试记录</p><button type="button" class="button secondary" id="refreshRequests">更新请求列表</button></div>
           <p class="scope-note">从代理接收请求开始计时，包含排队、重试等待和换号。首响是首次写出 HTTP 2xx 正文，总耗时截至代理处理结束；无测量值显示 —。</p>
-          <div class="table-scroll" id="requestScroll"><table id="requestTable"><caption class="sr-only">近期请求计时与上游尝试</caption><thead><tr><th>请求 ID</th><th>模型 / 优先级</th><th class="number">已知尝试</th><th>涉及账号</th><th>样本中观察到的结果</th><th class="number" title="从代理接收请求到首次写出成功响应正文">首次成功响应</th><th class="number" title="从代理接收请求到处理结束，含退避和换号">请求总耗时</th><th>最近记录</th><th><span class="sr-only">详情</span></th></tr></thead><tbody id="requestBody"></tbody></table></div>
+          <div class="table-scroll" id="requestScroll"><table id="requestTable"><caption class="sr-only">近期请求计时与上游尝试</caption><thead><tr><th>请求 ID</th><th>模型 / 优先级</th><th class="number">已知尝试</th><th>涉及账号</th><th>样本中观察到的结果</th><th class="number" data-tooltip="从代理接收请求到首次写出成功响应正文">首次成功响应</th><th class="number" data-tooltip="从代理接收请求到处理结束，含退避和换号">请求总耗时</th><th>最近记录</th><th><span class="sr-only">详情</span></th></tr></thead><tbody id="requestBody"></tbody></table></div>
           <div class="empty-state" id="requestEmpty" hidden><strong>没有匹配的请求记录</strong><p>最近记录保留有限，不代表历史中没有请求。</p></div>
           <div class="pagination"><span id="requestPageInfo">0 组</span><div><button class="button secondary" id="requestPrev" type="button" aria-label="请求上一页">← 上一页</button><span id="requestPageNumber">0 / 0</span><button class="button secondary" id="requestNext" type="button" aria-label="请求下一页">下一页 →</button></div></div>
         </div>
@@ -124,7 +126,7 @@
           <div class="log-toolbar"><div><span class="badge neutral" id="logFollowState">自动跟随</span><span id="logBufferInfo" class="muted">等待日志</span></div><div><button type="button" class="button secondary" id="pauseFollow">暂停跟随</button><button type="button" class="button secondary" id="jumpLatest" hidden>跳到最新</button><button type="button" class="button ghost" id="clearLogView">清空当前视图</button></div></div>
           <div id="logRows" class="log-rows" tabindex="0" aria-label="原始日志，向上阅读会暂停跟随">
             <div class="log-column-header" aria-hidden="true">
-              <span title="代理记录该行的本机时刻">时刻 / 事件</span><span>请求 ID</span><span>优先级 / 模型 / 供应商</span><span>结果</span><span title="本账号第几次尝试 / 本账号最大尝试次数（含首次）">尝试次数</span><span>事件耗时</span><span>详情</span>
+              <span data-tooltip="代理记录该行的本机时刻">时刻 / 事件</span><span>请求 ID</span><span>优先级 / 模型 / 供应商</span><span>结果</span><span data-tooltip="本账号第几次尝试 / 本账号最大尝试次数（含首次）">尝试次数</span><span>事件耗时</span><span>详情</span>
             </div>
             <div id="logEntries"></div>
           </div>

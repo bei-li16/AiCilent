@@ -247,3 +247,20 @@ test('latency statistics combine selected priorities without counting the overal
   assert.deepEqual(C.latencySummary([overall, p1, p2]), C.latencySummary([overall]));
   assert.deepEqual(C.latencySummary([curve(3, [])]), { count: 0, p50: null, p95: null, color: C.priorityColor(3) });
 });
+
+test('request windows recalculate rolling success rates from eligible attempts inside the window', () => {
+  const requests = [10, 80, 81, 120, 30, 120];
+  const successes = [true, false, true, false, true, true];
+  const points = [100, 50, 200 / 3, 50, 60, 200 / 3];
+  const data = { trend_request_seq: 120, configured_priorities: [1], curves: [
+    { priority: 0, requests, points, successes },
+    { priority: 1, requests: [10, 80, 120], points: [100, 50, 100 / 3], successes: [true, false, false] }
+  ] };
+  assert.deepEqual(C.chartSeries(data, 'rate')[0].points, points);
+  assert.deepEqual(C.chartSeries(data, 'rate', 50).map(c => c.points), [[0, 50, 100 / 3, 50], [0, 0]]);
+  assert.deepEqual(C.chartSeries(data, 'rate', 100)[0].points, [0, 50, 100 / 3, 50, 60]);
+
+  const long = { trend_request_seq: 120, curves: [{ priority: 0, requests: Array(51).fill(120),
+    successes: [true, ...Array(50).fill(false)], points: Array(51).fill(0) }] };
+  assert.deepEqual(C.chartSeries(long, 'rate', 50)[0].points.slice(-2), [2, 0]);
+});

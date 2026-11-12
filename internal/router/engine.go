@@ -1728,9 +1728,18 @@ func errorDetail(err error) (int, string) {
 	return 0, err.Error()
 }
 
-// CBSnapshot returns a read-only view of every priority's circuit-breaker
-// state for the control console. It mirrors shouldSkipGroup's cooldown math
-// but never mutates state.
+// ConfiguredProviders returns the account identities used by the running config.
+func (e *Engine) ConfiguredProviders() []stats.ProviderIdentity {
+	e.reloadMu.RLock()
+	defer e.reloadMu.RUnlock()
+	providers := make([]stats.ProviderIdentity, 0, len(e.cfg.Providers))
+	for _, p := range e.cfg.Providers {
+		providers = append(providers, stats.ProviderIdentity{Name: p.Name, ModelID: p.ModelID, Priority: p.Priority})
+	}
+	return providers
+}
+
+// CBSnapshot returns a read-only view of every configured priority's circuit-breaker state.
 func (e *Engine) CBSnapshot() []stats.CBState {
 	e.reloadMu.RLock()
 	cooldownSec := e.cfg.Global.CBCooldown

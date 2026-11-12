@@ -35,6 +35,16 @@ type ProviderStats struct {
 	LastActivity    time.Time `json:"last_activity"` // 最近一次尝试时间，用于面板内排序
 }
 
+type ProviderIdentity struct {
+	Name     string
+	ModelID  string
+	Priority int
+}
+
+func (p ProviderStats) identity() ProviderIdentity {
+	return ProviderIdentity{Name: p.Name, ModelID: p.ModelID, Priority: p.Priority}
+}
+
 // CBState is a read-only snapshot of one priority's circuit-breaker state.
 type CBState struct {
 	Priority       int  `json:"priority"`
@@ -48,9 +58,10 @@ type CBState struct {
 // HitRateCurve is one line of the hit-rate chart. Priority 0 = overall;
 // otherwise it is the per-priority rolling success rate.
 type HitRateCurve struct {
-	Priority int       `json:"priority"` // 0 = 全部请求
-	Points   []float64 `json:"points"`   // 每个=最近 hitWindowSize 次尝试的成功率(%)
-	Requests []uint64  `json:"requests"` // corresponding client request sequence, 0 = unknown
+	Priority  int       `json:"priority"`            // 0 = 全部请求
+	Points    []float64 `json:"points"`              // 每个=最近 hitWindowSize 次尝试的成功率(%)
+	Requests  []uint64  `json:"requests"`            // corresponding client request sequence, 0 = unknown
+	Successes []bool    `json:"successes,omitempty"` // raw outcomes for request-window success rates
 }
 
 type ModelLatencyCurve struct {
@@ -105,18 +116,27 @@ func (r *rollingHit) rate() float64 {
 type trendPoint struct {
 	value   float64
 	request uint64
+	success bool
 }
 
 type trendSeries []trendPoint
 
-func (s trendSeries) push(value float64, request uint64) trendSeries {
-	v := trendPoint{value, request}
+func (s trendSeries) push(v trendPoint) trendSeries {
 	if len(s) < hitSeriesCap {
 		return append(s, v)
 	}
 	copy(s, s[1:])
 	s[len(s)-1] = v
 	return s
+}
+
+func (s trendSeries) rateSnapshot(priority int) HitRateCurve {
+	curve := s.snapshot(priority)
+	curve.Successes = make([]bool, len(s))
+	for i, point := range s {
+		curve.Successes[i] = point.success
+	}
+	return curve
 }
 
 func (s trendSeries) snapshot(priority int) HitRateCurve {
@@ -151,6 +171,23 @@ type Snapshot struct {
 	RecentRequests       []RequestTiming     `json:"recent_requests"`
 }
 
+// UseConfiguredProviders exposes only the running YAML entries, with empty
+// counters for accounts whose current model and priority have no samples yet.
+func (s *Snapshot) UseConfiguredProviders(configured []ProviderIdentity) {
+	recorded := make(map[ProviderIdentity]ProviderStats, len(s.Providers))
+	for _, p := range s.Providers {
+		recorded[p.identity()] = p
+	}
+	s.Providers = make([]ProviderStats, 0, len(configured))
+	for _, id := range configured {
+		p, ok := recorded[id]
+		if !ok {
+			p = ProviderStats{Name: id.Name, ModelID: id.ModelID, Priority: id.Priority}
+		}
+		s.Providers = append(s.Providers, p)
+	}
+}
+
 type RequestTiming struct {
 	RequestID       string    `json:"request_id"`
 	Model           string    `json:"model"`
@@ -177,7 +214,7 @@ const trendRequestCap = 100
 
 type Collector struct {
 	mu              sync.Mutex
-	providers       map[string]*ProviderStats
+	providers       map[ProviderIdentity]*ProviderStats
 	totalReq        atomic.Int64 // 上游尝试次数
 	totalClient     atomic.Int64 // 客户端请求数
 	clientCompleted int64
@@ -208,7 +245,7 @@ type Collector struct {
 
 func New(statsPath string) *Collector {
 	c := &Collector{
-		providers:    make(map[string]*ProviderStats),
+		providers:    make(map[ProviderIdentity]*ProviderStats),
 		startTime:    time.Now(),
 		statsPath:    statsPath,
 		prioWin:      make(map[int]*rollingHit),
@@ -264,10 +301,11 @@ func (c *Collector) RecordCanceled(requestID, name, modelID string, priority int
 func (c *Collector) record(requestID, name, modelID string, priority int, success bool, statusCode int, errMsg string, latency time.Duration, canceled bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	ps, ok := c.providers[name]
+	key := ProviderIdentity{Name: name, ModelID: modelID, Priority: priority}
+	ps, ok := c.providers[key]
 	if !ok {
 		ps = &ProviderStats{Name: name, ModelID: modelID, Priority: priority}
-		c.providers[name] = ps
+		c.providers[key] = ps
 	}
 	ps.Total++
 	ps.LastActivity = time.Now()
@@ -340,21 +378,21 @@ func (c *Collector) record(requestID, name, modelID string, priority int, succes
 		// Update health-rate windows under the same lock as counters.
 		requestSeq := c.trendIDs[requestID]
 		c.overallWin.push(success)
-		c.overallSeries = c.overallSeries.push(c.overallWin.rate(), requestSeq)
+		c.overallSeries = c.overallSeries.push(trendPoint{value: c.overallWin.rate(), request: requestSeq, success: success})
 		pw, ok := c.prioWin[priority]
 		if !ok {
 			pw = &rollingHit{}
 			c.prioWin[priority] = pw
 		}
 		pw.push(success)
-		c.prioSeries[priority] = c.prioSeries[priority].push(pw.rate(), requestSeq)
+		c.prioSeries[priority] = c.prioSeries[priority].push(trendPoint{value: pw.rate(), request: requestSeq, success: success})
 		// Latency curve: only successful attempts ("hit") record their duration.
 		if success {
-			seconds := latency.Seconds()
-			c.latencySeries = c.latencySeries.push(seconds, requestSeq)
-			c.prioLatency[priority] = c.prioLatency[priority].push(seconds, requestSeq)
+			point := trendPoint{value: latency.Seconds(), request: requestSeq}
+			c.latencySeries = c.latencySeries.push(point)
+			c.prioLatency[priority] = c.prioLatency[priority].push(point)
 			if modelID != "" {
-				c.modelLatency[modelID] = c.modelLatency[modelID].push(seconds, requestSeq)
+				c.modelLatency[modelID] = c.modelLatency[modelID].push(point)
 			}
 		}
 	}
@@ -400,7 +438,7 @@ func (c *Collector) Snapshot() Snapshot {
 	// Build hit-rate curves: overall first (priority 0), then per-priority sorted.
 	// Done under the lock because Record mutates these slices concurrently.
 	curves := make([]HitRateCurve, 0, 1+len(c.prioSeries))
-	curves = append(curves, c.overallSeries.snapshot(0))
+	curves = append(curves, c.overallSeries.rateSnapshot(0))
 	prios := make([]int, 0, len(c.prioSeries))
 	for p := range c.prioSeries {
 		prios = append(prios, p)
@@ -411,7 +449,7 @@ func (c *Collector) Snapshot() Snapshot {
 		}
 	}
 	for _, p := range prios {
-		curves = append(curves, c.prioSeries[p].snapshot(p))
+		curves = append(curves, c.prioSeries[p].rateSnapshot(p))
 	}
 	latencyCurves := []HitRateCurve{c.latencySeries.snapshot(0)}
 	for _, p := range prios {
@@ -645,7 +683,7 @@ func (c *Collector) load() {
 		if ps.LatencyCount > 0 {
 			ps.LatencyAvgMs = ps.LatencySumMs / float64(ps.LatencyCount)
 		}
-		c.providers[p.Name] = ps
+		c.providers[ps.identity()] = ps
 	}
 	c.clientCompleted = state.ClientCompleted
 	c.clientSuccess = state.ClientSuccess
