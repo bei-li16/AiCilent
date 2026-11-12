@@ -295,30 +295,20 @@
   }
   function drawLatencyStatistics(curves) {
     const samples = $('latencySamples'), quantiles = $('latencyQuantiles');
-    const key = c => String(c.priority);
     samples.hidden = quantiles.hidden = !curves.length;
-    reconcile(samples, curves, key, () => node('span'), (el, c) => {
-      el.style.setProperty('--series-color', c.color);
-      setText(el, c.label + ' ' + C.formatCount(c.points.length) + ' 次成功尝试');
-    });
-    reconcile(quantiles, curves, key, () => {
-      const row = node('div', 'latency-percentiles');
-      row.append(node('strong', 'latency-series-label'));
-      for (const [label, title] of [['P50', '约一半的成功尝试在这个时间内完成'], ['P95', '约 95% 的成功尝试在这个时间内完成']]) {
-        const field = node('span', '', label + ' ');
-        field.title = title;
-        field.append(node('strong'));
-        row.append(field);
+    if (!curves.length) return;
+    const summary = C.latencySummary(curves);
+    samples.style.setProperty('--series-color', summary.color);
+    quantiles.style.setProperty('--series-color', summary.color);
+    text('latencySampleCount', C.formatCount(summary.count));
+    for (const [id, seconds] of [['latencyP50', summary.p50], ['latencyP95', summary.p95]]) {
+      const value = $(id);
+      const formatted = seconds === null ? '—' : C.formatDuration(seconds * 1000);
+      if (value.textContent !== formatted) {
+        value.replaceChildren(...formatted.split(/(\d+(?:\.\d+)?)/).map((part, i) =>
+          i % 2 ? node('strong', 'latency-number', part) : part));
       }
-      return row;
-    }, (row, c) => {
-      row.style.setProperty('--series-color', c.color);
-      setText(row.firstChild, c.label);
-      [.5, .95].forEach((percentile, index) => {
-        const value = C.quantile(c.points, percentile);
-        setText(row.children[index + 1].lastChild, value === null ? '—' : C.formatDuration(value * 1000));
-      });
-    });
+    }
   }
   function drawChart(kind, series, force) {
     const svg = $(kind + 'Chart'), canvas = $(kind + 'Canvas'), empty = $(kind + 'Empty');

@@ -235,3 +235,15 @@ test('trend windows count client requests and use the same range for model laten
   assert.deepEqual(C.chartSeries(data, 'latency', 50)[0].points, [6, 5]);
   assert.deepEqual(C.modelLatencySeries(data, 100), [{ model: 'glm', points: [2, 5] }]);
 });
+
+test('latency statistics combine selected priorities without counting the overall series twice', () => {
+  const curve = (priority, points) => ({ priority, points, color: C.priorityColor(priority) });
+  const p1 = curve(1, [1, 3]);
+  const p2 = curve(2, [9]);
+  const overall = curve(0, [1, 3, 9]);
+
+  assert.deepEqual(C.latencySummary([p1]), { count: 2, p50: 2, p95: 2.9, color: p1.color });
+  assert.deepEqual(C.latencySummary([p1, p2]), C.latencySummary([overall]));
+  assert.deepEqual(C.latencySummary([overall, p1, p2]), C.latencySummary([overall]));
+  assert.deepEqual(C.latencySummary([curve(3, [])]), { count: 0, p50: null, p95: null, color: C.priorityColor(3) });
+});

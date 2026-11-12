@@ -85,6 +85,13 @@
     const lo = Math.floor(index), hi = Math.ceil(index);
     return sorted[lo] + (sorted[hi] - sorted[lo]) * (index - lo);
   }
+  function latencySummary(curves) {
+    // The overall series already includes the priority samples in its scope.
+    const overall = curves.find(curve => curve.priority === 0);
+    const points = overall ? overall.points : curves.flatMap(curve => curve.points);
+    return { count: points.length, p50: quantile(points, .5), p95: quantile(points, .95),
+      color: curves.length === 1 ? curves[0].color : priorityColor(0) };
+  }
   function attemptOutcome(a) {
     if (a.outcome === 'canceled') return { key: 'canceled', label: '取消', tone: 'canceled' };
     if (a.success === true || a.outcome === 'success') return { key: 'success', label: '成功', tone: 'success' };
@@ -339,6 +346,6 @@
     return normalized;
   }
   return { ATTEMPT_LIMIT, LOG_LIMIT, LOG_VIEW_LIMIT, PAGE_SIZE, number, count, ratio, formatCount, formatRate,
-    formatDuration, formatLogDuration, formatUptime, timestamp, priorityColor, activePriorities, chartSeries, modelLatencySeries, chartSelection, rateAxis, quantile, attemptOutcome, providerOutcome, providerLabel,
+    formatDuration, formatLogDuration, formatUptime, timestamp, priorityColor, activePriorities, chartSeries, modelLatencySeries, chartSelection, rateAxis, quantile, latencySummary, attemptOutcome, providerOutcome, providerLabel,
     providerStreak, providerMatchesView, filterProviders, sortProviders, groupRequests, filterRequests, parseLog, logProviderIndex, logPriorityIndex, filterLogs, LogBuffer, validateSnapshot };
 });

@@ -37,9 +37,9 @@
         <div id="dataNotice" class="data-notice" role="status" hidden></div>
         <div class="metrics">
           <article class="metric"><div class="metric-label">客户端请求 <span class="info" title="累计进入网关的请求，不等于最终已完成请求数">i</span></div><div class="metric-value" id="totalClient">—</div><p>累计进入网关的请求</p></article>
-          <article class="metric" title="按客户端请求统计，完整成功只计一次。旧版没有保存的结果不会回填，尚未结束的请求不计入结果。"><div class="metric-label">客户端请求成功</div><div class="metric-value metric-success-value" id="totalClientSuccess">—</div><p id="clientSuccessScope">从本次升级开始记录结果</p></article>
           <article class="metric"><div class="metric-label">上游尝试</div><div class="metric-value" id="totalAttempts">—</div><p id="attemptAverage">包含重试与账号切换</p></article>
           <article class="metric"><div class="metric-label">失败尝试</div><div class="metric-value metric-failure-value" id="totalFailed">—</div><p>包含限流、超时及其他失败</p></article>
+          <article class="metric" title="按客户端请求统计，完整成功只计一次。旧版没有保存的结果不会回填，尚未结束的请求不计入结果。"><div class="metric-label">客户端请求成功</div><div class="metric-value metric-success-value" id="totalClientSuccess">—</div><p id="clientSuccessScope">从本次升级开始记录结果</p></article>
           <article class="metric featured"><div class="metric-label">上游尝试成功率</div><div class="metric-value metric-success-value" id="attemptRate">—</div><p id="rateFraction">成功 /（成功 + 失败）</p><span class="metric-footnote">取消尝试不计入分母</span></article>
           <article class="metric"><div class="metric-label">取消尝试</div><div class="metric-value metric-failure-value" id="totalCanceled">—</div><p>单独记录，不作为上游失败</p></article>
         </div>
@@ -68,9 +68,9 @@
         </article>
         <article class="panel chart-panel">
           <div class="panel-heading"><div><p class="eyebrow">LATENCY / 成功尝试耗时</p><h2>上游处理与传输</h2></div><div class="chart-actions"><button type="button" id="latencyAll">显示全部</button><button type="button" id="latencyOverall">仅汇总</button></div></div>
-          <div class="legend-row latency-legend-row"><span class="legend-hint">多选</span><div class="chart-legend" id="latencyLegend" aria-label="耗时曲线，可多选"></div><div class="latency-samples" id="latencySamples" aria-label="所选曲线的成功尝试次数" hidden></div></div>
+          <div class="legend-row latency-legend-row"><span class="legend-hint">多选</span><div class="chart-legend" id="latencyLegend" aria-label="耗时曲线，可多选"></div><div class="latency-samples" id="latencySamples" hidden><strong id="latencySampleCount" class="latency-number">0</strong> 次成功尝试</div></div>
           <div class="chart-canvas" id="latencyCanvas"><svg id="latencyChart" role="img" aria-label="成功上游尝试耗时，方向键查看样本" tabindex="0"></svg><div class="chart-empty" id="latencyEmpty"><span aria-hidden="true">⌁</span><strong>暂无成功耗时样本</strong><p>不会用零值代替未知数据</p></div><div class="chart-tooltip" id="latencyTooltip" hidden></div></div>
-          <div class="latency-quantiles" id="latencyQuantiles" aria-label="所选曲线的成功尝试耗时分位数" hidden></div>
+          <div class="latency-quantiles" id="latencyQuantiles" aria-label="所选曲线的成功尝试耗时分位数" hidden><span title="约一半的成功尝试在这个时间内完成">P50 <span id="latencyP50">—</span></span><span title="约 95% 的成功尝试在这个时间内完成">P95 <span id="latencyP95">—</span></span></div>
           <p class="chart-caption" id="latencyCaption">独立样本序号 · 单位秒，不含退避；非端到端或首字延迟。</p>
         </article>
       </section>

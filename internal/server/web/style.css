@@ -59,12 +59,9 @@ h1{font-size:23px;letter-spacing:-.4px}.brand-meta{font-size:11px}
 .chart-caption{font-size:10px;line-height:1.4;margin-top:4px;min-height:14px;flex:none;color:#91a6c2}
 .latency-legend-row{flex-wrap:wrap}
 .latency-legend-row .chart-legend{flex:0 1 auto;min-width:0}
-.latency-samples,.latency-quantiles{display:flex;align-items:center;flex-wrap:wrap;flex:none;gap:4px 12px;font-size:13px;font-variant-numeric:tabular-nums}
-.latency-samples{font-weight:600}
-.latency-samples>span,.latency-percentiles{color:var(--series-color);white-space:nowrap}
-.latency-quantiles{justify-content:flex-end;margin-top:4px}
-.latency-percentiles{display:inline-flex;align-items:baseline;gap:8px}
-.latency-percentiles+.latency-percentiles{border-inline-start:1px solid var(--line);padding-inline-start:10px}
+.latency-samples,.latency-quantiles{flex:none;color:#fff;font-size:13px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.latency-number{color:var(--series-color);font-weight:650}
+.latency-quantiles{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:4px 12px;margin-top:4px}
 .priorities{margin:0 0 12px}.priorities .section-heading{margin-bottom:7px;gap:8px}.priorities h2{font-size:13px}.priorities .section-heading>.muted{font-size:10px}
 .priority-grid{gap:6px;grid-template-columns:repeat(3,minmax(0,1fr))}.priority-card{padding:8px;gap:8px;border-color:#31445c;background:#132135;border-radius:7px}
 .priority-label{width:30px;height:30px;font-size:12px;background:#203247;color:var(--priority-color);border-left:0;box-shadow:inset 0 0 0 1px #ffffff15}
@@ -170,8 +167,8 @@ tbody tr:nth-child(even) td{background:#14223666}tbody tr:hover td{background:#1
 .badge.request-first { color:#dac9ff;background:#342653;border-color:#6c5392; }
 .badge.request-end { color:#a0f3ec;background:#143a41;border-color:#386c73; }
 .log-retry-gap { margin-top: 3px; }
-.metric-value.metric-success-value { color: #77dfbb; }
-.metric-value.metric-failure-value { color: var(--red); }
+.metric-value.metric-success-value { color: #00ff00; }
+.metric-value.metric-failure-value { color: #ff0000; }
 @media (min-width: 1101px) { .metrics { grid-template-columns: repeat(6,minmax(0,1fr)); } }
 @media (min-width: 768px) and (max-width: 1100px) { .metrics { grid-template-columns: repeat(3,minmax(0,1fr)); } }
 
