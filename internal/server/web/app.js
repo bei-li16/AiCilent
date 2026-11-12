@@ -7,7 +7,7 @@
     providerView: 'all', groupBy: 'model',
     providerPage: 1, requestPage: 1, sort: 'priority', requests: [], requestSignature: '', logs: new C.LogBuffer(), follow: true,
     unread: 0, stopped: false, eventSource: null, selectedProvider: null, selectedRequest: null,
-    chartSelections: {}, chartCache: {}, trendWindow: 0, latencyModel: '', confirm: null
+    chartSelections: {}, chartCache: {}, trendWindow: 0, confirm: null
   };
   let pollTimer, freshnessTimer, logFrame, toastTimer, statsController, chartResizeTimer;
   const setText = (element, text) => { if (element && element.textContent !== String(text)) element.textContent = String(text); };
@@ -96,7 +96,6 @@
     text('clientSuccessScope', completed ? '已记录结果 ' + C.formatCount(completed) + ' 笔' : '暂无已记录的请求结果');
     text('totalFailed', C.formatCount(d.total_fail)); text('totalCanceled', C.formatCount(d.total_canceled));
     text('attemptRate', C.formatRate(rate));
-    $('attemptRate').classList.toggle('warning-text', rate !== null && rate < 50);
     text('rateFraction', C.formatCount(d.total_success) + ' / ' + C.formatCount(d.total_success + d.total_fail) + ' 次有效尝试');
     text('attemptAverage', d.total_client_req > 0 ? '平均 ' + (d.total_req / d.total_client_req).toFixed(2) + ' 次上游尝试 / 请求' : '暂无客户端请求样本');
     const service = $('serviceStatus'); service.className = 'badge ' + (d.running ? 'success' : 'neutral');
@@ -288,22 +287,38 @@
         button.title = c.label + ' · ' + c.points.length + ' 个独立采样点；点击显示或隐藏，可多选';
       });
       const selected = curves.filter(c => selection.has(c.priority));
+      if (kind === 'latency') drawLatencyStatistics(selected);
       text(kind + 'Caption', selected.length ? '独立样本序号 · 非时间轴' + (kind === 'latency' ? ' · 秒 / 不含退避' : ' · 按 50 次上游尝试滚动计算') : '点击图例选择一条或多条曲线');
       setText($(kind + 'Empty').querySelector('strong'), !selected.length ? '未选择曲线' : kind === 'rate' ? '暂无成功率样本' : '暂无成功耗时样本');
       drawChart(kind, selected.filter(c => c.points.length), force);
     }
-    drawLatencyQuantiles();
   }
-  function drawLatencyQuantiles() {
-    if (!state.data) return;
-    const models = C.modelLatencySeries(state.data, state.trendWindow);
-    if (state.latencyModel && !models.some(c => c.model === state.latencyModel)) state.latencyModel = '';
-    setOptions($('latencyModel'), [['', '全部模型'], ...models.map(c => [c.model, c.model])], state.latencyModel);
-    const values = state.latencyModel ? models.find(c => c.model === state.latencyModel).points :
-      C.chartSeries(state.data, 'latency', state.trendWindow)[0].points;
-    text('latencySample', values.length + ' 次成功尝试');
-    const p50 = C.quantile(values, .5), p95 = C.quantile(values, .95);
-    text('latencyP50', p50 === null ? '—' : C.formatDuration(p50 * 1000)); text('latencyP95', p95 === null ? '—' : C.formatDuration(p95 * 1000));
+  function drawLatencyStatistics(curves) {
+    const samples = $('latencySamples'), quantiles = $('latencyQuantiles');
+    const key = c => String(c.priority);
+    samples.hidden = quantiles.hidden = !curves.length;
+    reconcile(samples, curves, key, () => node('span'), (el, c) => {
+      el.style.setProperty('--series-color', c.color);
+      setText(el, c.label + ' ' + C.formatCount(c.points.length) + ' 次成功尝试');
+    });
+    reconcile(quantiles, curves, key, () => {
+      const row = node('div', 'latency-percentiles');
+      row.append(node('strong', 'latency-series-label'));
+      for (const [label, title] of [['P50', '约一半的成功尝试在这个时间内完成'], ['P95', '约 95% 的成功尝试在这个时间内完成']]) {
+        const field = node('span', '', label + ' ');
+        field.title = title;
+        field.append(node('strong'));
+        row.append(field);
+      }
+      return row;
+    }, (row, c) => {
+      row.style.setProperty('--series-color', c.color);
+      setText(row.firstChild, c.label);
+      [.5, .95].forEach((percentile, index) => {
+        const value = C.quantile(c.points, percentile);
+        setText(row.children[index + 1].lastChild, value === null ? '—' : C.formatDuration(value * 1000));
+      });
+    });
   }
   function drawChart(kind, series, force) {
     const svg = $(kind + 'Chart'), canvas = $(kind + 'Canvas'), empty = $(kind + 'Empty');
@@ -480,8 +495,10 @@
       result.append(node('span', 'log-severity level-' + log.level, log.level.toUpperCase()));
       if (log.key !== 'neutral') {
         const resultBadge = badge({ tone: log.tone, label: log.label });
-        const meanings = { limited: '这一行发出了上游请求，收到 HTTP 429', 'route-switch': '仅记录切换决定，这一行没有发出请求',
-          'route-skip': '仅记录跳过原因，这一行没有发出请求', 'client-limited': '这是代理返回给客户端的状态，不另计一次上游尝试' };
+        const meanings = { limited: '本次上游尝试实际收到 HTTP 429',
+          'route-switch': '路由选中了下一个可尝试的账号。实际调用及其结果见后续的上游尝试日志。',
+          'route-skip': '该候选账号未通过限流检查，本次请求直接略过该账号。每个略过的账号各有一条记录。',
+          'client-limited': '这是代理返回给客户端的状态，不另计一次上游尝试' };
         if (meanings[log.key] || log.description) resultBadge.title = meanings[log.key] || log.description;
         result.append(resultBadge);
       }
@@ -695,10 +712,6 @@
   $('trendRequestWindow').addEventListener('change', () => {
     state.trendWindow = Number($('trendRequestWindow').value);
     drawCharts(true);
-  });
-  $('latencyModel').addEventListener('change', () => {
-    state.latencyModel = $('latencyModel').value;
-    drawLatencyQuantiles();
   });
   $('logRows').addEventListener('click', event => {
     const button = event.target.closest('[data-copy-id]'); if (!button?.dataset.copyId) return;
