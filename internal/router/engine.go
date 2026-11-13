@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1251,6 +1252,55 @@ func (r *idleTimeoutReader) Close() error {
 		err = r.r.Close()
 	})
 	return err
+}
+
+// OpenAIModelIDs lists model IDs and routes backed by the running OpenAI configuration.
+func (e *Engine) OpenAIModelIDs() []string {
+	e.reloadMu.RLock()
+	defer e.reloadMu.RUnlock()
+
+	ids := make(map[string]struct{})
+	openAIProviders := make(map[string]struct{})
+	keywords := map[string]struct{}{"Max": {}, "Flash": {}, "Medium": {}}
+	for _, p := range e.cfg.Providers {
+		if p.Format != "openai" {
+			continue
+		}
+		openAIProviders[p.Name] = struct{}{}
+		if config.IsRouteKeyword(p.ModelID) {
+			keywords[p.ModelID] = struct{}{}
+		} else if p.ModelID != "" {
+			ids[p.ModelID] = struct{}{}
+		}
+		keywords[fmt.Sprintf("P%d", p.Priority)] = struct{}{}
+	}
+	for _, route := range e.cfg.ModelRoutes {
+		if config.IsRouteKeyword(route.Alias) {
+			keywords[route.Alias] = struct{}{}
+			continue
+		}
+		if config.IsRouteKeyword(route.Target) {
+			// A hard route takes precedence even when the alias is also a real model ID.
+			keywords[route.Alias] = struct{}{}
+			delete(ids, route.Alias)
+		} else if _, ok := openAIProviders[route.Target]; ok {
+			ids[route.Alias] = struct{}{}
+		}
+	}
+	for keyword := range keywords {
+		for _, p := range e.getOrderedProviders(keyword) {
+			if p.Format == "openai" {
+				ids[keyword] = struct{}{}
+				break
+			}
+		}
+	}
+	result := make([]string, 0, len(ids))
+	for id := range ids {
+		result = append(result, id)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func (e *Engine) getOrderedProviders(modelName string) []*config.Provider {

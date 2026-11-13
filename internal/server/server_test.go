@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -43,6 +44,72 @@ func TestVersionEndpoint(t *testing.T) {
 	srv.SaveStats()
 	if srv.Rot != nil {
 		_ = srv.Rot.Close()
+	}
+}
+
+func TestModelDiscovery(t *testing.T) {
+	cfg := &config.Config{
+		Providers: []config.Provider{
+			{Name: "a", ModelID: "glm", Priority: 1, Format: "openai", APIKey: "private-key", BaseURL: "https://private-upstream.invalid"},
+			{Name: "b", ModelID: "glm", Priority: 1, Format: "openai"},
+			{Name: "c", ModelID: "blocked", Priority: 3, Format: "openai"},
+			{Name: "d", ModelID: "claude", Priority: 4, Format: "anthropic"},
+		},
+		ModelRoutes: []config.ModelRoute{
+			{Alias: "work", Target: "P1"},
+			{Alias: "default", Target: "a"},
+			{Alias: "blocked", Target: "P2"},
+			{Alias: "anthropic-only", Target: "P4"},
+		},
+	}
+	srv := New(cfg, "")
+	defer srv.SaveStats()
+	want := []string{"Flash", "Max", "Medium", "P1", "P3", "default", "glm", "work"}
+	for _, path := range []string{"/v1/models", "/models"} {
+		t.Run(path, func(t *testing.T) {
+			res := httptest.NewRecorder()
+			srv.ServeHTTP(res, httptest.NewRequest(http.MethodGet, path, nil))
+			if res.Code != http.StatusOK || res.Header().Get("Cache-Control") != "no-store" {
+				t.Fatalf("response = %d %v", res.Code, res.Header())
+			}
+			var result struct {
+				Object string
+				Data   []struct {
+					ID      string
+					Object  string
+					Created *int64
+					OwnedBy string `json:"owned_by"`
+				}
+			}
+			if err := json.Unmarshal(res.Body.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			ids := make([]string, 0, len(result.Data))
+			for _, m := range result.Data {
+				ids = append(ids, m.ID)
+				if m.Object != "model" || m.Created == nil || m.OwnedBy != "ai-proxy" {
+					t.Fatalf("unexpected model fields: %+v", m)
+				}
+			}
+			if result.Object != "list" || !slices.Equal(ids, want) {
+				t.Fatalf("object=%q ids=%v, want list with %v", result.Object, ids, want)
+			}
+			if strings.Contains(res.Body.String(), "private-") {
+				t.Fatal("response exposed private provider configuration")
+			}
+		})
+	}
+}
+
+func TestModelDiscoveryWithoutOpenAIProvidersReturnsEmptyList(t *testing.T) {
+	srv := New(&config.Config{Providers: []config.Provider{
+		{Name: "a", ModelID: "claude", Priority: 1, Format: "anthropic"},
+	}}, "")
+	defer srv.SaveStats()
+	res := httptest.NewRecorder()
+	srv.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	if res.Code != http.StatusOK || res.Body.String() != `{"data":[],"object":"list"}` {
+		t.Fatalf("response = %d %s", res.Code, res.Body.String())
 	}
 }
 

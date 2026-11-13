@@ -86,6 +86,24 @@ func New(cfg *config.Config, configPath string) *Instance {
 	// directly to the configured base URL instead of using the /v1 prefix.
 	r.POST("/responses", timing, engine.HandleRequest)
 
+	listModels := func(c *gin.Context) {
+		type model struct {
+			ID      string `json:"id"`
+			Object  string `json:"object"`
+			Created int64  `json:"created"`
+			OwnedBy string `json:"owned_by"`
+		}
+		ids := engine.OpenAIModelIDs()
+		models := make([]model, 0, len(ids))
+		for _, id := range ids {
+			models = append(models, model{ID: id, Object: "model", OwnedBy: "ai-proxy"})
+		}
+		c.Header("Cache-Control", "no-store")
+		c.JSON(http.StatusOK, gin.H{"object": "list", "data": models})
+	}
+	r.GET("/v1/models", listModels)
+	r.GET("/models", listModels)
+
 	r.GET("/", serveWeb("web/index.html", "text/html; charset=utf-8"))
 	r.GET("/style.css", serveWeb("web/style.css", "text/css; charset=utf-8"))
 	r.GET("/app.js", serveWeb("web/app.js", "application/javascript; charset=utf-8"))

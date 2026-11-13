@@ -19,13 +19,13 @@ ai-proxy.exe --config config/providers.yaml
 ai-proxy.exe --version    # 查看版本信息
 ```
 
-**CLI 后台和托盘**：将 `启动 AI Proxy（托盘）.lnk`、`start-cli-tray.vbs`、`start-cli-tray.ps1` 与 `ai-proxy.exe` 放在同一目录，沿用该目录下的 `config/providers.yaml`。若已有从终端启动的实例，先用 Ctrl+C 结束它。双击快捷方式或 `start-cli-tray.vbs` 后，CLI 在后台启动，右下角通知区域会出现托盘图标。双击图标可打开监控面板，右键可暂停或恢复转发，也可以退出托盘并让 CLI 继续运行。再次启动托盘会接回原实例。
-
-如需只启动后台 CLI，可以在 PowerShell 执行 `.\start-cli-tray.ps1 -BackgroundOnly`。直接执行 PS1 后关闭该 PowerShell 窗口会退出托盘，双击 VBS 则可以保留托盘而无需开着终端。
+**Windows 后台 CLI**：将 `start-cli.bat`、`stop-cli.bat` 和共用的 `cli.ps1` 与 `ai-proxy.exe` 放在同一目录，使用该目录下的 `config/providers.yaml`。双击 `start-cli.bat` 启动，双击 `stop-cli.bat` 停止。监控面板默认在 `http://127.0.0.1:8080/`。若已在终端启动，先在原终端按 Ctrl+C 退出，再用 BAT 启动。
 
 ### 配置 Agent
 
 将 Agent 工具的 `base_url` 指向 `http://localhost:8080`，`model` 字段填写路由模式或真实模型名。
+
+OpenAI 兼容客户端可用 `GET /v1/models`（或 `GET /models`）发现模型。列表取自当前配置，包含去重后的 OpenAI 上游模型 ID、适用的路由别名和可用的 `P1` / `P2` 等优先级入口。
 
 #### OpenCode
 

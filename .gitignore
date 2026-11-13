@@ -58,6 +58,7 @@ test/
 .stats.json
 .stats.json.tmp
 .cli-tray/
+.cli-state/
 
 # Generated dashboard acceptance evidence
 artifacts/

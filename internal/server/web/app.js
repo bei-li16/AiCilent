@@ -30,6 +30,8 @@
     const ids = (owner.getAttribute('aria-describedby') || '').split(/\s+/).filter(id => id && id !== hoverTip.id);
     if (ids.length) owner.setAttribute('aria-describedby', ids.join(' '));
     else owner.removeAttribute('aria-describedby');
+    const markers = owner.querySelector('.chart-hover-points');
+    if (markers) markers.replaceChildren();
     hoverTip.hidden = true;
     tooltipOwner = null;
   }
@@ -383,11 +385,12 @@
     const steps = height < 110 ? 2 : 4;
     const { minimum, maximum } = kind === 'rate' ? C.rateAxis(points, steps) :
       { minimum: 0, maximum: Math.max(.01, (multiple > 5 ? 10 : multiple > 2 ? 5 : multiple > 1 ? 2 : 1) * scale) };
-    state.chartCache[kind] = { signature, width, height, series, maxLength, pad, plotWidth, maximum, active: 0 };
-    empty.hidden = maxLength > 0;
-    if (!maxLength) { svg.replaceChildren(); svg.setAttribute('aria-label', kind === 'rate' ? '暂无成功率样本' : '暂无成功耗时样本'); hideTooltip(svg); return; }
+    const previous = state.chartCache[kind];
     const x = i => pad.left + plotWidth * i / Math.max(1, maxLength - 1);
     const y = value => pad.top + plotHeight - (value - minimum) / (maximum - minimum) * plotHeight;
+    state.chartCache[kind] = { signature, series, maxLength, pad, plotWidth, x, y, active: 0, point: null };
+    empty.hidden = maxLength > 0;
+    if (!maxLength) { svg.replaceChildren(); svg.setAttribute('aria-label', kind === 'rate' ? '暂无成功率样本' : '暂无成功耗时样本'); hideTooltip(svg); return; }
     svg.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
     svg.setAttribute('aria-label', (kind === 'rate' ? '上游尝试成功率' : '成功上游尝试耗时') + '，' + maxLength + ' 个独立采样点。左右方向键查看数值。');
     let markup = '';
@@ -403,22 +406,47 @@
       markup += '<polyline data-priority="' + s.priority + '" points="' + points + '" fill="none" stroke="' + s.color + '" stroke-width="' + (s.priority === 0 ? '1.5' : '2') + '"' + (s.priority === 0 ? ' stroke-dasharray="5 4" opacity=".8"' : '') + ' stroke-linejoin="round" stroke-linecap="round"/>';
       if (s.points.length) markup += '<circle cx="' + x(s.points.length - 1) + '" cy="' + y(s.points.at(-1)) + '" r="3" fill="' + s.color + '"/>';
     }
-    svg.innerHTML = markup; // Only finite geometry and generated colors enter this SVG.
+    svg.innerHTML = markup + '<g class="chart-hover-points" aria-hidden="true" pointer-events="none"></g>';
+    // Keep the tooltip and its markers on the same sample when new data arrives.
+    if (tooltipOwner === svg && previous) chartTooltip(kind, previous.active, previous.point);
   }
   function chartTooltip(kind, index, point) {
     const cache = state.chartCache[kind]; if (!cache?.maxLength) return;
+    const svg = $(kind + 'Chart');
+    if (point) {
+      const matrix = svg.getScreenCTM();
+      if (matrix) {
+        const { x } = new DOMPoint(point.clientX, point.clientY).matrixTransform(matrix.inverse());
+        index = Math.round((x - cache.pad.left) / cache.plotWidth * (cache.maxLength - 1));
+      }
+    }
     cache.active = Math.max(0, Math.min(cache.maxLength - 1, index));
+    cache.point = point ? { clientX: point.clientX, clientY: point.clientY } : null;
     const lines = ['采样 #' + (cache.active + 1) + ' · 非时间轴'];
-    cache.series.forEach(s => { if (cache.active < s.points.length) lines.push(s.label + '：' + (kind === 'rate' ? C.formatRate(s.points[cache.active]) : C.formatDuration(s.points[cache.active] * 1000))); });
-    showTooltip($(kind + 'Chart'), lines.join('\n'), point);
+    const sampled = cache.series.filter(s => cache.active < s.points.length);
+    for (const s of sampled) {
+      const value = s.points[cache.active];
+      lines.push(s.label + '：' + (kind === 'rate' ? C.formatRate(value) : C.formatDuration(value * 1000)));
+    }
+    const markers = svg.querySelector('.chart-hover-points');
+    if (markers.dataset.index !== String(cache.active) || !markers.childElementCount) {
+      markers.dataset.index = String(cache.active);
+      markers.replaceChildren(...sampled.map(s => {
+        const marker = document.createElementNS(svg.namespaceURI, 'circle');
+        marker.setAttribute('cx', cache.x(cache.active));
+        marker.setAttribute('cy', cache.y(s.points[cache.active]));
+        marker.setAttribute('r', '5');
+        marker.setAttribute('fill', s.color);
+        marker.setAttribute('stroke', '#fff');
+        marker.setAttribute('stroke-width', '2');
+        return marker;
+      }));
+    }
+    showTooltip(svg, lines.join('\n'), point);
   }
   function bindChart(kind) {
     const svg = $(kind + 'Chart');
-    svg.addEventListener('pointermove', event => {
-      const cache = state.chartCache[kind]; if (!cache?.maxLength) return;
-      const x = event.clientX - svg.getBoundingClientRect().left;
-      chartTooltip(kind, Math.round((x - cache.pad.left) / cache.plotWidth * (cache.maxLength - 1)), event);
-    });
+    svg.addEventListener('pointermove', event => chartTooltip(kind, 0, event));
     svg.addEventListener('pointerleave', () => hideTooltip(svg));
     svg.addEventListener('focus', () => chartTooltip(kind, (state.chartCache[kind]?.maxLength || 1) - 1));
     svg.addEventListener('blur', () => hideTooltip(svg));
