@@ -83,7 +83,13 @@
     if (tooltipOwner?.contains(event.target)) hideTooltip();
   });
   document.addEventListener('keydown', event => { if (event.key === 'Escape') hideTooltip(); });
-  document.addEventListener('scroll', () => hideTooltip(), true);
+  document.addEventListener('scroll', event => {
+    // Auto-follow scrolls the log pane while the pointer may still be over a chart.
+    if (tooltipOwner && (event.target === document ||
+        (event.target instanceof Element && event.target.contains(tooltipOwner)))) {
+      hideTooltip();
+    }
+  }, true);
   window.addEventListener('resize', () => hideTooltip());
   function badge(outcome) { return node('span', 'badge ' + outcome.tone, outcome.label); }
   function replaceBadge(el, outcome) { el.className = 'badge ' + outcome.tone; setText(el, outcome.label); }
