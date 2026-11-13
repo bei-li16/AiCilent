@@ -25,6 +25,7 @@
   hoverTip.setAttribute('role', 'tooltip');
   hoverTip.hidden = true;
   let tooltipOwner = null;
+  let tooltipContent = '';
   function hideTooltip(owner = tooltipOwner) {
     if (!owner || owner !== tooltipOwner) return;
     const ids = (owner.getAttribute('aria-describedby') || '').split(/\s+/).filter(id => id && id !== hoverTip.id);
@@ -44,7 +45,19 @@
       owner.setAttribute('aria-describedby', ids ? ids + ' ' + hoverTip.id : hoverTip.id);
       (owner.closest('dialog[open]') || document.body).append(hoverTip);
     }
-    setText(hoverTip, message);
+    const content = typeof message === 'string' ? message : JSON.stringify(message);
+    if (content !== tooltipContent || Array.isArray(message) !== Boolean(hoverTip.firstElementChild)) {
+      tooltipContent = content;
+      if (typeof message === 'string') {
+        hoverTip.textContent = message;
+      } else {
+        hoverTip.replaceChildren(...message.flatMap(({ text, color }, index) => {
+          const line = node('span', '', text);
+          if (color) line.style.color = color;
+          return index ? ['\n', line] : [line];
+        }));
+      }
+    }
     hoverTip.hidden = false;
     const anchor = owner.getBoundingClientRect();
     const x = point?.clientX ?? anchor.left, y = point?.clientY ?? anchor.bottom;
@@ -427,11 +440,12 @@
     }
     cache.active = Math.max(0, Math.min(cache.maxLength - 1, index));
     cache.point = point ? { clientX: point.clientX, clientY: point.clientY } : null;
-    const lines = ['采样 #' + (cache.active + 1) + ' · 非时间轴'];
+    const lines = [{ text: '采样 #' + (cache.active + 1) + ' · 非时间轴' }];
     const sampled = cache.series.filter(s => cache.active < s.points.length);
     for (const s of sampled) {
       const value = s.points[cache.active];
-      lines.push(s.label + '：' + (kind === 'rate' ? C.formatRate(value) : C.formatDuration(value * 1000)));
+      const label = kind === 'rate' ? C.formatRate(value) : C.formatDuration(value * 1000);
+      lines.push({ text: s.label + '：' + label, color: s.color });
     }
     const markers = svg.querySelector('.chart-hover-points');
     if (markers.dataset.index !== String(cache.active) || !markers.childElementCount) {
@@ -447,7 +461,7 @@
         return marker;
       }));
     }
-    showTooltip(svg, lines.join('\n'), point);
+    showTooltip(svg, lines, point);
   }
   function bindChart(kind) {
     const svg = $(kind + 'Chart');
