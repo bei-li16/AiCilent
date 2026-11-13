@@ -336,33 +336,38 @@
       const selection = state.chartSelections[kind];
       reconcile($(kind + 'Legend'), curves, c => String(c.priority), c => {
         const button = node('button', 'legend-button'); button.type = 'button'; button.dataset.priority = c.priority;
-        button.append(node('span', 'legend-check', '✓'), node('span', 'legend-swatch'), node('span')); return button;
+        button.append(node('span', 'legend-check', '✓'), node('span', 'legend-swatch'), node('span'));
+        if (kind === 'latency') {
+          const count = node('span', 'legend-sample-count');
+          count.append(node('strong', 'latency-number'), ' 次');
+          button.append(count);
+        }
+        return button;
       }, (button, c) => {
         button.style.setProperty('--series-color', c.color); button.children[1].style.background = c.color;
         const value = c.points.length ? kind === 'rate' ? C.formatRate(c.points.at(-1)) : C.formatDuration(c.points.at(-1) * 1000) : '—';
-        setText(button.lastChild, c.label + ' ' + value);
+        setText(button.children[2], c.label + ' ' + value);
+        if (kind === 'latency') setText(button.lastChild.firstChild, C.formatCount(c.points.length));
         button.setAttribute('aria-pressed', String(selection.has(c.priority)));
-        button.setAttribute('aria-label', c.label + '曲线');
+        button.setAttribute('aria-label', c.label + '曲线' + (kind === 'latency' ? '，最近成功耗时 ' + value + '，' + c.points.length + ' 次成功尝试' : ''));
         button.dataset.tooltip = (kind === 'latency' ? '图例显示所选范围内最近完成的一次成功上游尝试。计时从这一次尝试开始，到响应转发结束。' :
-          '图例显示所选范围内最后一个滚动成功率。分母只包含成功和失败的有效尝试。') +
+          '图例显示所选范围内保留样本的整体成功率。每个点从范围内第一个样本累计到该点，取消尝试不计入分母。') +
           '\n' + c.points.length + ' 个采样点。点击切换曲线。';
       });
       const selected = curves.filter(c => selection.has(c.priority));
       if (kind === 'latency') drawLatencyStatistics(selected);
       text(kind + 'Caption', selected.length ? (kind === 'latency' ? '独立样本序号 · 图例为最近一次成功尝试 · 不含退避' :
-        '独立样本序号 · 所选范围内按 50 次有效尝试滚动') : '点击图例选择一条或多条曲线');
+        '独立样本序号 · 按所选范围的保留样本累计') : '点击图例选择一条或多条曲线');
       setText($(kind + 'Empty').querySelector('strong'), !selected.length ? '未选择曲线' : kind === 'rate' ? '暂无成功率样本' : '暂无成功耗时样本');
       drawChart(kind, selected.filter(c => c.points.length), force);
     }
   }
   function drawLatencyStatistics(curves) {
-    const samples = $('latencySamples'), quantiles = $('latencyQuantiles');
-    samples.hidden = quantiles.hidden = !curves.length;
+    const quantiles = $('latencyQuantiles');
+    quantiles.hidden = !curves.length;
     if (!curves.length) return;
     const summary = C.latencySummary(curves);
-    samples.style.setProperty('--series-color', summary.color);
     quantiles.style.setProperty('--series-color', summary.color);
-    text('latencySampleCount', C.formatCount(summary.count));
     for (const [id, seconds] of [['latencyP50', summary.p50], ['latencyP95', summary.p95]]) {
       const value = $(id);
       const formatted = seconds === null ? '—' : C.formatDuration(seconds * 1000);

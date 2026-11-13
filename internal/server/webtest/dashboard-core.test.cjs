@@ -248,7 +248,7 @@ test('latency statistics combine selected priorities without counting the overal
   assert.deepEqual(C.latencySummary([curve(3, [])]), { count: 0, p50: null, p95: null, color: C.priorityColor(3) });
 });
 
-test('request windows recalculate rolling success rates from eligible attempts inside the window', () => {
+test('all ranges accumulate success rates across every retained eligible attempt in the range', () => {
   const requests = [10, 80, 81, 120, 30, 120];
   const successes = [true, false, true, false, true, true];
   const points = [100, 50, 200 / 3, 50, 60, 200 / 3];
@@ -262,5 +262,10 @@ test('request windows recalculate rolling success rates from eligible attempts i
 
   const long = { trend_request_seq: 120, curves: [{ priority: 0, requests: Array(51).fill(120),
     successes: [true, ...Array(50).fill(false)], points: Array(51).fill(0) }] };
-  assert.deepEqual(C.chartSeries(long, 'rate', 50)[0].points.slice(-2), [2, 0]);
+  for (const range of [0, 50, 100]) {
+    assert.deepEqual(C.chartSeries(long, 'rate', range)[0].points.slice(-2), [2, 100 / 51]);
+  }
+  const capped = { curves: [{ priority: 0, points: [],
+    successes: [true, ...Array(240).fill(false)] }] };
+  assert.deepEqual(C.chartSeries(capped, 'rate')[0].points, Array(240).fill(0));
 });

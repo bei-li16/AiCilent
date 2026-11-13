@@ -57,9 +57,11 @@ h1{font-size:23px;letter-spacing:-.4px}.brand-meta{font-size:11px}
 .legend-button:hover{border-color:var(--series-color);color:#fff}
 .chart-canvas,.chart-canvas svg{height:190px}.chart-canvas{flex:1;min-height:90px}.chart-canvas svg{height:100%;overflow:hidden}
 .chart-caption{font-size:10px;line-height:1.4;margin-top:4px;min-height:14px;flex:none;color:#91a6c2}
-.latency-legend-row{flex-wrap:wrap}
-.latency-legend-row .chart-legend{flex:0 1 auto;min-width:0}
-.latency-samples,.latency-quantiles{flex:none;color:#fff;font-size:13px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.latency-legend-row{align-items:flex-start}
+.latency-legend-row .legend-hint{padding-top:5px}
+.latency-legend-row .chart-legend{min-width:0}
+.legend-sample-count{margin-inline-start:2px;font-variant-numeric:tabular-nums}
+.latency-quantiles{flex:none;color:#fff;font-size:13px;font-variant-numeric:tabular-nums;white-space:nowrap}
 .latency-number{color:var(--series-color);font-weight:650}
 .latency-quantiles{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:4px 12px;margin-top:4px}
 .priorities{margin:0 0 12px}.priorities .section-heading{margin-bottom:7px;gap:8px}.priorities h2{font-size:13px}.priorities .section-heading>.muted{font-size:10px}

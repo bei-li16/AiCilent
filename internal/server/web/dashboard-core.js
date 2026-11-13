@@ -51,16 +51,16 @@
       (!requestWindow || (series.requests?.[i] >= minSeq && series.requests[i] <= requestSeq))).slice(-240);
   }
   function rateTrendPoints(series, requestSeq, requestWindow) {
-    if (!requestWindow || !Array.isArray(series?.successes)) {
+    if (!Array.isArray(series?.successes)) {
       return trendPoints(series, requestSeq, requestWindow).map(value => Math.min(100, value));
     }
     const minSeq = Math.max(1, requestSeq - requestWindow + 1);
-    const outcomes = series.successes.filter((_, i) => series.requests?.[i] >= minSeq && series.requests[i] <= requestSeq);
+    const outcomes = series.successes.filter((_, i) =>
+      !requestWindow || (series.requests?.[i] >= minSeq && series.requests[i] <= requestSeq)).slice(-240);
     let successes = 0;
     return outcomes.map((success, i) => {
       successes += Number(success);
-      if (i >= 50) successes -= Number(outcomes[i - 50]);
-      return successes * 100 / Math.min(50, i + 1);
+      return successes * 100 / (i + 1);
     });
   }
   function chartSeries(data, kind, requestWindow = 0) {

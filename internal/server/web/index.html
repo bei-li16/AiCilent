@@ -55,7 +55,7 @@
       <aside class="telemetry" aria-label="趋势与优先级">
       <div class="trend-controls">
         <span id="trendRangeLabel">趋势范围</span>
-        <div class="trend-range" id="trendRange" role="group" aria-labelledby="trendRangeLabel" data-tooltip="两个图共用范围。最近 50 / 100 按客户端请求进入代理的顺序选取。">
+        <div class="trend-range" id="trendRange" role="group" aria-labelledby="trendRangeLabel" data-tooltip="每条曲线最多保留 240 个样本。最近 50 / 100 按客户端请求进入代理的顺序筛选保留样本。">
           <button type="button" data-window="0" aria-pressed="true">全部保留样本</button>
           <button type="button" data-window="50" aria-pressed="false">最近 50 个请求</button>
           <button type="button" data-window="100" aria-pressed="false">最近 100 个请求</button>
@@ -70,7 +70,7 @@
         </article>
         <article class="panel chart-panel">
           <div class="panel-heading"><div><p class="eyebrow">LATENCY / 成功尝试耗时</p><h2>上游处理与传输</h2></div><div class="chart-actions"><button type="button" id="latencyAll">显示全部</button><button type="button" id="latencyOverall">仅汇总</button></div></div>
-          <div class="legend-row latency-legend-row"><span class="legend-hint">多选</span><div class="chart-legend" id="latencyLegend" aria-label="耗时曲线，可多选"></div><div class="latency-samples" id="latencySamples" hidden><strong id="latencySampleCount" class="latency-number">0</strong> 次成功尝试</div></div>
+          <div class="legend-row latency-legend-row"><span class="legend-hint">多选</span><div class="chart-legend" id="latencyLegend" aria-label="耗时曲线，可多选"></div></div>
           <div class="chart-canvas" id="latencyCanvas"><svg id="latencyChart" role="img" aria-label="成功上游尝试耗时，方向键查看样本" tabindex="0"></svg><div class="chart-empty" id="latencyEmpty"><span aria-hidden="true">⌁</span><strong>暂无成功耗时样本</strong><p>不会用零值代替未知数据</p></div></div>
           <div class="latency-quantiles" id="latencyQuantiles" aria-label="所选曲线的成功尝试耗时分位数" hidden><span data-tooltip="约一半的成功尝试在这个时间内完成">P50 <span id="latencyP50">—</span></span><span data-tooltip="约 95% 的成功尝试在这个时间内完成">P95 <span id="latencyP95">—</span></span></div>
           <p class="chart-caption" id="latencyCaption">独立样本序号 · 单位秒，不含退避；非端到端或首字延迟。</p>
