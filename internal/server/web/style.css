@@ -299,6 +299,8 @@ tbody tr:nth-child(even) td{background:#14223666}tbody tr:hover td{background:#1
 .trend-range button[aria-pressed=true] { background:#294566; border-color:#7aa1cf; color:#fff; }
 .trend-range button:hover { border-color:#8bb8ff; }
 .hover-tooltip { position:fixed; z-index:80; width:max-content; max-width:min(340px,calc(100vw - 16px)); max-height:calc(100vh - 16px); overflow:hidden; overflow-wrap:anywhere; white-space:pre-line; pointer-events:none; padding:9px 12px; border:1px solid #4b6482; border-radius:7px; background:#1b2b3f; color:var(--text); font-size:12px; line-height:1.55; text-align:start; box-shadow:0 8px 24px #0004; }
+/* Keep pointer hit testing on the SVG while polling replaces its children. */
+.chart-canvas > svg > * { pointer-events:none; }
 select { white-space: nowrap; text-overflow: ellipsis; }
 select option, select optgroup { white-space: nowrap; }
 .group-mode { width: min(100%, 8.5rem); }
