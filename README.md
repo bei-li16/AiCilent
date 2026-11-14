@@ -239,6 +239,10 @@ base_url = "http://localhost:8080"
 
 完整配置模板及字段注释见 [`config/providers.example.yaml`](config/providers.example.yaml)。
 
+OpenAI 格式的上游收到显式的 `reasoning_effort: none` 时，代理默认省略该字段，保留请求里已有的 `reasoning` 字段。最终思考行为由上游决定。
+
+可在 `global` 段配置 `reasoning_effort_on_none: low`，统一将所有 OpenAI 上游请求中的 `none` 替换为指定档位。可选值为 `minimal`、`low`、`medium`、`high`、`xhigh`、`max`，请填写所用上游都支持的值。此规则只匹配显式的 `none`。原始日志可用「思考等级调整」筛选实际发生的映射和移除。
+
 ---
 
 ## 部署

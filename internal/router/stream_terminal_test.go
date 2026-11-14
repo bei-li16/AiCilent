@@ -154,7 +154,7 @@ func TestForwardRequestStreamStopsAfterTerminator(t *testing.T) {
 	tr := tracer.New("m", "openai", "req", io.Discard, io.Discard)
 
 	start := time.Now()
-	err := e.forwardRequestStream(ctx, []byte(`{"model":"m","stream":true}`), "openai", provider, 30, tr)
+	err := e.forwardRequestStream(ctx, []byte(`{"model":"m","stream":true}`), "openai", provider, 30, tr, "")
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -192,7 +192,7 @@ func TestForwardRequestStreamClientGoneAfterSemanticFinishIsCanceled(t *testing.
 	tr := tracer.New("m", "openai", "req", io.Discard, io.Discard)
 
 	time.AfterFunc(100*time.Millisecond, cancel)
-	err := e.forwardRequestStream(ctx, []byte(`{"model":"m","stream":true}`), "openai", provider, 10, tr)
+	err := e.forwardRequestStream(ctx, []byte(`{"model":"m","stream":true}`), "openai", provider, 10, tr, "")
 
 	if !errors.Is(err, errClientGoneIncomplete) {
 		t.Fatalf("error = %v, want errClientGoneIncomplete", err)
@@ -220,7 +220,7 @@ func TestForwardRequestStreamClientGoneMidStream(t *testing.T) {
 	tr := tracer.New("m", "openai", "req", io.Discard, io.Discard)
 
 	time.AfterFunc(100*time.Millisecond, cancel)
-	err := e.forwardRequestStream(ctx, []byte(`{"model":"m","stream":true}`), "openai", provider, 10, tr)
+	err := e.forwardRequestStream(ctx, []byte(`{"model":"m","stream":true}`), "openai", provider, 10, tr, "")
 
 	if !errors.Is(err, errClientGoneIncomplete) {
 		t.Fatalf("error = %v, want errClientGoneIncomplete", err)

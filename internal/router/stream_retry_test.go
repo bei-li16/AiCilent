@@ -42,7 +42,7 @@ func TestForwardRequestStreamDoesNotCommitEmptyUpstream(t *testing.T) {
 	ctx.Request = httptest.NewRequest(http.MethodPost, "/chat/completions", nil)
 	tr := tracer.New("m", "openai", "req", io.Discard, io.Discard)
 
-	err := e.forwardRequestStream(ctx, []byte(`{"model":"m","stream":true}`), "openai", &provider, 5, tr)
+	err := e.forwardRequestStream(ctx, []byte(`{"model":"m","stream":true}`), "openai", &provider, 5, tr, "")
 	if err == nil {
 		t.Fatal("empty upstream stream returned nil error")
 	}
@@ -67,7 +67,7 @@ func TestForwardRequestStreamCommitsFirstEvent(t *testing.T) {
 	ctx.Request = httptest.NewRequest(http.MethodPost, "/chat/completions", nil)
 	tr := tracer.New("m", "openai", "req", io.Discard, io.Discard)
 
-	if err := e.forwardRequestStream(ctx, []byte(`{"model":"m","stream":true}`), "openai", &provider, 5, tr); err != nil {
+	if err := e.forwardRequestStream(ctx, []byte(`{"model":"m","stream":true}`), "openai", &provider, 5, tr, ""); err != nil {
 		t.Fatal(err)
 	}
 	if !ctx.Writer.Written() || recorder.Body.String() != "data: {\"id\":\"ok\"}\n\ndata: [DONE]\n\n" {
@@ -97,7 +97,7 @@ func TestForwardRequestStreamDoesNotCommitHeartbeatOrPartialEvent(t *testing.T) 
 			ctx.Request = httptest.NewRequest(http.MethodPost, "/chat/completions", nil)
 			tr := tracer.New("m", "openai", "req", io.Discard, io.Discard)
 
-			err := e.forwardRequestStream(ctx, []byte(`{"model":"m","stream":true}`), "openai", &provider, 5, tr)
+			err := e.forwardRequestStream(ctx, []byte(`{"model":"m","stream":true}`), "openai", &provider, 5, tr, "")
 			if err == nil {
 				t.Fatal("incomplete upstream stream returned nil error")
 			}
@@ -133,7 +133,7 @@ func TestForwardRequestStreamCommitsSplitEventOnlyAfterTerminator(t *testing.T) 
 	tr := tracer.New("m", "openai", "req", io.Discard, io.Discard)
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- e.forwardRequestStream(ctx, []byte(`{"model":"m","stream":true}`), "openai", &provider, 5, tr)
+		errCh <- e.forwardRequestStream(ctx, []byte(`{"model":"m","stream":true}`), "openai", &provider, 5, tr, "")
 	}()
 
 	<-wrotePartial

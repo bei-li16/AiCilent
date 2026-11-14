@@ -48,6 +48,11 @@ func (cfg *Config) validate() error {
 	if cfg.Global.LogRequestBody != "" && cfg.Global.LogRequestBody != "off" && cfg.Global.LogRequestBody != "snippet" && cfg.Global.LogRequestBody != "full" {
 		return fmt.Errorf("global log_request_body must be 'off', 'snippet', or 'full'")
 	}
+	switch cfg.Global.ReasoningEffortOnNone {
+	case "", "minimal", "low", "medium", "high", "xhigh", "max":
+	default:
+		return fmt.Errorf("global reasoning_effort_on_none must be minimal, low, medium, high, xhigh, or max")
+	}
 	names := make(map[string]bool)
 	for _, p := range cfg.Providers {
 		if p.Name == "" {

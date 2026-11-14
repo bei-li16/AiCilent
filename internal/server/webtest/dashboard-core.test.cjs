@@ -124,6 +124,28 @@ test('rate-limit logs distinguish the failed attempt from the next provider and 
   assert.deepEqual(C.filterLogs(rows, { result: 'client-limited' }, modelFor), [access]);
   assert.deepEqual(C.filterLogs(rows, { result: 'failed' }, modelFor), [other]);
 });
+test('reasoning effort changes carry the target model and filter independently of upstream results', () => {
+  const prefix = '[2026-11-14 13:55:23.000] [request-2] ';
+  const mapped = C.parseLog(prefix + 'REASONING_EFFORT | [P2] account-b | model=glm-5.3 | from="xhigh" | to=max', 1);
+  const removed = C.parseLog(prefix + 'REASONING_EFFORT | [P2] account-b | model=glm-5.3 | from="none" | to=removed', 2);
+  const escaped = C.parseLog(prefix + 'REASONING_EFFORT | [P2] account-b | model=glm-5.3 | from="status=429 | FAIL | \\n" | to=max', 3);
+  const configured = C.parseLog(prefix + 'REASONING_EFFORT | [P3] account-c | model=other | from="none" | to=medium', 4);
+  const modelFor = C.logProviderIndex([], []);
+
+  assert.equal(mapped.label, '思考等级映射');
+  assert.match(mapped.detail, /"xhigh" → max$/);
+  assert.equal(removed.label, '思考等级移除');
+  assert.match(removed.detail, /"none" → 省略字段$/);
+  assert.equal(mapped.provider, 'account-b');
+  assert.equal(mapped.requestId, 'request-2');
+  assert.equal(mapped.attemptNumber, null);
+  assert.equal(mapped.tone, 'reasoning-effort');
+  assert.equal(escaped.level, 'info');
+  assert.equal(escaped.status, 0);
+  assert.equal(configured.tone, 'reasoning-effort');
+  assert.match(configured.detail, /"none" → medium$/);
+  assert.deepEqual(C.filterLogs([mapped, removed, escaped], { result: 'reasoning-effort', model: 'glm-5.3', priority: '2', query: 'request-2' }, modelFor), [mapped, removed, escaped]);
+});
 test('request timing is independent of attempts and preserves local failures', () => {
   const groups = C.groupRequests([
     { request_id: 'ok', provider: 'p1', model_id: 'glm', priority: 2, latency_ms: 500, status_code: 429 },

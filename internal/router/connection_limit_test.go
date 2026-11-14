@@ -15,6 +15,7 @@ import (
 	"ai-proxy/internal/config"
 	"ai-proxy/internal/middleware"
 	"ai-proxy/internal/stats"
+	"ai-proxy/internal/tracer"
 
 	"github.com/gin-gonic/gin"
 )
@@ -72,7 +73,7 @@ func TestForwardRequestEnforcesSharedHostLimit(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			ctx, _ := gin.CreateTestContext(recorder)
 			ctx.Request = httptest.NewRequest(http.MethodPost, "/chat/completions", nil)
-			errs <- e.forwardRequest(ctx, []byte(`{"model":"m"}`), "openai", &provider, 5, "")
+			errs <- e.forwardRequest(ctx, []byte(`{"model":"m"}`), "openai", &provider, 5, tracer.New("m", "openai", "", io.Discard, io.Discard), "")
 		}()
 	}
 

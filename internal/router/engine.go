@@ -441,9 +441,9 @@ func (e *Engine) tryGroup(c *gin.Context, body []byte, requestFormat string, str
 
 			var fwdErr error
 			if streaming {
-				fwdErr = e.forwardRequestStream(c, body, requestFormat, provider, effectiveTimeout(provider.Timeout, modelTimeout), tr)
+				fwdErr = e.forwardRequestStream(c, body, requestFormat, provider, effectiveTimeout(provider.Timeout, modelTimeout), tr, cfg.Global.ReasoningEffortOnNone)
 			} else {
-				fwdErr = e.forwardRequest(c, body, requestFormat, provider, effectiveTimeout(provider.Timeout, modelTimeout), middleware.GetReqID(c))
+				fwdErr = e.forwardRequest(c, body, requestFormat, provider, effectiveTimeout(provider.Timeout, modelTimeout), tr, cfg.Global.ReasoningEffortOnNone)
 			}
 
 			latency := time.Since(start)
@@ -850,7 +850,7 @@ func (e *Engine) advanceRRIndex(priority, groupLen int) int {
 	return idx
 }
 
-func (e *Engine) forwardRequest(c *gin.Context, body []byte, requestFormat string, provider *config.Provider, timeout int, requestID string) error {
+func (e *Engine) forwardRequest(c *gin.Context, body []byte, requestFormat string, provider *config.Provider, timeout int, tr *tracer.Recorder, effortOnNone string) error {
 	var respBody []byte
 	var err error
 
@@ -862,7 +862,7 @@ func (e *Engine) forwardRequest(c *gin.Context, body []byte, requestFormat strin
 		body = converted
 	}
 
-	body = prepareProviderRequest(body, provider)
+	body, originalEffort, upstreamEffort := prepareProviderRequest(body, provider, effortOnNone)
 
 	requestCtx := c.Request.Context()
 	if timeout > 0 {
@@ -877,6 +877,8 @@ func (e *Engine) forwardRequest(c *gin.Context, body []byte, requestFormat strin
 	}
 	defer e.releaseConnSlot(limiter)
 
+	tr.LogReasoningEffortChange(provider.Name, provider.Priority, provider.ModelID, originalEffort, upstreamEffort)
+	requestID := middleware.GetReqID(c)
 	if provider.Format == "openai" {
 		respBody, err = adapter.CallOpenAIRawContext(requestCtx, provider.BaseURL, provider.APIKey, body, timeout, requestID, e.transport)
 	} else {
@@ -905,7 +907,7 @@ func upstreamFormat(requestFormat string) string {
 	return requestFormat
 }
 
-func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat string, provider *config.Provider, timeout int, tr *tracer.Recorder) error {
+func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat string, provider *config.Provider, timeout int, tr *tracer.Recorder, effortOnNone string) error {
 	if requestFormat != provider.Format {
 		converted, err := adapter.ConvertRequest(body, requestFormat, provider.Format)
 		if err != nil {
@@ -914,7 +916,7 @@ func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat
 		body = converted
 	}
 
-	body = prepareProviderRequest(body, provider)
+	body, originalEffort, upstreamEffort := prepareProviderRequest(body, provider, effortOnNone)
 
 	path := "/chat/completions"
 	if provider.Format == "anthropic" {
@@ -966,6 +968,7 @@ func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat
 	// A shared transport reuses TLS/HTTP2 connections and avoids leaving one
 	// idle connection pool behind for every completed streaming request.
 	client := &http.Client{Transport: e.streamTransport(timeout)}
+	tr.LogReasoningEffortChange(provider.Name, provider.Priority, provider.ModelID, originalEffort, upstreamEffort)
 	streamStart := time.Now()
 	resp, err := client.Do(httpReq)
 	if err != nil {
@@ -1467,12 +1470,14 @@ func setModelInBody(body []byte, modelID string) []byte {
 
 // prepareProviderRequest applies provider-specific compatibility adjustments
 // after any request-format conversion and model alias replacement.
-func prepareProviderRequest(body []byte, provider *config.Provider) []byte {
+// The effort values are empty when unchanged. An empty upstream effort with a
+// nonempty original effort means the field was removed.
+func prepareProviderRequest(body []byte, provider *config.Provider, effortOnNone string) (prepared []byte, originalEffort, upstreamEffort string) {
 	body = setModelInBody(body, provider.ModelID)
-	if provider.Format == "openai" && isSensenovaProvider(provider.BaseURL) {
-		body = normalizeSensenovaReasoning(body)
+	if provider.Format == "openai" {
+		return normalizeProviderReasoning(body, provider, effortOnNone)
 	}
-	return body
+	return body, "", ""
 }
 
 func isSensenovaProvider(baseURL string) bool {
@@ -1480,29 +1485,55 @@ func isSensenovaProvider(baseURL string) bool {
 	return err == nil && strings.EqualFold(u.Hostname(), "token.sensenova.cn")
 }
 
-// normalizeSensenovaReasoning adapts OpenAI-compatible reasoning parameters to
-// the Sensenova endpoint. It requires reasoning=true when reasoning_effort is
-// present. The valid values are: low, medium, high, xhigh, none. Some models
-// (glm-5.2, deepseek-v4-pro, kimi-k3) also accept max; xhigh is universally
-// accepted and is NOT remapped to avoid 400 errors on models that reject max.
-func normalizeSensenovaReasoning(body []byte) []byte {
+// Apply the configured none policy first, then preserve the built-in SenseNova
+// compatibility behavior for requests with other effort values.
+func normalizeProviderReasoning(body []byte, provider *config.Provider, effortOnNone string) (prepared []byte, originalEffort, upstreamEffort string) {
 	var data map[string]interface{}
 	if err := json.Unmarshal(body, &data); err != nil {
-		return body
+		return body, "", ""
 	}
 
-	effort, ok := data["reasoning_effort"].(string)
-	if !ok || strings.TrimSpace(effort) == "" {
-		return body
+	effort, _ := data["reasoning_effort"].(string)
+	canonicalEffort := strings.ToLower(strings.TrimSpace(effort))
+	if canonicalEffort == "" {
+		return body, "", ""
 	}
-	// Sensenova rejects reasoning_effort unless reasoning mode is enabled.
-	data["reasoning"] = true
+	sensenova := isSensenovaProvider(provider.BaseURL)
+	normalizedEffort := effort
+	if canonicalEffort == "none" {
+		normalizedEffort = effortOnNone
+		if normalizedEffort == "" {
+			delete(data, "reasoning_effort")
+		} else {
+			data["reasoning_effort"] = normalizedEffort
+		}
+	} else if sensenova {
+		if strings.HasPrefix(provider.ModelID, "glm-5.3") {
+			switch canonicalEffort {
+			case "low", "high", "max":
+				normalizedEffort = canonicalEffort
+			case "minimal", "medium":
+				normalizedEffort = "low"
+			default:
+				normalizedEffort = "max"
+			}
+			data["reasoning_effort"] = normalizedEffort
+		}
+	} else {
+		return body, "", ""
+	}
+	if sensenova && normalizedEffort != "" {
+		data["reasoning"] = true
+	}
 
 	modified, err := json.Marshal(data)
 	if err != nil {
-		return body
+		return body, "", ""
 	}
-	return modified
+	if normalizedEffort != effort {
+		return modified, effort, normalizedEffort
+	}
+	return modified, "", ""
 }
 
 // normalizeDeveloperRole rewrites the OpenAI "developer" role to "system" in the

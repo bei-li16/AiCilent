@@ -162,6 +162,14 @@ tbody tr:nth-child(even) td{background:#14223666}tbody tr:hover td{background:#1
 .badge.route-switch { color:#ffc0e7;background:#45263f;border-color:#9e6589; }
 .badge.route-skip { color:#c6cedd;background:#2b3444;border-color:#4a596e; }
 .badge.client-limited { color:#f6bac6;background:#402736;border-color:#805268; }
+.log-row.reasoning-effort {
+  background: #263023;
+  box-shadow: inset 3px 0 #c8ed83;
+}
+.reasoning-effort > summary:hover, .reasoning-effort[open] > summary { background:#333e2d; }
+.badge.reasoning-effort { color:#e0f7b7;background:#354122;border-color:#78974e; }
+.reasoning-effort .log-event { overflow-wrap: anywhere; }
+.log-row.reasoning-effort .log-message { color:#e0f7b7; }
 .log-row.request-start { box-shadow: inset 2px 0 #62b4ff; }
 .log-row.request-first { box-shadow: inset 2px 0 #bca2ff; }
 .log-row.request-end { box-shadow: inset 2px 0 #5fdfdb; }

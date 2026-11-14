@@ -70,7 +70,7 @@ func TestForwardStreamRejectsEOFAndDoesNotWaitAfterCompleteConversion(t *testing
 				recorder := httptest.NewRecorder()
 				c, _ := gin.CreateTestContext(recorder)
 				c.Request = httptest.NewRequest("POST", "/chat/completions", nil)
-				err := e.forwardRequestStream(c, []byte(`{"model":"m","stream":true,"messages":[],"input":"x"}`), format, p, 2, tracer.New("m", format, "r", io.Discard, io.Discard))
+				err := e.forwardRequestStream(c, []byte(`{"model":"m","stream":true,"messages":[],"input":"x"}`), format, p, 2, tracer.New("m", format, "r", io.Discard, io.Discard), "")
 				if complete && err != nil {
 					t.Fatal(err)
 				}
@@ -105,7 +105,7 @@ func TestSemanticFinishThenIdleIsStillFailure(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest("POST", "/chat/completions", nil)
-	err := e.forwardRequestStream(c, []byte(`{"model":"m","stream":true}`), "openai", p, 1, tracer.New("m", "openai", "r", io.Discard, io.Discard))
+	err := e.forwardRequestStream(c, []byte(`{"model":"m","stream":true}`), "openai", p, 1, tracer.New("m", "openai", "r", io.Discard, io.Discard), "")
 	if !isIdleTimeoutErr(err) || strings.Contains(recorder.Body.String(), "[DONE]") {
 		t.Fatalf("idle after finish=%v body=%s", err, recorder.Body.String())
 	}

@@ -179,6 +179,19 @@ func (r *Recorder) LogTTFB(providerName string, priority int, latency time.Durat
 	fmt.Fprint(r.logWriter, msg)
 }
 
+func (r *Recorder) LogReasoningEffortChange(providerName string, priority int, modelID, from, to string) {
+	if from == "" {
+		return
+	}
+	if to == "" {
+		to = "removed"
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	fmt.Fprintf(r.logWriter, "%s REASONING_EFFORT | [P%d] %s | model=%s | from=%.48q | to=%s\n",
+		r.prefix(), priority, providerName, modelID, from, to)
+}
+
 func (r *Recorder) LogResult(success bool, providerName string, rrIdx int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

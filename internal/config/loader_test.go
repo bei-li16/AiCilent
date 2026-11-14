@@ -7,6 +7,35 @@ import (
 	"testing"
 )
 
+func TestLoadReasoningEffortOnNone(t *testing.T) {
+	for _, tc := range []struct {
+		policy, wantError string
+	}{
+		{"low", ""},
+		{"max", ""},
+		{"", ""},
+		{"passthrough", "global reasoning_effort_on_none must be"},
+		{"lowest", "global reasoning_effort_on_none must be"},
+	} {
+		t.Run(tc.policy, func(t *testing.T) {
+			input := "global:\n  reasoning_effort_on_none: " + tc.policy + "\n" + validProvider
+			cfg, err := Load(writeConfigFile(t, input))
+			if tc.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+					t.Fatalf("Load error = %v, want %q", err, tc.wantError)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := cfg.Global.ReasoningEffortOnNone; got != tc.policy {
+				t.Fatalf("policy = %q, want %q", got, tc.policy)
+			}
+		})
+	}
+}
+
 const validProvider = `
 providers:
   - name: a

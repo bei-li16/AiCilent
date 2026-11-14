@@ -223,7 +223,7 @@
       ['全部样本结果', '含成功尝试', '含限流 429', '含其他失败', '含取消', '暂无尝试'];
     const options = state.pane === 'logs' ? [
       ['', '全部日志结果'], ['success', '成功'], ['limited', '限流 429'],
-      ['route-switch', '账号转接'], ['route-skip', '跳过账号'], ['client-limited', '返回 429'], ['failed', '其他失败'], ['canceled', '取消']
+      ['route-switch', '账号转接'], ['route-skip', '跳过账号'], ['client-limited', '返回 429'], ['failed', '其他失败'], ['canceled', '取消'], ['reasoning-effort', '思考等级调整']
     ] : ['', 'success', 'limited', 'failed', 'canceled', 'unseen'].map((key, i) => [key, labels[i]]);
     setOptions($('resultFilter'), options, state.filters.result);
   }
@@ -580,6 +580,7 @@
     const entries = $('logEntries');
     const create = log => {
       const details = node('details', 'log-row'), summary = node('summary');
+      if (log.key === 'reasoning-effort') details.classList.add(log.tone);
       const id = node('button', 'table-link request-id'); id.type = 'button'; id.dataset.copyId = log.requestId; id.dataset.tooltip = '复制完整请求 ID';
       const time = node('span', 'log-timestamp');
       time.append(node('span', 'log-time', log.time), node('span', 'log-event', log.event));
@@ -700,7 +701,7 @@
     source.onerror = () => setConnection('logStatus', '日志重连中', 'warning');
   }
   function setPane(pane, focus = false) {
-    if ((pane !== 'logs' && ['route-switch', 'route-skip', 'client-limited'].includes(state.filters.result)) ||
+    if ((pane !== 'logs' && ['route-switch', 'route-skip', 'client-limited', 'reasoning-effort'].includes(state.filters.result)) ||
         (pane === 'logs' && state.filters.result === 'unseen')) state.filters.result = '';
     state.pane = pane;
     $('logLevelControl').hidden = pane !== 'logs';

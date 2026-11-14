@@ -11,6 +11,9 @@ type GlobalConfig struct {
 	ListenAddr    string `yaml:"listen_addr" json:"listen_addr"`
 	DefaultFormat string `yaml:"default_format" json:"default_format"`
 	LogFile       string `yaml:"log_file" json:"log_file"`
+	// ReasoningEffortOnNone replaces explicit "none" for OpenAI upstreams.
+	// An empty value removes the effort field.
+	ReasoningEffortOnNone string `yaml:"reasoning_effort_on_none,omitempty" json:"reasoning_effort_on_none,omitempty"`
 	// LogRequestBody 控制请求内容日志级别：
 	//   "off"     不打印请求内容
 	//   "snippet" 仅打印 messages[0] 的前 80 字符（默认）

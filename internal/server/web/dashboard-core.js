@@ -215,19 +215,21 @@
     const match = raw.match(/^\[([^\]]+)\]\s*\[([^\]]+)\]\s*(\w+)\s*\|\s*(.*)$/s);
     const body = match ? match[4] : raw;
     const event = match ? match[3].toUpperCase() : 'TEXT';
-    const resultBody = ['INBOUND', 'TEXT'].includes(event) ? '' : body;
+    const resultBody = ['INBOUND', 'TEXT', 'REASONING_EFFORT'].includes(event) ? '' : body;
     const attempt = event === 'PROVIDER' && body.match(/^\[P(\d+)\]\[(\d+\/\d+)\]\s+(.+?)\s*\|\s*(.*)$/s);
     const next = event === 'ROUTER' && body.match(/^degrade to next provider\s*\|\s*(.+?)\s+\[P(\d+)\]\s*\|\s*reason=(.*)$/s);
     const skipped = event === 'QUEUE' && body.match(/^\[P(\d+)\]\s*\|\s*provider (.+?) skipping \((.*)\)\s*\|\s*rr=/s);
     const ttfb = event === 'TTFB' && body.match(/^(.+?)\s*\[P(\d+)\]\s*\|/);
     const retry = event === 'ROUTER' && body.match(/^non-retryable status=\d+\s*\|\s*skip retry\s*\|\s*(.+?)\s+\[P(\d+)\]$/);
     const summary = event === 'SUMMARY' && body.match(/\|\s*provider=([^|]*?)\s*\|\s*rr=/);
-    const provider = (attempt?.[3] || next?.[1] || skipped?.[2] || ttfb?.[1] || retry?.[1] || summary?.[1] || '').trim();
-    const priority = Number(attempt?.[1] || next?.[2] || skipped?.[1] || ttfb?.[2] || retry?.[2] ||
+    const effort = event === 'REASONING_EFFORT' && body.match(/^\[P(\d+)\]\s+(.+?)\s*\| model=([^|]+?)\s*\| from=("(?:[^"\\]|\\.)*") \| to=(minimal|low|medium|high|xhigh|max|removed)$/);
+    const provider = (attempt?.[3] || next?.[1] || skipped?.[2] || ttfb?.[1] || retry?.[1] || summary?.[1] || effort?.[2] || '').trim();
+    const priority = Number(attempt?.[1] || next?.[2] || skipped?.[1] || ttfb?.[2] || retry?.[2] || effort?.[1] ||
       (resultBody.match(/\[P(\d+)\]/) || [])[1] || 0);
     const providerRole = next ? '切换目标' : skipped ? '跳过对象' : '';
     let detail = attempt ? attempt[4] :
       next ? '切换原因：' + next[3] : skipped ? '跳过原因：' + skipped[3] : body;
+    if (effort) detail = 'reasoning_effort：' + effort[4] + ' → ' + (effort[5] === 'removed' ? '省略字段' : effort[5]);
     let elapsed, timingLabel, retryGapMs = null, attemptError = '';
     if (attempt) {
       elapsed = /^(OK|FAIL|CANCELED)\s*\|\s*(\S+)(?:\s*\|\s*(.*))?$/s.exec(attempt[4]);
@@ -264,7 +266,8 @@
     const status = attempt ? Number(/^API error \(status (\d{3})\)(?::|$)/.exec(attemptError)?.[1] || 0) :
       Number((resultBody.match(/status\s*[= ]\s*(\d{3})/) || [])[1] || (resultBody.match(/\|\s+(\d{3})\s+\|/) || [])[1] || 0);
     let key = 'neutral', label = '信息';
-    if (next) { key = 'route-switch'; label = status === 429 ? '限流转接' : '账号转接'; }
+    if (effort) { key = 'reasoning-effort'; label = effort[5] === 'removed' ? '思考等级移除' : '思考等级映射'; }
+    else if (next) { key = 'route-switch'; label = status === 429 ? '限流转接' : '账号转接'; }
     else if (skipped) { key = 'route-skip'; label = status === 429 ? '因 429 跳过' : '跳过账号'; }
     else if (attempt ? elapsed?.[1] === 'CANCELED' : /\bCANCELED\b/.test(resultBody)) { key = 'canceled'; label = '取消'; }
     else if (attempt && elapsed?.[1] === 'FAIL' && status === 429) { key = 'limited'; label = '限流 429'; }
@@ -288,7 +291,8 @@
       event === 'STREAM' && /\bterminal_written=true\s*\|\s*(?:request_elapsed=\S+\s*\|\s*)?end_reason=protocol_complete$/.test(body) ?
         { label: '流式完成', tone: 'request-end' } : null;
     const tone = key === 'success' && attempt ? 'attempt-success' : key === 'success' && event === 'SUMMARY' ? 'route-success' : key;
-    const description = attempt ? '本账号的一次上游调用结果；流式调用包含读取、转换和向客户端写出。仅计一次上游尝试。' :
+    const description = effort ? '代理在发往该账号前调整了思考等级。这是一条参数处理记录，上游结果见后续尝试日志。' :
+      attempt ? '本账号的一次上游调用结果；流式调用包含读取、转换和向客户端写出。仅计一次上游尝试。' :
       event === 'SUMMARY' ? '整个路由的汇总结果，包含此前的重试、退避和换号；不是另一次上游尝试。请求处理总耗时见 ACCESS。' :
       event === 'STREAM' ? '本次流式转发的协议终止状态；完成表示已写出结束标记，不代表客户端应用已经消费完响应，也不另计一次成功。' : '';
     const timingDescription = {
@@ -300,7 +304,7 @@
       TTFB: '从本次上游 HTTP 调用开始到收到响应头，不包含后续响应正文传输。'
     }[event] || '';
     return { id, raw, body, time: match ? match[1].slice(11) : '—', requestId: match && match[2] !== '-' ? match[2] : '',
-      event, provider, providerRole, priority, status, key, label, tone, description, timingDescription, level, detail, milestone, attemptNumber: attempt?.[2] || null,
+      event, provider, providerRole, model: effort?.[3] || '', priority, status, key, label, tone, description, timingDescription, level, detail, milestone, attemptNumber: attempt?.[2] || null,
       retryGapMs, timingLabel, timingMs: event === 'INBOUND' ? 0 : timingLabel ? durationMs(elapsed[2]) : null };
   }
   function logProviderIndex(providers, attempts) {
@@ -312,7 +316,7 @@
       entries.set(attempt.provider, attempt.model_id);
       requestModels.set(attempt.request_id, entries);
     }
-    return log => requestModels.get(log.requestId)?.get(log.provider) || models.get(log.provider) || '';
+    return log => log.model || requestModels.get(log.requestId)?.get(log.provider) || models.get(log.provider) || '';
   }
   function logPriorityIndex(logs, attempts = []) {
     const byRequest = new Map();
