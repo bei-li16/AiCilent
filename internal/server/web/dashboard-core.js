@@ -92,6 +92,13 @@
     return { minimum: Math.max(0, Math.floor(lower / step) * step),
       maximum: Math.min(100, Math.ceil(upper / step) * step) };
   }
+  function mean(values) {
+    let total = 0, count = 0;
+    for (const value of values || []) {
+      if (Number.isFinite(value) && value >= 0) { total += value; count++; }
+    }
+    return count ? total / count : null;
+  }
   function quantile(values, p) {
     const sorted = (values || []).filter(v => Number.isFinite(v) && v >= 0).slice().sort((a, b) => a - b);
     if (!sorted.length) return null;
@@ -375,6 +382,6 @@
     return normalized;
   }
   return { ATTEMPT_LIMIT, LOG_LIMIT, LOG_VIEW_LIMIT, PAGE_SIZE, number, count, ratio, formatCount, formatRate,
-    formatDuration, formatLogDuration, formatUptime, timestamp, priorityColor, activePriorities, chartSeries, modelLatencySeries, chartSelection, rateAxis, quantile, latencySummary, attemptOutcome, providerOutcome, providerLabel,
+    formatDuration, formatLogDuration, formatUptime, timestamp, priorityColor, activePriorities, chartSeries, modelLatencySeries, chartSelection, rateAxis, mean, quantile, latencySummary, attemptOutcome, providerOutcome, providerLabel,
     providerStreak, providerMatchesView, filterProviders, sortProviders, groupRequests, filterRequests, parseLog, logProviderIndex, logPriorityIndex, filterLogs, LogBuffer, validateSnapshot };
 });

@@ -14,9 +14,13 @@ test('dashboard handles log bursts, stable polls, priorities and responsive view
   const priorities = [1, 2, 3, 7];
   const data = { total_client_req: 20, total_client_completed: 20, total_client_success: 14,
     total_req: 40, total_success: 28, total_fail: 12, total_canceled: 0, total_rate: 70, running: true,
-    uptime: '1h0m0s', configured_priorities: priorities, providers: priorities.map(provider),
+    uptime: '1h0m0s', trend_request_seq: 120, configured_priorities: priorities, providers: priorities.map(provider),
     recent_attempts: [], recent_requests: [], curves: [{ priority: 0, points: [50, 60, 70], requests: [1, 2, 3] }],
-    latency_curve: [0.01, 0.02, 0.03], latency_curves: [{ priority: 0, points: [0.01, 0.02, 0.03], requests: [1, 2, 3] }],
+    latency_curve: [1, 3, 20, 9, 50], latency_curves: [
+      { priority: 0, points: [1, 3, 20, 9, 50], requests: [10, 30, 80, 120, 60] },
+      { priority: 1, points: [1, 3, 9], requests: [10, 30, 120] },
+      { priority: 2, points: [20, 50], requests: [80, 60] }
+    ],
     cb: priorities.map(priority => ({ priority, open: false, failures: 0, cooldown_sec: 60, cooldown_rem_sec: 0, skip_remaining: 10 })) };
   let reads = 0;
   const sockets = new Set();
@@ -50,7 +54,38 @@ test('dashboard handles log bursts, stable polls, priorities and responsive view
     await page.waitForFunction(() => document.getElementById('logBufferInfo').textContent.includes('1000/1000'));
     assert.match(await page.locator('#logBufferInfo').innerText(), /7/);
     assert.equal(await page.locator('#logEntries > *').count(), 200);
-	await page.waitForTimeout(650);
+    await page.waitForTimeout(650);
+    const legend = priority => page.locator('#latencyLegend button[data-priority="' + priority + '"]');
+    const assertMean = async (priority, value, count) => {
+      assert.match(await legend(priority).innerText(), new RegExp('平均 ' + value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+      assert.match(await legend(priority).getAttribute('aria-label'), new RegExp('平均成功耗时 .*，' + count + ' 次成功尝试'));
+    };
+    await assertMean(0, '16.6 s', 5);
+    await assertMean(1, '4.33 s', 3);
+    await assertMean(2, '35.0 s', 2);
+    await assertMean(3, '—', 0);
+    assert.match(await page.locator('#rateLegend button[data-priority="0"]').innerText(), /70\.0%/);
+    assert.equal(await page.locator('#latencyP50').innerText(), '9.00 s');
+    await legend(1).click();
+    await assertMean(0, '16.6 s', 5);
+    await assertMean(1, '4.33 s', 3);
+    assert.equal(await page.locator('#latencyP50').innerText(), '9.00 s');
+    await legend(0).click();
+    await assertMean(0, '16.6 s', 5);
+    await assertMean(2, '35.0 s', 2);
+    assert.equal(await page.locator('#latencyP50').innerText(), '35.0 s');
+    await page.locator('#latencyAll').click();
+    await page.locator('#trendRange button[data-window="50"]').click();
+    await assertMean(0, '14.5 s', 2);
+    await assertMean(1, '9.00 s', 1);
+    await assertMean(2, '20.0 s', 1);
+    await page.locator('#trendRange button[data-window="100"]').click();
+    await assertMean(0, '20.5 s', 4);
+    await assertMean(1, '6.00 s', 2);
+    await assertMean(2, '35.0 s', 2);
+    assert.equal(await page.locator('#latencyP50').innerText(), '14.5 s');
+    await page.locator('#trendRange button[data-window="0"]').click();
+    await assertMean(0, '16.6 s', 5);
     await page.evaluate(() => {
       window.chartMutations = 0;
       new MutationObserver(list => { window.chartMutations += list.length; }).observe(document.getElementById('rateChart'), { subtree: true, childList: true, attributes: true });

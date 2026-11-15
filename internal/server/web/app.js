@@ -371,18 +371,23 @@
         return button;
       }, (button, c) => {
         button.style.setProperty('--series-color', c.color); button.children[1].style.background = c.color;
-        const value = c.points.length ? kind === 'rate' ? C.formatRate(c.points.at(-1)) : C.formatDuration(c.points.at(-1) * 1000) : '—';
-        setText(button.children[2], c.label + ' ' + value);
+        const average = kind === 'latency' ? C.mean(c.points) : null;
+        const value = kind === 'latency' ? C.formatDuration(average === null ? null : average * 1000) :
+          c.points.length ? C.formatRate(c.points.at(-1)) : '—';
+        setText(button.children[2], c.label + (kind === 'latency' ? ' 平均 ' : ' ') + value);
         if (kind === 'latency') setText(button.lastChild.firstChild, C.formatCount(c.points.length));
         button.setAttribute('aria-pressed', String(selection.has(c.priority)));
-        button.setAttribute('aria-label', c.label + '曲线' + (kind === 'latency' ? '，最近成功耗时 ' + value + '，' + c.points.length + ' 次成功尝试' : ''));
-        button.dataset.tooltip = (kind === 'latency' ? '图例显示所选范围内最近完成的一次成功上游尝试。计时从这一次尝试开始，到响应转发结束。' :
+        button.setAttribute('aria-label', c.label + '曲线' + (kind === 'latency' ? '，平均成功耗时 ' + value + '，' + c.points.length + ' 次成功尝试' : ''));
+        button.dataset.tooltip = (kind === 'latency' ?
+          '图例为当前范围内本曲线所有保留成功样本的算术平均，不受其他曲线显隐影响。' +
+          (c.priority === 0 ? '汇总使用汇总曲线自身的样本，不重复拼接各优先级。' : '仅统计 ' + c.label + '，不包含其他优先级。') +
+          '每次耗时从本次上游尝试开始，到响应转发结束。' :
           '图例显示所选范围内保留样本的整体成功率。每个点从范围内第一个样本累计到该点，取消尝试不计入分母。') +
           '\n' + c.points.length + ' 个采样点。点击切换曲线。';
       });
       const selected = curves.filter(c => selection.has(c.priority));
       if (kind === 'latency') drawLatencyStatistics(selected);
-      text(kind + 'Caption', selected.length ? (kind === 'latency' ? '独立样本序号 · 图例为最近一次成功尝试 · 不含退避' :
+      text(kind + 'Caption', selected.length ? (kind === 'latency' ? '独立样本序号 · 图例为各曲线样本均值 · 不含退避' :
         '独立样本序号 · 按所选范围的保留样本累计') : '点击图例选择一条或多条曲线');
       setText($(kind + 'Empty').querySelector('strong'), !selected.length ? '未选择曲线' : kind === 'rate' ? '暂无成功率样本' : '暂无成功耗时样本');
       drawChart(kind, selected.filter(c => c.points.length), force);

@@ -291,6 +291,48 @@ test('trend windows count client requests and use the same range for model laten
   assert.deepEqual(C.modelLatencySeries(data, 100), [{ model: 'glm', points: [2, 5] }]);
 });
 
+test('latency mean uses every valid point, includes zero and preserves its input', () => {
+  const values = Object.freeze([0, 1, 3, 8, NaN, Infinity, -1, null, '100']);
+  assert.equal(C.mean(values), 3);
+  assert.equal(C.mean([1, 3, 20]), 8);
+  assert.notEqual(C.mean([1, 3, 20]), C.quantile([1, 3, 20], .5));
+  assert.equal(C.mean([0]), 0);
+  assert.equal(C.mean([6.34]), 6.34);
+  for (const empty of [undefined, null, [], [NaN, Infinity, -1, null, '1']]) assert.equal(C.mean(empty), null);
+});
+
+test('latency means respect each curve and client-request window independently', () => {
+  const overall = { priority: 0, requests: [10, 20, 21, 70, 71, 90, 120], points: [1, 20, 3, 100, 5, 40, 7] };
+  const data = { trend_request_seq: 120, configured_priorities: [1, 2, 3, 7], latency_curves: [overall,
+    { priority: 1, requests: [10, 21, 71, 120], points: [1, 3, 5, 7] },
+    { priority: 2, requests: [20, 90], points: [20, 40] },
+    { priority: 7, requests: [70], points: [100] }
+  ] };
+  const before = JSON.stringify(data);
+  const summary = window => C.chartSeries(data, 'latency', window).map(c => [c.priority, c.points.length, C.mean(c.points)]);
+  assert.deepEqual(summary(0), [[0, 7, 176 / 7], [1, 4, 4], [2, 2, 30], [3, 0, null], [7, 1, 100]]);
+  assert.deepEqual(summary(50), [[0, 3, 52 / 3], [1, 2, 6], [2, 1, 40], [3, 0, null], [7, 0, null]]);
+  assert.deepEqual(summary(100), [[0, 5, 31], [1, 3, 5], [2, 1, 40], [3, 0, null], [7, 1, 100]]);
+  assert.equal(JSON.stringify(data), before);
+  assert.notEqual(C.mean(overall.points), C.mean([4, 30, 100]), 'do not average the priority averages');
+
+  const single = { configured_priorities: [1, 2], latency_curves: [
+    { priority: 0, points: [1, 3, 20] }, { priority: 1, points: [1, 3, 20] }
+  ] };
+  assert.deepEqual(C.chartSeries(single, 'latency').map(c => C.mean(c.points)), [8, 8, null]);
+});
+
+test('latency means use each independently retained curve, not its full history or the union of priorities', () => {
+  const data = { configured_priorities: [1, 2], latency_curves: [
+    { priority: 0, points: Array.from({ length: 245 }, (_, i) => i + 1) },
+    { priority: 1, points: [4, 8] },
+    { priority: 2, points: [NaN, -1, Infinity, 9] }
+  ] };
+  const curves = C.chartSeries(data, 'latency');
+  assert.deepEqual(curves.map(c => [c.points.length, C.mean(c.points)]), [[240, 125.5], [2, 6], [1, 9]]);
+  assert.notEqual(C.mean(curves[0].points), C.mean(curves.slice(1).flatMap(c => c.points)));
+});
+
 test('latency statistics combine selected priorities without counting the overall series twice', () => {
   const curve = (priority, points) => ({ priority, points, color: C.priorityColor(priority) });
   const p1 = curve(1, [1, 3]);
