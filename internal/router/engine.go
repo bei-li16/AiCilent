@@ -3,6 +3,7 @@ package router
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,16 +24,19 @@ import (
 	"ai-proxy/internal/ratelimit"
 	"ai-proxy/internal/retry"
 	"ai-proxy/internal/stats"
+	"ai-proxy/internal/stream"
 	"ai-proxy/internal/tracer"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // maxRequestBodySize limits the request body to prevent OOM from malicious
 // payloads. 50MB leaves room for multimodal requests: a single base64 image
 // attachment alone can reach ~5MB, and coding agents attach them on top of
 // large conversation history.
-const maxRequestBodySize = 50 << 20 // 50 MB
+const maxRequestBodySize = middleware.MaxRequestBodySize
 
 type Engine struct {
 	cfg        *config.Config
@@ -56,9 +60,7 @@ type Engine struct {
 	// the provider until its cooldown expires.
 	coolUntil map[string]time.Time
 
-	// Round-robin index (rrMu protects)
-	rrMu    sync.Mutex
-	rrIndex map[int]int
+	accounts *accountScheduler
 
 	// Config reload guard
 	reloadMu sync.RWMutex
@@ -70,10 +72,6 @@ type Engine struct {
 
 	// File write mutex for CB state persistence (prevents concurrent write corruption)
 	fileMu sync.Mutex
-
-	// Per-upstream-origin concurrency limiters (connMu protects the map).
-	connMu       sync.Mutex
-	connLimiters map[string]*hostLimiter
 
 	logWriter  io.Writer
 	fileWriter io.Writer
@@ -105,7 +103,7 @@ func NewEngine(cfg *config.Config, configPath string, logWriter, fileWriter io.W
 		skipRemaining:    make(map[int]int),
 		probeInFlight:    make(map[int]bool),
 		probeLease:       make(map[int]uint64),
-		rrIndex:          make(map[int]int),
+		accounts:         newAccountScheduler(cfg),
 		rateLimiters:     rl,
 		coolUntil:        make(map[string]time.Time),
 		transport: &http.Transport{
@@ -119,8 +117,10 @@ func NewEngine(cfg *config.Config, configPath string, logWriter, fileWriter io.W
 		fileWriter:       fileWriter,
 		stats:            stats,
 	}
-	e.rebuildConnLimiters(cfg)
 	e.loadCBState()
+	if e.stats != nil {
+		e.stats.ReconcileProviders(e.ConfiguredProviders())
+	}
 	e.logCBConfig()
 	return e
 }
@@ -139,32 +139,36 @@ func (e *Engine) logCBConfig() {
 
 // StartWatcher starts a goroutine that polls the config file for changes
 // and hot-reloads the provider configuration.
-func (e *Engine) StartWatcher(ctx context.Context, interval time.Duration) {
+func (e *Engine) StartWatcher(ctx context.Context, interval time.Duration) <-chan struct{} {
+	done := make(chan struct{})
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
 
-	var lastMod time.Time
-	if fi, err := os.Stat(e.configPath); err == nil {
-		lastMod = fi.ModTime()
-	}
+	// The caller may have loaded cfg before a replacement or transient write.
+	// Validate the disk version on the first tick too.
+	var lastApplied [sha256.Size]byte
 
 	go func() {
+		defer close(done)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				fi, err := os.Stat(e.configPath)
+				data, err := os.ReadFile(e.configPath)
 				if err != nil {
 					continue
 				}
-				if fi.ModTime().After(lastMod) {
-					lastMod = fi.ModTime()
-					if err := e.reloadConfig(); err != nil {
+				digest := sha256.Sum256(data)
+				if digest != lastApplied {
+					cfg, err := config.Parse(data, filepath.Ext(e.configPath))
+					if err != nil {
 						fmt.Fprintf(e.logWriter, "[%s] CONFIG   | hot-reload failed: %v\n",
 							time.Now().Format("2006-01-02 15:04:05.000"), err)
 					} else {
+						e.applyConfig(cfg)
+						lastApplied = digest
 						fmt.Fprintf(e.logWriter, "[%s] CONFIG   | hot-reloaded from %s\n",
 							time.Now().Format("2006-01-02 15:04:05.000"), e.configPath)
 					}
@@ -174,6 +178,7 @@ func (e *Engine) StartWatcher(ctx context.Context, interval time.Duration) {
 			}
 		}
 	}()
+	return done
 }
 
 func (e *Engine) reloadConfig() error {
@@ -182,6 +187,11 @@ func (e *Engine) reloadConfig() error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
+	e.applyConfig(cfg)
+	return nil
+}
+
+func (e *Engine) applyConfig(cfg *config.Config) {
 	e.reloadMu.Lock()
 	e.cfg = cfg
 	e.matcher = NewMatcher(cfg.ModelRoutes)
@@ -202,25 +212,27 @@ func (e *Engine) reloadConfig() error {
 		}
 	}
 	e.rateLimiters = newRL
+	configuredNames := make(map[string]bool, len(cfg.Providers))
+	for _, provider := range cfg.Providers {
+		configuredNames[provider.Name] = true
+	}
+	for name, until := range e.coolUntil {
+		if !configuredNames[name] || !time.Now().Before(until) {
+			delete(e.coolUntil, name)
+		}
+	}
 	if cfg.Global.RateLimitCooldown <= 0 {
 		clear(e.coolUntil)
 	}
 	e.rlMu.Unlock()
 
-	// Apply host concurrency changes without interrupting active requests.
-	e.rebuildConnLimiters(cfg)
-
-	// Reset RR indexes for any new priority groups
-	e.rrMu.Lock()
-	for _, p := range cfg.Providers {
-		if _, ok := e.rrIndex[p.Priority]; !ok {
-			e.rrIndex[p.Priority] = 0
-		}
+	e.accounts.reconcile(cfg)
+	e.pruneStreamTransports(cfg)
+	if e.stats != nil {
+		e.stats.ReconcileProviders(e.ConfiguredProviders())
 	}
-	e.rrMu.Unlock()
 
 	e.logCBConfig()
-	return nil
 }
 
 const clientRequestSucceededKey = "client_request_succeeded"
@@ -231,14 +243,19 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 		return
 	}
 
-	// Limit request body to 10MB to prevent OOM from malicious large payloads.
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxRequestBodySize)
-	body, err := io.ReadAll(c.Request.Body)
+	body, cached := c.Get(middleware.CtxBodyKey)
+	requestBody, _ := body.([]byte)
+	var err error
+	if !cached {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxRequestBodySize)
+		requestBody, err = io.ReadAll(c.Request.Body)
+	}
 	if err != nil {
 		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request body too large or unreadable"})
 		return
 	}
-	c.Request.Body = io.NopCloser(bytes.NewBuffer(body))
+	bodyBytes := requestBody
+	c.Set(preparationCacheKey, make(map[preparationKey]preparedBody))
 
 	reqStart := time.Now()
 	ctx := context.WithValue(c.Request.Context(), startTimeKey, reqStart)
@@ -246,7 +263,14 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 
 	requestFormat := middleware.GetRequestFormat(c)
 
-	modelName := extractModel(body)
+	modelName := ""
+	if cached {
+		if model := gjson.GetBytes(bodyBytes, "model"); model.Type == gjson.String {
+			modelName = model.Str
+		}
+	} else {
+		modelName = extractModel(bodyBytes)
+	}
 	c.Set(middleware.CtxRequestedModel, modelName)
 	if modelName == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot extract model from request"})
@@ -262,10 +286,10 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 	e.reloadMu.RLock()
 	cfg := e.cfg
 	allProviders := e.getOrderedProviders(modelName)
-	body, modelTimeout := applyModelDefaults(body, modelName, cfg.ModelRules)
+	bodyBytes, modelTimeout := applyModelDefaults(bodyBytes, modelName, cfg.ModelRules)
 	e.reloadMu.RUnlock()
 
-	streaming := hasStream(body)
+	streaming := hasStream(bodyBytes)
 
 	tr := tracer.New(modelName, requestFormat, middleware.GetReqID(c), e.logWriter, e.fileWriter)
 
@@ -276,14 +300,14 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 	if logLevel == "" {
 		logLevel = "snippet"
 	}
-	tr.LogRequest(c.Request.Method, c.Request.URL.Path, logLevel, buildRequestBodyLog(body, logLevel))
+	tr.LogRequest(c.Request.Method, c.Request.URL.Path, logLevel, buildRequestBodyLog(bodyBytes, logLevel))
 
 	// Normalize OpenAI-only roles before any format conversion, so both the
 	// openai->openai passthrough and the openai->anthropic system hoisting see a
 	// body the upstream accepts. This runs after LogRequest on purpose: the log
 	// keeps showing the role the client actually sent, which is what makes this
 	// class of failure diagnosable.
-	body = normalizeDeveloperRole(body)
+	bodyBytes = normalizeDeveloperRole(bodyBytes)
 
 	// Filter to providers that speak the upstream protocol needed by this
 	// request. Responses is an OpenAI client protocol that is adapted to the
@@ -345,7 +369,7 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 			continue
 		}
 
-		completed, lastErr = e.tryGroup(c, body, requestFormat, streaming, group,
+		completed, lastErr = e.tryGroup(c, bodyBytes, requestFormat, streaming, group,
 			modelTimeout, modelName, tr, cfg, probeID)
 		if completed {
 			break
@@ -389,46 +413,56 @@ func (e *Engine) tryGroup(c *gin.Context, body []byte, requestFormat string, str
 		}
 		e.cbMu.Unlock()
 	}()
-	startIdx := e.advanceRRIndex(priority, len(group))
-	tr.LogQueue(priority, "trying", startIdx, len(group))
+	startIdx := 0
 
 	var lastErr error
 	upstreamFailed := false
 	var lastProvider *config.Provider
 	lastIdx := 0
 
-	type candidate struct {
-		idx      int
-		provider *config.Provider
-	}
-	candidates := make([]candidate, 0, len(group))
-	for i := 0; i < len(group); i++ {
-		idx := (startIdx + i) % len(group)
-		provider := group[idx]
-		candidates = append(candidates, candidate{idx: idx, provider: provider})
+	candidates := make([]accountCandidate, len(group))
+	for i, provider := range group {
+		candidates[i] = accountCandidate{provider: provider, key: identifyAccount(provider)}
 	}
 
-	for ci, cand := range candidates {
-		idx, provider := cand.idx, cand.provider
-		lastProvider, lastIdx = provider, idx
+	for {
 		if ctx.Err() != nil {
 			break
 		}
-		if rlErr := e.checkRateLimit(provider.Name); rlErr != nil {
-			lastErr = rlErr
-			tr.LogQueue(priority, fmt.Sprintf("provider %s skipping (%v)", provider.Name, rlErr), idx, len(group))
-			continue
+		idx, lease, skipped := e.accounts.selectAndStart(ctx, candidates, e.checkRateLimit)
+		for _, skip := range skipped {
+			lastErr = skip.err
+			tr.LogQueue(priority, fmt.Sprintf("provider %s skipping (%v)", group[skip.index].Name, skip.err), skip.index, len(group))
 		}
+		if idx < 0 {
+			break
+		}
+		provider := group[idx]
+		candidates[idx].tried = true
 
-		if ci > 0 && lastErr != nil {
+		if lastProvider == nil {
+			startIdx = idx
+		}
+		if lastErr != nil {
 			tr.LogDegradeProvider(provider.Name, priority, lastErr.Error())
 		}
+		lastProvider, lastIdx = provider, idx
+		previousAttempt := "never"
+		if !lease.previousAttempt.IsZero() {
+			previousAttempt = lease.previousAttempt.Format(time.RFC3339Nano)
+		}
+		tr.LogQueue(priority, fmt.Sprintf("trying provider=%s strategy=least_active_oldest active=%d previous_attempt=%s",
+			provider.Name, lease.active, previousAttempt), idx, len(group))
 
 		maxRetries := provider.Retry.MaxRetries
 		rm := retry.NewManager(maxRetries, provider.Retry.RetryInterval, provider.Retry.BackoffFactor)
 		var previousStart time.Time
 		for rm.ShouldRetry() {
 			if ctx.Err() != nil {
+				if lease != nil {
+					lease.finish()
+					lease = nil
+				}
 				break
 			}
 			attempt := rm.Attempt()
@@ -439,12 +473,17 @@ func (e *Engine) tryGroup(c *gin.Context, body []byte, requestFormat string, str
 			}
 			previousStart = start
 
-			var fwdErr error
-			if streaming {
-				fwdErr = e.forwardRequestStream(c, body, requestFormat, provider, effectiveTimeout(provider.Timeout, modelTimeout), tr, cfg.Global.ReasoningEffortOnNone)
-			} else {
-				fwdErr = e.forwardRequest(c, body, requestFormat, provider, effectiveTimeout(provider.Timeout, modelTimeout), tr, cfg.Global.ReasoningEffortOnNone)
+			if lease == nil {
+				lease = e.accounts.start(candidates[idx].key)
 			}
+			fwdErr := func() error {
+				defer lease.finish()
+				if streaming {
+					return e.forwardRequestStream(c, body, requestFormat, provider, effectiveTimeout(provider.Timeout, modelTimeout), tr, cfg.Global.ReasoningEffortOnNone)
+				}
+				return e.forwardRequest(c, body, requestFormat, provider, effectiveTimeout(provider.Timeout, modelTimeout), tr, cfg.Global.ReasoningEffortOnNone)
+			}()
+			lease = nil
 
 			latency := time.Since(start)
 
@@ -460,17 +499,6 @@ func (e *Engine) tryGroup(c *gin.Context, body []byte, requestFormat string, str
 				return true, nil
 			}
 
-			var capacityErr *localCapacityError
-			if errors.As(fwdErr, &capacityErr) {
-				lastErr = fwdErr
-				tr.LogQueue(priority, fwdErr.Error(), idx, len(group))
-				if isRequestCanceled(c, fwdErr) {
-					tr.LogCanceled(provider.Name, idx)
-					fmt.Fprint(e.logWriter, tr.Dump())
-					return true, nil
-				}
-				break // no upstream call was made; do not count a provider attempt
-			}
 			// The client left mid-stream. Not an upstream failure: no failover
 			// (nobody to write to) and no circuit-breaker penalty.
 			if errors.Is(fwdErr, errClientGoneIncomplete) || isRequestCanceled(c, fwdErr) {
@@ -490,6 +518,11 @@ func (e *Engine) tryGroup(c *gin.Context, body []byte, requestFormat string, str
 
 			if statusCode == http.StatusTooManyRequests && attempt == maxRetries+1 {
 				e.markProviderCooldown(provider.Name)
+				for i := range candidates {
+					if candidates[i].key == candidates[idx].key {
+						candidates[i].tried = true
+					}
+				}
 				break // cool down and fail over only after the YAML retry budget is exhausted
 			}
 
@@ -588,8 +621,7 @@ func breakerFailure(err error) bool {
 	if errors.As(err, &apiErr) {
 		return apiErr.StatusCode == 408 || apiErr.StatusCode >= 500
 	}
-	var capacityErr *localCapacityError
-	return !errors.As(err, &capacityErr) && !errors.Is(err, errClientGoneIncomplete)
+	return !errors.Is(err, errClientGoneIncomplete)
 }
 
 func (e *Engine) recordGroupFailure(modelName string, priority int, tr *tracer.Recorder, threshold, cooldownSec, skipRequests int, lease ...uint64) {
@@ -621,6 +653,7 @@ func (e *Engine) closeCircuitBreaker(priority int, modelName string, tr *tracer.
 
 	wasOpen := e.circuitOpenSince[priority] != nil
 	prevFailures := e.failureCount[priority]
+	changed := wasOpen || prevFailures != 0 || e.skipRemaining[priority] != skipRequests
 
 	e.failureCount[priority] = 0
 	e.probeInFlight[priority] = false
@@ -639,94 +672,9 @@ func (e *Engine) closeCircuitBreaker(priority int, modelName string, tr *tracer.
 	}
 	e.cbMu.Unlock()
 
-	e.saveCBState()
-}
-
-type hostLimiter struct {
-	mu      sync.Mutex
-	limit   int
-	active  int
-	changed chan struct{}
-}
-
-func newHostLimiter(limit int) *hostLimiter {
-	return &hostLimiter{limit: limit, changed: make(chan struct{})}
-}
-
-func (l *hostLimiter) setLimit(limit int) {
-	l.mu.Lock()
-	if l.limit != limit {
-		l.limit = limit
-		close(l.changed)
-		l.changed = make(chan struct{})
+	if changed {
+		e.saveCBState()
 	}
-	l.mu.Unlock()
-}
-
-func (l *hostLimiter) acquire(ctx context.Context) error {
-	for {
-		l.mu.Lock()
-		if l.limit <= 0 || l.active < l.limit {
-			l.active++
-			l.mu.Unlock()
-			return nil
-		}
-		changed := l.changed
-		l.mu.Unlock()
-
-		select {
-		case <-changed:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-}
-
-func (l *hostLimiter) release() {
-	l.mu.Lock()
-	if l.active > 0 {
-		l.active--
-	}
-	close(l.changed)
-	l.changed = make(chan struct{})
-	l.mu.Unlock()
-}
-
-// rebuildConnLimiters applies the strictest positive limit configured for all
-// provider entries that point at the same scheme/host/port. Paths such as /v1
-// do not create a second pool for the same upstream server.
-func (e *Engine) rebuildConnLimiters(cfg *config.Config) {
-	desired := make(map[string]int)
-	for i := range cfg.Providers {
-		p := &cfg.Providers[i]
-		if p.MaxConcurrent <= 0 {
-			continue
-		}
-		key := upstreamOrigin(p.BaseURL)
-		if current, ok := desired[key]; !ok || p.MaxConcurrent < current {
-			desired[key] = p.MaxConcurrent
-		}
-	}
-
-	e.connMu.Lock()
-	old := e.connLimiters
-	next := make(map[string]*hostLimiter, len(desired))
-	for key, limit := range desired {
-		limiter := old[key]
-		if limiter == nil {
-			limiter = newHostLimiter(limit)
-		} else {
-			limiter.setLimit(limit)
-		}
-		next[key] = limiter
-	}
-	for key, limiter := range old {
-		if _, ok := next[key]; !ok {
-			limiter.setLimit(0)
-		}
-	}
-	e.connLimiters = next
-	e.connMu.Unlock()
 }
 
 func upstreamOrigin(baseURL string) string {
@@ -746,25 +694,6 @@ func upstreamOrigin(baseURL string) string {
 	return scheme + "://" + host
 }
 
-func (e *Engine) acquireConnSlot(ctx context.Context, provider *config.Provider) (*hostLimiter, error) {
-	e.connMu.Lock()
-	limiter := e.connLimiters[upstreamOrigin(provider.BaseURL)]
-	e.connMu.Unlock()
-	if limiter == nil {
-		return nil, nil
-	}
-	if err := limiter.acquire(ctx); err != nil {
-		return nil, err
-	}
-	return limiter, nil
-}
-
-func (e *Engine) releaseConnSlot(limiter *hostLimiter) {
-	if limiter != nil {
-		limiter.release()
-	}
-}
-
 func (e *Engine) streamTransport(timeout int) *http.Transport {
 	headerTimeout := time.Duration(timeout) * time.Second
 
@@ -773,10 +702,27 @@ func (e *Engine) streamTransport(timeout int) *http.Transport {
 	if transport := e.streamTransports[headerTimeout]; transport != nil {
 		return transport
 	}
+	// Old in-flight requests can introduce stale variants after a reload.
+	if len(e.streamTransports) >= 16 {
+		for key, old := range e.streamTransports {
+			delete(e.streamTransports, key)
+			old.CloseIdleConnections()
+			break
+		}
+	}
 	transport := e.transport.Clone()
 	transport.ResponseHeaderTimeout = headerTimeout
 	e.streamTransports[headerTimeout] = transport
 	return transport
+}
+
+func (e *Engine) CloseIdleConnections() {
+	e.transport.CloseIdleConnections()
+	e.streamMu.Lock()
+	defer e.streamMu.Unlock()
+	for _, transport := range e.streamTransports {
+		transport.CloseIdleConnections()
+	}
 }
 
 // checkRateLimit checks the optional upstream cooldown and the local limiter.
@@ -842,27 +788,15 @@ func isRequestCanceled(c *gin.Context, err error) bool {
 	return ctxErr != nil && errors.Is(err, ctxErr)
 }
 
-func (e *Engine) advanceRRIndex(priority, groupLen int) int {
-	e.rrMu.Lock()
-	defer e.rrMu.Unlock()
-	idx := e.rrIndex[priority]
-	e.rrIndex[priority] = (idx + 1) % groupLen
-	return idx
-}
-
 func (e *Engine) forwardRequest(c *gin.Context, body []byte, requestFormat string, provider *config.Provider, timeout int, tr *tracer.Recorder, effortOnNone string) error {
 	var respBody []byte
 	var err error
 
-	if requestFormat != provider.Format {
-		converted, err := adapter.ConvertRequest(body, requestFormat, provider.Format)
-		if err != nil {
-			return fmt.Errorf("convert request: %w", err)
-		}
-		body = converted
+	prepared := cachedPreparation(c, body, requestFormat, provider, effortOnNone)
+	if prepared.err != nil {
+		return prepared.err
 	}
-
-	body, originalEffort, upstreamEffort := prepareProviderRequest(body, provider, effortOnNone)
+	body, originalEffort, upstreamEffort := prepared.body, prepared.original, prepared.upstream
 
 	requestCtx := c.Request.Context()
 	if timeout > 0 {
@@ -870,12 +804,6 @@ func (e *Engine) forwardRequest(c *gin.Context, body []byte, requestFormat strin
 		requestCtx, cancel = context.WithTimeout(requestCtx, time.Duration(timeout)*time.Second)
 		defer cancel()
 	}
-
-	limiter, err := e.acquireConnSlot(requestCtx, provider)
-	if err != nil {
-		return &localCapacityError{err: err}
-	}
-	defer e.releaseConnSlot(limiter)
 
 	tr.LogReasoningEffortChange(provider.Name, provider.Priority, provider.ModelID, originalEffort, upstreamEffort)
 	requestID := middleware.GetReqID(c)
@@ -908,15 +836,11 @@ func upstreamFormat(requestFormat string) string {
 }
 
 func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat string, provider *config.Provider, timeout int, tr *tracer.Recorder, effortOnNone string) error {
-	if requestFormat != provider.Format {
-		converted, err := adapter.ConvertRequest(body, requestFormat, provider.Format)
-		if err != nil {
-			return fmt.Errorf("convert request: %w", err)
-		}
-		body = converted
+	prepared := cachedPreparation(c, body, requestFormat, provider, effortOnNone)
+	if prepared.err != nil {
+		return prepared.err
 	}
-
-	body, originalEffort, upstreamEffort := prepareProviderRequest(body, provider, effortOnNone)
+	body, originalEffort, upstreamEffort := prepared.body, prepared.original, prepared.upstream
 
 	path := "/chat/completions"
 	if provider.Format == "anthropic" {
@@ -946,24 +870,14 @@ func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat
 	}
 	if provider.Format == "openai" {
 		httpReq.Header.Set("Authorization", "Bearer "+provider.APIKey)
-	} else if provider.AuthType == "bearer" {
-		httpReq.Header.Set("Authorization", "Bearer "+provider.APIKey)
 	} else {
-		httpReq.Header.Set("x-api-key", provider.APIKey)
 		httpReq.Header.Set("anthropic-version", "2023-06-01")
+		if provider.AuthType == "bearer" {
+			httpReq.Header.Set("Authorization", "Bearer "+provider.APIKey)
+		} else {
+			httpReq.Header.Set("x-api-key", provider.APIKey)
+		}
 	}
-
-	slotCtx := streamCtx
-	var slotCancel context.CancelFunc
-	if timeout > 0 {
-		slotCtx, slotCancel = context.WithTimeout(streamCtx, time.Duration(timeout)*time.Second)
-		defer slotCancel()
-	}
-	limiter, err := e.acquireConnSlot(slotCtx, provider)
-	if err != nil {
-		return &localCapacityError{err: err}
-	}
-	defer e.releaseConnSlot(limiter)
 
 	// A shared transport reuses TLS/HTTP2 connections and avoids leaving one
 	// idle connection pool behind for every completed streaming request.
@@ -976,9 +890,9 @@ func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
+		message := adapter.ReadErrorBody(resp.Body)
 		resp.Body.Close()
-		return &adapter.APIError{StatusCode: resp.StatusCode, Message: string(bodyBytes)}
+		return &adapter.APIError{StatusCode: resp.StatusCode, Message: message}
 	}
 
 	ttfb := time.Since(streamStart)
@@ -995,6 +909,9 @@ func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat
 
 	gate := newSSECommitWriter(c.Writer)
 	tracker := newTerminalWriter(gate, requestFormat)
+	if requestFormat == "responses" && provider.Format == "openai" {
+		tracker.framer.MaxBytes = stream.MaxGeneratedEventBytes
+	}
 	if requestFormat != provider.Format {
 		err = adapter.StreamConvertResponse(idleReader, tracker, provider.Format, requestFormat)
 	} else {
@@ -1192,66 +1109,77 @@ func isIdleTimeoutErr(err error) bool {
 type idleTimeoutReader struct {
 	r         io.ReadCloser
 	timeout   time.Duration
-	done      chan struct{}
 	timer     *time.Timer
 	closeOnce sync.Once
+	mu        sync.Mutex
+	reading   bool
+	closed    bool
+	timedOut  bool
+	deadline  time.Time
 }
 
 // newIdleTimeoutReader wraps an io.ReadCloser with an idle timeout.
 // If no data arrives within timeout, reads return an error.
 // Close is safe to call multiple times (sync.Once).
 func newIdleTimeoutReader(r io.ReadCloser, timeout time.Duration) *idleTimeoutReader {
-	return &idleTimeoutReader{
+	reader := &idleTimeoutReader{
 		r:       r,
 		timeout: timeout,
-		done:    make(chan struct{}),
-		timer:   time.NewTimer(timeout),
 	}
+	reader.timer = time.AfterFunc(time.Hour, reader.expire)
+	reader.timer.Stop()
+	return reader
 }
 
 func (r *idleTimeoutReader) Read(p []byte) (int, error) {
-	type readResult struct {
-		n   int
-		err error
-	}
-	resultCh := make(chan readResult, 1)
-
-	// Drain any stale timer value before resetting (per time.Timer docs).
-	if !r.timer.Stop() {
-		select {
-		case <-r.timer.C:
-		default:
-		}
-	}
-	r.timer.Reset(r.timeout)
-
-	// Use an internal buffer to avoid data race: the goroutine may write to p
-	// after Read returns (on timeout). Copy to caller's buffer only on success.
-	buf := make([]byte, len(p))
-	go func() {
-		n, err := r.r.Read(buf)
-		select {
-		case resultCh <- readResult{n, err}:
-		case <-r.done:
-		}
-	}()
-
-	select {
-	case result := <-resultCh:
-		copy(p, buf[:result.n])
-		return result.n, result.err
-	case <-r.timer.C:
+	r.mu.Lock()
+	if r.timedOut {
+		r.mu.Unlock()
 		return 0, &idleTimeoutError{timeout: r.timeout}
-	case <-r.done:
+	}
+	if r.closed {
+		r.mu.Unlock()
 		return 0, io.ErrClosedPipe
 	}
+	r.reading = true
+	r.deadline = time.Now().Add(r.timeout)
+	if r.timeout > 0 {
+		r.timer.Reset(r.timeout)
+	}
+	r.mu.Unlock()
+
+	// HTTP response bodies guarantee Close unblocks Read. Reuse one timer,
+	// with no goroutine/channel/buffer allocation for each upstream chunk.
+	n, err := r.r.Read(p)
+	r.mu.Lock()
+	r.reading = false
+	r.timer.Stop()
+	timedOut := r.timedOut
+	r.mu.Unlock()
+	if timedOut {
+		return n, &idleTimeoutError{timeout: r.timeout}
+	}
+	return n, err
+}
+
+func (r *idleTimeoutReader) expire() {
+	r.mu.Lock()
+	if !r.reading || r.closed || time.Now().Before(r.deadline) {
+		r.mu.Unlock()
+		return
+	}
+	r.timedOut = true
+	r.mu.Unlock()
+	r.Close()
 }
 
 func (r *idleTimeoutReader) Close() error {
 	var err error
 	r.closeOnce.Do(func() {
-		close(r.done)
+		r.mu.Lock()
+		r.closed = true
 		r.timer.Stop()
+		r.mu.Unlock()
 		err = r.r.Close()
 	})
 	return err
@@ -1456,12 +1384,10 @@ func groupByPriority(providers []*config.Provider) [][]*config.Provider {
 }
 
 func setModelInBody(body []byte, modelID string) []byte {
-	var data map[string]interface{}
-	if err := json.Unmarshal(body, &data); err != nil {
+	if !gjson.ValidBytes(body) {
 		return body
 	}
-	data["model"] = modelID
-	modified, err := json.Marshal(data)
+	modified, err := sjson.SetBytes(body, "model", modelID)
 	if err != nil {
 		return body
 	}
@@ -1477,6 +1403,9 @@ func prepareProviderRequest(body []byte, provider *config.Provider, effortOnNone
 	if provider.Format == "openai" {
 		return normalizeProviderReasoning(body, provider, effortOnNone)
 	}
+	if provider.Format == "anthropic" {
+		return normalizeAnthropicReasoning(body, effortOnNone)
+	}
 	return body, "", ""
 }
 
@@ -1488,12 +1417,11 @@ func isSensenovaProvider(baseURL string) bool {
 // Apply the configured none policy first, then preserve the built-in SenseNova
 // compatibility behavior for requests with other effort values.
 func normalizeProviderReasoning(body []byte, provider *config.Provider, effortOnNone string) (prepared []byte, originalEffort, upstreamEffort string) {
-	var data map[string]interface{}
-	if err := json.Unmarshal(body, &data); err != nil {
+	field := gjson.GetBytes(body, "reasoning_effort")
+	if field.Type != gjson.String {
 		return body, "", ""
 	}
-
-	effort, _ := data["reasoning_effort"].(string)
+	effort := field.Str
 	canonicalEffort := strings.ToLower(strings.TrimSpace(effort))
 	if canonicalEffort == "" {
 		return body, "", ""
@@ -1503,9 +1431,9 @@ func normalizeProviderReasoning(body []byte, provider *config.Provider, effortOn
 	if canonicalEffort == "none" {
 		normalizedEffort = effortOnNone
 		if normalizedEffort == "" {
-			delete(data, "reasoning_effort")
+			body, _ = sjson.DeleteBytes(body, "reasoning_effort")
 		} else {
-			data["reasoning_effort"] = normalizedEffort
+			body, _ = sjson.SetBytes(body, "reasoning_effort", normalizedEffort)
 		}
 	} else if sensenova {
 		if strings.HasPrefix(provider.ModelID, "glm-5.3") {
@@ -1517,23 +1445,19 @@ func normalizeProviderReasoning(body []byte, provider *config.Provider, effortOn
 			default:
 				normalizedEffort = "max"
 			}
-			data["reasoning_effort"] = normalizedEffort
+			body, _ = sjson.SetBytes(body, "reasoning_effort", normalizedEffort)
 		}
 	} else {
 		return body, "", ""
 	}
 	if sensenova && normalizedEffort != "" {
-		data["reasoning"] = true
+		body, _ = sjson.SetBytes(body, "reasoning", true)
 	}
 
-	modified, err := json.Marshal(data)
-	if err != nil {
-		return body, "", ""
-	}
 	if normalizedEffort != effort {
-		return modified, effort, normalizedEffort
+		return body, effort, normalizedEffort
 	}
-	return modified, "", ""
+	return body, "", ""
 }
 
 // normalizeDeveloperRole rewrites the OpenAI "developer" role to "system" in the
@@ -1548,44 +1472,31 @@ func normalizeProviderReasoning(body []byte, provider *config.Provider, effortOn
 // an unparsable body, a missing messages array, or a marshal error leaves the
 // original bytes in place.
 func normalizeDeveloperRole(body []byte) []byte {
-	var data map[string]interface{}
-	if err := json.Unmarshal(body, &data); err != nil {
+	if !gjson.ValidBytes(body) {
 		return body
 	}
-	messages, ok := data["messages"].([]interface{})
-	if !ok {
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.IsArray() {
 		return body
 	}
-
-	changed := false
-	for _, rawMessage := range messages {
-		message, ok := rawMessage.(map[string]interface{})
-		if !ok {
-			continue
+	messages.ForEach(func(index, message gjson.Result) bool {
+		if role := message.Get("role"); role.Type == gjson.String && role.Str == "developer" {
+			if changed, err := sjson.SetBytes(body, fmt.Sprintf("messages.%d.role", index.Int()), "system"); err == nil {
+				body = changed
+			}
 		}
-		if role, _ := message["role"].(string); role == "developer" {
-			message["role"] = "system"
-			changed = true
-		}
-	}
-	if !changed {
-		return body
-	}
-
-	modified, err := json.Marshal(data)
-	if err != nil {
-		return body
-	}
-	return modified
+		return true
+	})
+	return body
 }
 
 func extractModel(body []byte) string {
-	var data map[string]interface{}
-	if err := json.Unmarshal(body, &data); err != nil {
+	if !gjson.ValidBytes(body) {
 		return ""
 	}
-	if model, ok := data["model"].(string); ok {
-		return model
+	model := gjson.GetBytes(body, "model")
+	if model.Type == gjson.String {
+		return model.Str
 	}
 	return ""
 }
@@ -1602,7 +1513,7 @@ func applyModelDefaults(body []byte, modelName string, rules []config.ModelRule)
 		return body, 0
 	}
 
-	var data map[string]interface{}
+	var data map[string]json.RawMessage
 	if err := json.Unmarshal(body, &data); err != nil {
 		return body, 0
 	}
@@ -1612,7 +1523,9 @@ func applyModelDefaults(body []byte, modelName string, rules []config.ModelRule)
 	for k, v := range rule.Defaults {
 		if k == "timeout" {
 			if existing, ok := data[k]; ok {
-				if n, valid := configNumberAsInt(existing); valid && n > 0 {
+				var number json.Number
+				_ = json.Unmarshal(existing, &number)
+				if n, valid := configNumberAsInt(number); valid && n > 0 {
 					modelTimeout = n
 				}
 			} else if n, ok := configNumberAsInt(v); ok && n > 0 {
@@ -1621,7 +1534,7 @@ func applyModelDefaults(body []byte, modelName string, rules []config.ModelRule)
 			continue
 		}
 		if _, exists := data[k]; !exists {
-			data[k] = v
+			data[k], _ = json.Marshal(v)
 			changed = true
 		}
 	}
@@ -1639,6 +1552,9 @@ func applyModelDefaults(body []byte, modelName string, rules []config.ModelRule)
 
 func configNumberAsInt(value interface{}) (int, bool) {
 	switch n := value.(type) {
+	case json.Number:
+		v, err := n.Int64()
+		return int(v), err == nil && int64(int(v)) == v
 	case int:
 		return n, true
 	case int64:
@@ -1698,67 +1614,63 @@ func buildRequestBodyLog(body []byte, level string) string {
 }
 
 func hasStream(body []byte) bool {
-	var data map[string]interface{}
-	if err := json.Unmarshal(body, &data); err != nil {
-		return false
-	}
-	if stream, ok := data["stream"].(bool); ok {
-		return stream
-	}
-	return false
+	return gjson.GetBytes(body, "stream").Type == gjson.True
 }
 
 func extractBodySnippet(body []byte) string {
-	var data map[string]interface{}
-	if err := json.Unmarshal(body, &data); err != nil {
+	first := gjson.GetBytes(body, "messages.0")
+	if !first.IsObject() {
 		return ""
 	}
-	msgs, ok := data["messages"].([]interface{})
-	if !ok || len(msgs) == 0 {
-		return ""
-	}
-	first, ok := msgs[0].(map[string]interface{})
-	if !ok {
-		return ""
-	}
-	role, _ := first["role"].(string)
+	role := first.Get("role").String()
+	content := first.Get("content")
 
 	// Handle string content
-	if content, ok := first["content"].(string); ok {
-		if len(content) > 80 {
-			content = content[:80] + "..."
+	if content.Type == gjson.String {
+		text := content.Str
+		if len(text) > 80 {
+			text = text[:80] + "..."
 		}
-		return fmt.Sprintf("%s: %s", role, content)
+		return fmt.Sprintf("%s: %s", role, text)
 	}
 
 	// Handle array content (multimodal — images, tools, etc.)
-	if contentArr, ok := first["content"].([]interface{}); ok && len(contentArr) > 0 {
-		parts := make([]string, 0, len(contentArr))
-		for _, c := range contentArr {
-			block, _ := c.(map[string]interface{})
-			if block == nil {
-				continue
+	if content.IsArray() && content.Get("#").Int() > 0 {
+		var snippet strings.Builder
+		content.ForEach(func(_, block gjson.Result) bool {
+			if !block.IsObject() {
+				return true
 			}
-			switch block["type"] {
+			part := ""
+			switch block.Get("type").String() {
 			case "text":
-				if text, _ := block["text"].(string); text != "" {
-					parts = append(parts, text)
-				}
+				part = block.Get("text").String()
 			case "image_url", "image":
-				parts = append(parts, "[image]")
+				part = "[image]"
 			case "tool_use":
-				parts = append(parts, "[tool_use]")
+				part = "[tool_use]"
 			case "tool_result":
-				parts = append(parts, "[tool_result]")
+				part = "[tool_result]"
 			default:
-				parts = append(parts, fmt.Sprintf("[%s]", block["type"]))
+				part = "[" + block.Get("type").String() + "]"
 			}
+			if part == "" {
+				return true
+			}
+			if snippet.Len() > 0 {
+				snippet.WriteByte(' ')
+			}
+			if len(part) > 81-snippet.Len() {
+				part = part[:81-snippet.Len()]
+			}
+			snippet.WriteString(part)
+			return snippet.Len() <= 80
+		})
+		text := snippet.String()
+		if len(text) > 80 {
+			text = text[:80] + "..."
 		}
-		snippet := strings.Join(parts, " ")
-		if len(snippet) > 80 {
-			snippet = snippet[:80] + "..."
-		}
-		return fmt.Sprintf("%s: %s", role, snippet)
+		return fmt.Sprintf("%s: %s", role, text)
 	}
 
 	return fmt.Sprintf("%s: [non-text content]", role)

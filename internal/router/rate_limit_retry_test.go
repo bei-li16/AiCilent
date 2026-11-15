@@ -39,7 +39,7 @@ func loadRateLimitRetryConfig(t *testing.T, baseURL, retryYAML string, fallbackP
 	if fallbackPriority > 0 {
 		source += fmt.Sprintf(`  - name: fallback
     model_id: m
-    api_key: test
+    api_key: test-fallback
     base_url: %s/fallback
     priority: %d
     format: openai

@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -47,7 +48,16 @@ func ConvertRequest(body []byte, fromFormat, toFormat string) ([]byte, error) {
 	}
 
 	var raw map[string]interface{}
-	if err := json.Unmarshal(body, &raw); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if err := decoder.Decode(&raw); err != nil {
+		return nil, fmt.Errorf("unmarshal request: %w", err)
+	}
+	var trailing interface{}
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			err = fmt.Errorf("multiple JSON values")
+		}
 		return nil, fmt.Errorf("unmarshal request: %w", err)
 	}
 
@@ -773,23 +783,33 @@ func convertOpenAISSETOAnthropic(src io.Reader, dst io.Writer) error {
 					}
 				}
 				if acc == nil {
+					if len(toolCallAccumulators) >= 128 {
+						return fmt.Errorf("stream exceeds 128 tool calls")
+					}
 					acc = &toolCallAcc{index: tcIdx}
 					toolCallAccumulators = append(toolCallAccumulators, acc)
 				}
 
 				// Track accumulators per tool call index
 				if id, ok := tcMap["id"].(string); ok && id != "" {
+					if len(id) > 4096 {
+						return fmt.Errorf("tool call ID exceeds 4096 bytes")
+					}
 					acc.id = id
 				}
 				if tcType, ok := tcMap["type"].(string); ok && tcType != "" {
 					acc.tcType = tcType
 				}
+				argsDelta := ""
 				if funcMap, ok := tcMap["function"].(map[string]interface{}); ok {
 					if name, ok := funcMap["name"].(string); ok && name != "" {
+						if len(name) > 4096 {
+							return fmt.Errorf("tool name exceeds 4096 bytes")
+						}
 						acc.name = name
 					}
 					if args, ok := funcMap["arguments"].(string); ok && args != "" {
-						acc.args += args
+						argsDelta = args
 					}
 				}
 
@@ -812,13 +832,13 @@ func convertOpenAISSETOAnthropic(src io.Reader, dst io.Writer) error {
 				}
 
 				// Emit content_block_delta for input_json
-				if acc.args != "" {
+				if argsDelta != "" {
 					writeAnthropicEvent(dst, "content_block_delta", map[string]interface{}{
 						"type":  "content_block_delta",
 						"index": acc.blockIndex,
 						"delta": map[string]interface{}{
 							"type":         "input_json_delta",
-							"partial_json": acc.args,
+							"partial_json": argsDelta,
 						},
 					})
 				}
@@ -898,7 +918,6 @@ type toolCallAcc struct {
 	id         string
 	tcType     string
 	name       string
-	args       string
 }
 
 // ─────────────────────────────────────────────────────────────

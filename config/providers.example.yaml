@@ -1,83 +1,140 @@
-# Example configuration — copy to providers.yaml and fill in your credentials
+# Example configuration — copy to config/providers.yaml and replace URLs and keys.
+# 示例模型仅用于说明路由；实际可用模型、思考档位由上游决定。
 global:
-  listen_addr: ":8080"           # 监听地址，代理服务器在此端口接收请求
-  default_format: openai         # 默认请求格式，客户端未指定时使用
-  # reasoning_effort_on_none: low # 可选。所有 OpenAI 上游共用，收到 none 时替换为指定档位，留空则省略该字段
-  log_file: proxy.log            # 日志文件路径
+  listen_addr: ":8080"           # 对外监听；仅本机使用可改为 "127.0.0.1:8080"
+  default_format: openai         # 请求格式无法识别时的默认值；通常由 API 路径识别
+  # reasoning_effort_on_none: max # OpenAI/Responses/Anthropic 共用；仅显式 none/关闭时触发
+                                 # 留空则移除对应控制，使用上游默认，并不保证关闭思考
+                                 # 可选 minimal/low/medium/high/xhigh/max；需上游支持
+  log_file: ../proxy.log         # 相对配置文件所在目录解析，故此处写到项目根目录
   log_request_body: snippet      # 请求内容日志级别：off=不打印 | snippet=仅打印首条消息前80字符 | full=打印完整请求结构(model/messages/role/stream/tools 等)，full 整段 body 仅落盘不进 SSE
   cb_threshold: 3                # 熔断阈值，同一优先级组连续失败次数达到此值后熔断
   cb_cooldown: 10                # 熔断冷却时间（秒），熔断后等待此时间后尝试恢复
-  cb_skip_requests: 1            # 熔断恢复后跳过的请求数，用于探测后端是否恢复
-  control_allow_remote: false    # 控制台启停开关(/api/control)是否允许远程访问，默认仅 loopback(127.0.0.1/::1)可调用；true 才允许远程管理（不支持热重载）
-  max_stream_minutes: 3          # 流式传输总时长上限（分钟），超过则中断流并注入错误事件。0 或留空则默认 3 分钟
-  rate_limit_cooldown: 0         # 可选的跨请求 429 冷却秒数，0 或留空关闭：每个新请求均按 retry 配置尝试。显式设为正数后，重试耗尽仍为 429 才冷却，后续请求在冷却期内跳过该 provider
+  cb_skip_requests: 1            # 熔断期间跳过请求的计数门槛；详见 README
+  control_allow_remote: false    # false 仅允许 loopback 调用管理写接口；修改需重启
+  max_stream_minutes: 15         # 单次流式上游尝试的总时限（分钟），含连接/响应头/读流
+                                 # 省略或 <=0 默认 3；不是整个客户端请求跨重试的总时限
+  rate_limit_cooldown: 0         # <=0 关闭；同 provider 重试耗尽仍为 429 后的可选冷却秒数
+                                 # 按 provider name 冷却，不是自动识别上游共享配额
+
+# 同组调度：当前并发最少 -> 最久未开始尝试 -> 稳定顺序；成功后不粘账号。
+# 账号按协议 + 上游 scheme/host/port + API Key 识别；同协议同 Key 的模型共享负载。
+# OpenAI（含 Responses）与 Anthropic 独立调度；全忙时仍选最小并发，无容量上限/排队。
+# 旧 max_concurrent 已移除；CLI 忽略旧字段，GUI 迁移/保存时删除。
 
 model_routes:                    # 模型路由别名映射，将别名映射到实际 provider
   - alias: gpt-4o                # 对外暴露的模型别名
-    target: glm-5.2              # 映射到的 provider name（软钉：该组优先，其余供应商仍作兜底）
+    target: glm-a                # provider name：优先该组，其余组仍可兜底
   - alias: gpt-4o-mini
-    target: deepseek-v4.1-flash
+    target: deepseek-a
   - alias: default               # 默认路由，请求中模型不在路由表时使用
-    target: deepseek-v4.1-flash
+    target: glm-a
   # target 也可填路由关键词，语义与客户端直发该关键词完全一致（硬性档位，档外不兜底）；
   # target 同时匹配关键词和供应商名时按关键词解释（档位优先）：
   # - alias: best
-  #   target: P1                # ≡ 直发 P1：仅优先级 1 组内轮转，全败返回 503
+  #   target: P1                # ≡ 直发 P1：仅优先级 1 组，全败不跨组兜底
   # - alias: fast
   #   target: Flash             # ≡ 直发 Flash：跳过最高优先级组
   # - alias: cheap
   #   target: P2down            # ≡ 直发 P2down：从 P2 到最低档依次降级
 
-model_rules:                      # 模型级默认请求参数（已有请求字段不会覆盖）
+model_rules:                      # 匹配客户端原始 model（含别名），不是替换后的 model_id
   - model: gpt-4o
     defaults:
       temperature: 0.2
       max_tokens: 4096
-      timeout: 45                  # 代理等待上游的超时时间，不会透传给上游
+      timeout: 45                  # 特殊代理默认参数，不写入上游正文；覆盖 provider timeout
+                                   # 与 provider timeout 的计时范围相同，不是跨账号总时限
 
-providers:                       # 供应商列表，按优先级从高到低降级
+providers:                       # 供应商列表，按优先级从高到低降级（受路由档位约束）
+  # 每个账号的模型/协议分别配置；增加账号时复制条目，使用唯一 name 和不同 Key。
+  # 相同占位 Key 代表同账号，不代表上游 RPM/TPM 配额一定共享或一定独立。
 
   # ════════ OpenAI 格式示例 ════════
-  - name: glm-5.2                # 供应商唯一标识名
+  - name: kimi-a                 # 供应商唯一标识名
     vendor: openai               # 供应商类型，openai=兼容 OpenAI API 格式，anthropic=兼容 Anthropic API 格式
-    model_id: glm-5.2            # 实际发送给上游的模型名称
-    api_key: YOUR_API_KEY_HERE   # API 密钥
-    base_url: https://api.example.com/v1  # API 端点地址，OpenAI 格式需包含 /v1
+    model_id: kimi-k3            # 实际发送给上游的模型名称
+    api_key: YOUR_ACCOUNT_A_API_KEY
+    base_url: https://api.example.com/v1  # openai 追加 /chat/completions，勿以 / 结尾
     priority: 1                  # 优先级（数字越小越优先），失败后降级到下一优先级
-    format: openai               # 请求体转换格式，决定如何将客户端请求转为上游格式
-    timeout: 60                  # 请求超时时间（秒）
-    max_concurrent: 2            # 同一 scheme/host/port 的最大并发请求数；同主机配置共享最小值（0=不限）
+    format: openai               # Chat/Responses 请求只选 openai 条目
+    auth_type: bearer            # OpenAI 使用 Authorization: Bearer <api_key>
+    timeout: 60                  # 秒；非流式为单次上游总时限，流式为响应头/读空闲时限
     retry:                       # 重试策略
-      max_retries: 3             # 最大重试次数
-      retry_interval: 1          # 初始重试间隔（秒）
-      backoff_factor: 2          # 退避因子，等待时间 = retry_interval * (backoff_factor ^ (attempt-1))
+      max_retries: 3             # 首次之外最多再试 3 次，总计最多 4 次；省略或 0 仍默认 3
+      retry_interval: 1          # 相邻尝试开始时刻的间隔基数（秒），响应耗时计入此间隔
+      backoff_factor: 2          # 第 n 次重试目标间隔 = retry_interval * factor^(n-1)
+    rate_limit:                 # 可选本地令牌桶，不是并发上限，也不是上游实际配额
+      enabled: false            # 默认关闭；令牌不足时跳过该候选，不等待
+      rpm: 60                   # 按 provider name 独立，同账号其他模型不共用此桶
+      burst: 10                 # 桶容量/最大瞬发令牌数；候选内部重试不逐次扣除
 
   # ════════ Anthropic 格式示例（auth_type: bearer，base_url 无 /v1）════════
-  - name: glm-5.2-anthropic
+  - name: kimi-a-anthropic
     vendor: anthropic             # 供应商类型为 anthropic，使用 x-api-key 或 bearer 认证
-    model_id: glm-5.2
-    api_key: YOUR_API_KEY_HERE
+    model_id: kimi-k3
+    api_key: YOUR_ACCOUNT_A_API_KEY
     base_url: https://api.example.com  # Anthropic 格式 base_url 不含 /v1
     priority: 1
-    format: anthropic             # 请求体按 Anthropic Messages API 格式转换
-    auth_type: bearer             # 认证方式，bearer=Authorization 头，x-api-key=X-Api-Key 头
+    format: anthropic             # Messages 请求只选 anthropic 条目，不跨协议兜底
+    auth_type: bearer             # 可选 x-api-key；省略时 anthropic 默认 x-api-key
+                                  # 两种认证均发送 anthropic-version: 2023-06-01
     timeout: 60
-    max_concurrent: 2
     retry:
       max_retries: 3
       retry_interval: 1
       backoff_factor: 2
 
   # ════════ 低价位供应商示例（演示跨优先级降级）════════
-  - name: deepseek-v4.1-flash       # 上面 model_routes 中 gpt-4o-mini / default 的 target
+  - name: glm-a                    # 上面 model_routes 中 gpt-4o / default 的 target
     vendor: openai
-    model_id: deepseek-v4.1-flash
-    api_key: YOUR_API_KEY_HERE
+    model_id: glm-5.3
+    api_key: YOUR_ACCOUNT_A_API_KEY
     base_url: https://api.example.com/v1
-    priority: 2                   # 优先级 2：P1 组全失败后降级到这一档
+    priority: 2
     format: openai
     timeout: 60
-    max_concurrent: 2
+    retry:
+      max_retries: 3
+      retry_interval: 1
+      backoff_factor: 2
+
+  - name: glm-a-anthropic
+    vendor: anthropic
+    model_id: glm-5.3
+    api_key: YOUR_ACCOUNT_A_API_KEY
+    base_url: https://api.example.com
+    priority: 2
+    format: anthropic
+    auth_type: bearer
+    timeout: 60
+    retry:
+      max_retries: 3
+      retry_interval: 1
+      backoff_factor: 2
+
+  - name: deepseek-a              # 上面 model_routes 中 gpt-4o-mini 的 target
+    vendor: openai
+    model_id: deepseek-flash
+    api_key: YOUR_ACCOUNT_A_API_KEY
+    base_url: https://api.example.com/v1
+    priority: 3
+    format: openai
+    timeout: 60
+    retry:
+      max_retries: 3
+      retry_interval: 1
+      backoff_factor: 2
+
+  - name: deepseek-a-anthropic
+    vendor: anthropic
+    model_id: deepseek-flash
+    api_key: YOUR_ACCOUNT_A_API_KEY
+    base_url: https://api.example.com
+    priority: 3
+    format: anthropic
+    auth_type: bearer
+    timeout: 60
     retry:
       max_retries: 3
       retry_interval: 1

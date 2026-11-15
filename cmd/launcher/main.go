@@ -115,15 +115,8 @@ func (pm *proxyManager) stop() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if httpServer != nil {
-		_ = httpServer.Shutdown(ctx)
-	}
-	if srv != nil {
-		srv.StopWatcher()
-		srv.SaveStats()
-		if srv.Rot != nil {
-			_ = srv.Rot.Close()
-		}
+	if srv != nil && httpServer != nil {
+		_ = srv.Shutdown(ctx, httpServer)
 	}
 
 	pm.mu.Lock()
@@ -400,7 +393,10 @@ func configNeedsMigration(data []byte) bool {
 		return false
 	}
 	for _, provider := range providers.Content {
-		for _, key := range []string{"timeout", "max_concurrent", "retry", "auth_type", "rate_limit"} {
+		if yamlMapValue(provider, "max_concurrent") != nil {
+			return true
+		}
+		for _, key := range []string{"timeout", "retry", "auth_type", "rate_limit"} {
 			if yamlMapValue(provider, key) == nil {
 				return true
 			}
@@ -681,8 +677,6 @@ func showConfigEditor(a fyne.App, parent fyne.Window, pm *proxyManager) {
 	priorityEntry.SetPlaceHolder("1")
 	timeoutEntry := widget.NewEntry()
 	timeoutEntry.SetPlaceHolder("60")
-	maxConcurrentEntry := widget.NewEntry()
-	maxConcurrentEntry.SetPlaceHolder("2，0 表示不限")
 	editingIndex := -1
 	formTitle := widget.NewLabel("添加供应商")
 	var submitBtn *widget.Button
@@ -695,7 +689,6 @@ func showConfigEditor(a fyne.App, parent fyne.Window, pm *proxyManager) {
 		urlEntry.SetText("")
 		priorityEntry.SetText("")
 		timeoutEntry.SetText("")
-		maxConcurrentEntry.SetText("")
 		formatSelect.SetSelected("openai")
 		formTitle.SetText("添加供应商")
 		if submitBtn != nil {
@@ -721,7 +714,6 @@ func showConfigEditor(a fyne.App, parent fyne.Window, pm *proxyManager) {
 				formatSelect.SetSelected(p.Format)
 				priorityEntry.SetText(strconv.Itoa(p.Priority))
 				timeoutEntry.SetText(strconv.Itoa(p.Timeout))
-				maxConcurrentEntry.SetText(strconv.Itoa(p.MaxConcurrent))
 				formTitle.SetText("编辑供应商: " + p.Name)
 				submitBtn.SetText("保存供应商")
 			})
@@ -754,22 +746,17 @@ func showConfigEditor(a fyne.App, parent fyne.Window, pm *proxyManager) {
 		if n, err := strconv.Atoi(timeoutEntry.Text); err == nil && n > 0 {
 			timeout = n
 		}
-		maxConcurrent := 2
-		if n, err := strconv.Atoi(maxConcurrentEntry.Text); err == nil && n >= 0 {
-			maxConcurrent = n
-		}
 		apiKey := apiKeyEntry.Text
 		provider := config.Provider{
-			Name:          nameEntry.Text,
-			Vendor:        formatSelect.Selected,
-			ModelID:       modelEntry.Text,
-			APIKey:        apiKey,
-			BaseURL:       urlEntry.Text,
-			Format:        formatSelect.Selected,
-			Priority:      priority,
-			Timeout:       timeout,
-			MaxConcurrent: maxConcurrent,
-			Retry:         config.RetryConfig{MaxRetries: 3, RetryInterval: 2, BackoffFactor: 2},
+			Name:     nameEntry.Text,
+			Vendor:   formatSelect.Selected,
+			ModelID:  modelEntry.Text,
+			APIKey:   apiKey,
+			BaseURL:  urlEntry.Text,
+			Format:   formatSelect.Selected,
+			Priority: priority,
+			Timeout:  timeout,
+			Retry:    config.RetryConfig{MaxRetries: 3, RetryInterval: 2, BackoffFactor: 2},
 		}
 		if editingIndex >= 0 {
 			old := cfg.Providers[editingIndex]
@@ -826,7 +813,6 @@ func showConfigEditor(a fyne.App, parent fyne.Window, pm *proxyManager) {
 			widget.NewLabel("格式"), formatSelect,
 			widget.NewLabel("优先级"), priorityEntry,
 			widget.NewLabel("超时(秒)"), timeoutEntry,
-			widget.NewLabel("主机最大并发"), maxConcurrentEntry,
 		),
 		submitBtn,
 		widget.NewSeparator(),
@@ -905,24 +891,79 @@ func pollLogs(pm *proxyManager, logView *widget.TextGrid, autoFollow *atomic.Boo
 			continue
 		}
 		scanner := bufio.NewScanner(resp.Body)
-		lines := make([]string, 0, historyLimit)
-		for scanner.Scan() {
-			line := scanner.Text()
-			if strings.HasPrefix(line, "data:") {
-				lines = append(lines, strings.TrimSpace(line[5:]))
-				if len(lines) > historyLimit {
-					lines = lines[len(lines)-historyLimit:]
+		scanner.Buffer(make([]byte, 4096), 1<<20)
+		updates := make(chan string, 128)
+		readStop, readDone := make(chan struct{}), make(chan struct{})
+		go func() {
+			defer close(readDone)
+			defer close(updates)
+			gap := false
+			for scanner.Scan() {
+				line := scanner.Text()
+				if strings.HasPrefix(line, "event:") {
+					gap = strings.TrimSpace(line[6:]) == "gap"
 				}
-				text := strings.Join(lines, "\n")
-				fyne.Do(func() {
-					logView.SetText(text)
-					if autoFollow.Load() {
-						logView.ScrollToBottom()
-					}
-				})
+				if !strings.HasPrefix(line, "data:") {
+					continue
+				}
+				line = strings.TrimSpace(line[5:])
+				if gap {
+					line = "[monitor] log delivery gap: " + line
+					gap = false
+				}
+				select {
+				case updates <- line:
+				case <-readStop:
+					return
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+		var ring [historyLimit]string
+		next, count, dirty := 0, 0, false
+		flush := func() {
+			if !dirty {
+				return
+			}
+			dirty = false
+			lines := make([]string, count)
+			for i := range lines {
+				lines[i] = ring[(next-count+i+historyLimit)%historyLimit]
+			}
+			text := strings.Join(lines, "\n")
+			fyne.Do(func() {
+				logView.SetText(text)
+				if autoFollow.Load() {
+					logView.ScrollToBottom()
+				}
+			})
+		}
+		ticker := time.NewTicker(100 * time.Millisecond)
+	readLoop:
+		for {
+			select {
+			case line, ok := <-updates:
+				if !ok {
+					flush()
+					break readLoop
+				}
+				ring[next] = line
+				next = (next + 1) % historyLimit
+				if count < historyLimit {
+					count++
+				}
+				dirty = true
+			case <-ticker.C:
+				flush()
+			case <-ctx.Done():
+				break readLoop
 			}
 		}
+		ticker.Stop()
+		close(readStop)
 		_ = resp.Body.Close()
+		<-readDone
 		time.Sleep(time.Second)
 	}
 }

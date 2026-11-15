@@ -25,12 +25,11 @@ func TestForwardRequestStreamDoesNotCommitEmptyUpstream(t *testing.T) {
 	defer upstream.Close()
 
 	provider := config.Provider{
-		Name:          "stream",
-		ModelID:       "m",
-		BaseURL:       upstream.URL + "/v1",
-		Priority:      1,
-		Format:        "openai",
-		MaxConcurrent: 1,
+		Name:     "stream",
+		ModelID:  "m",
+		BaseURL:  upstream.URL + "/v1",
+		Priority: 1,
+		Format:   "openai",
 	}
 	cfg := &config.Config{
 		Global:    config.GlobalConfig{MaxStreamMinutes: 1},

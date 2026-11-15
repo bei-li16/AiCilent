@@ -1,5 +1,17 @@
 # AI 请求转发平台 — 开发计划书
 
+> **历史设计与修复记录**：本文主体保留早期设计、当时实现和排障过程，不是当前接口约定。下文的 TryLock、round-robin、固定 3min、每次 Read 创建 goroutine、mtime 轮询等描述已经被后续实现替代。当前使用说明见 [README](README.md)，配置见 [示例 YAML](config/providers.example.yaml)，变更状态见 [Release Notes](RELEASENOTES.md)。
+
+## 当前实现索引（2026-11-15）
+
+- **调度**：`internal/router/account_scheduler.go` 按账号并发数、最近尝试开始时间选择并原子预占；同协议同 origin / Key 共享负载，OpenAI / Responses 与 Anthropic 独立池。无 `max_concurrent`、等待队列和成功粘连。
+- **重试与超时**：保留同账号重试及开始到开始的退避节奏，0 次配置仍默认 3 次额外重试。`timeout` 对流式是响应头及读空闲等待，`max_stream_minutes` 是单次流式上游 context 时限，省略默认 3、模板显式 15；不是整个客户端请求或下游写入的硬总时限。
+- **协议与思考**：实际路由先筛选同协议上游；Responses 转 Chat。`request_preparation.go` 和 `engine.go` 统一两种协议的显式 none / disabled 策略，并保留原生字段。Anthropic 两种认证均发版本头，不透明转发任意客户端扩展头。
+- **实时性与占用**：定点 JSON 修改、单变体缓存、单个读空闲计时器、有界日志缓冲、统计缓存、无变化不落盘、按摘要热加载、过期缓存清理和统计归档；单请求有界不代表无限并发下的进程 RSS 有固定上限。
+- **验证**：回归测试及隔离压测使用模拟上游；真实上游全部模型、思考档位、账号的穷举验证未完成。日志分析中的 RPM / TPM 调度建议尚未实现，不应从历史短间隔成功推断固定容量或重置周期。
+
+以下章节为历史记录，保留原有时间背景和修复过程。
+
 ## 1. 项目概述
 
 构建一个轻量级 AI 请求转发网关，统一管理多个 AI 供应商（当前实际使用：腾讯云 sensenova），提供单一入口供本地 Agent 工具（OpenCode、Claude Desktop、OpenClaw 等）接入。核心能力包括**优先级路由**、**故障转移**、**指数退避重试**（含 429 限流重试）、**断路器保护**（状态持久化、原子写入）、**SSE 流式传输**（3min 硬超时 + idleTimeoutReader + 中途错误事件注入）、**OpenAI ↔ Anthropic 协议自动转换**（含 tool_use/tool_calls/thinking，通用 JSON map 保留未知字段），以及**监控面板**（含命中率/命中耗时曲线、熔断器状态条、连续失败/错误类型/平均延迟列）、**实时日志 SSE**（含子串过滤、离线指示）、**请求内容日志分级**（`log_request_body`：off/snippet/full，full 仅落盘不进 SSE）、**统计持久化**（`.stats.json`）、**启用/停用控制**（loopback 鉴权）、**请求限流**（per-provider Token Bucket）、**日志自动轮转**、**配置热加载**、**版本号注入**。

@@ -57,6 +57,7 @@ test/
 .cb_state.json.tmp
 .stats.json
 .stats.json.tmp
+.stats.json.archive/
 .cli-tray/
 .cli-state/
 

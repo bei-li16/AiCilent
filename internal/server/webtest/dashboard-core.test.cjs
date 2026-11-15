@@ -2,6 +2,20 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const C = require('../web/dashboard-core.js');
 
+test('log ring preserves order and releases cleared rows', () => {
+  const buffer = new C.LogBuffer(3);
+  for (let i = 0; i < 20; i++) buffer.push('line-' + i);
+  assert.equal(buffer.length, 3);
+  assert.equal(buffer.oldest.raw, 'line-17');
+  assert.deepEqual(buffer.rows.map(row => row.raw), ['line-17', 'line-18', 'line-19']);
+  assert.equal(buffer.dropped, 17);
+  assert.equal(buffer.rows, buffer.rows);
+  buffer.clear();
+  assert.equal(buffer.oldest, null);
+  assert.deepEqual(buffer.rows, []);
+  assert.ok(buffer.storage.every(row => row === undefined));
+});
+
 test('current YAML priorities exclude stale provider, breaker and chart history', () => {
   const data = {configured_priorities:[3,1,2,2],providers:[{priority:5}],cb:[{priority:4}],curves:[{priority:0,points:[60]},{priority:1,points:[100]},{priority:5,points:[0]}],latency_curve:[2,4],latency_curves:[{priority:0,points:[2,4]},{priority:1,points:[2]},{priority:2,points:[4]}]};
   assert.deepEqual(C.activePriorities(data),[1,2,3]);
@@ -124,6 +138,21 @@ test('rate-limit logs distinguish the failed attempt from the next provider and 
   assert.deepEqual(C.filterLogs(rows, { result: 'client-limited' }, modelFor), [access]);
   assert.deepEqual(C.filterLogs(rows, { result: 'failed' }, modelFor), [other]);
 });
+test('an upstream 400 followed by a retry skip has only one failure result', () => {
+  const prefix = '[2026-11-15 10:56:51.727] [request-400] ';
+  const failure = C.parseLog(prefix + 'PROVIDER | [P3][1/3] account-a | FAIL | 616ms | API error (status 400): BadRequest', 1);
+  const skip = C.parseLog(prefix + 'ROUTER | non-retryable status=400 | skip retry | account-a [P3]', 2);
+  const next = C.parseLog(prefix + 'ROUTER | degrade to next provider | account-b [P3] | reason=API error (status 400): BadRequest', 3);
+  const success = C.parseLog(prefix + 'PROVIDER | [P3][1/3] account-b | OK | 8s', 4);
+  const rows = [failure, skip, next, success];
+
+  assert.deepEqual(rows.map(row => row.label), ['失败 400', '跳过重试', '账号转接', '上游成功']);
+  assert.deepEqual([skip.provider, skip.priority, skip.status, skip.level, skip.attemptNumber], ['account-a', 3, 400, 'debug', null]);
+  assert.equal(skip.detail, '上一次尝试返回 HTTP 400，跳过同账号重试');
+  assert.deepEqual(C.filterLogs(rows, { result: 'failed' }), [failure]);
+  assert.deepEqual(C.filterLogs(rows, { level: 'error' }), [failure]);
+  assert.deepEqual(C.filterLogs(rows, { result: 'retry-skip' }), [skip]);
+});
 test('reasoning effort changes carry the target model and filter independently of upstream results', () => {
   const prefix = '[2026-11-14 13:55:23.000] [request-2] ';
   const mapped = C.parseLog(prefix + 'REASONING_EFFORT | [P2] account-b | model=glm-5.3 | from="xhigh" | to=max', 1);
@@ -140,6 +169,10 @@ test('reasoning effort changes carry the target model and filter independently o
   assert.equal(mapped.requestId, 'request-2');
   assert.equal(mapped.attemptNumber, null);
   assert.equal(mapped.tone, 'reasoning-effort');
+  assert.equal(removed.key, 'reasoning-effort');
+  assert.equal(removed.tone, 'reasoning-effort-removed');
+  assert.equal(modelFor(mapped), 'glm-5.3');
+  assert.equal(modelFor(removed), 'glm-5.3');
   assert.equal(escaped.level, 'info');
   assert.equal(escaped.status, 0);
   assert.equal(configured.tone, 'reasoning-effort');

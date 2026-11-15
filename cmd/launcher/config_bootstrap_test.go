@@ -5,6 +5,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"ai-proxy/internal/config"
@@ -84,10 +85,54 @@ providers:
 	if got.Providers[0].AuthType != "bearer" || got.Providers[0].Timeout != 60 {
 		t.Fatalf("provider defaults were not migrated: %#v", got.Providers[0])
 	}
-	if got.Providers[0].MaxConcurrent != 0 {
-		t.Fatalf("max_concurrent = %d, want backward-compatible default 0", got.Providers[0].MaxConcurrent)
+	if strings.Contains(string(data), "max_concurrent") {
+		t.Fatal("migration reintroduced the removed concurrency setting")
 	}
 	if _, err := os.Stat(filepath.Join(filepath.Dir(filepath.Dir(configPath)), "proxy.log")); err != nil {
 		t.Fatalf("migrated config log file was not created: %v", err)
+	}
+}
+
+func TestInitializeConfigRemovesDeprecatedConcurrencyField(t *testing.T) {
+	data, err := os.ReadFile("default_providers.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	providers := yamlMapValue(rootMap(&root), "providers")
+	provider := providers.Content[0]
+	provider.Content = append(provider.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "max_concurrent"},
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: "2"})
+	legacy, err := yaml.Marshal(&root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !configNeedsMigration(legacy) {
+		t.Fatal("deprecated field did not trigger migration")
+	}
+	path := filepath.Join(t.TempDir(), "config", "providers.yaml")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, legacy, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := initializeConfig(path); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(updated), "max_concurrent") || configNeedsMigration(updated) {
+		t.Fatal("deprecated field survived migration or migration repeats forever")
+	}
+	cfg, err := config.Load(path)
+	if err != nil || cfg.Providers[0].APIKey != "CHANGE_ME" {
+		t.Fatalf("migration changed provider credentials or invalidated config: %v", err)
 	}
 }

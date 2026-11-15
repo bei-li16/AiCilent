@@ -172,26 +172,21 @@ func TestCoolingProvidersAreNotForcedOrCountedAsFailures(t *testing.T) {
 	}
 }
 
-func TestCanceledConnectionWaitDoesNotRecordUpstreamAttempt(t *testing.T) {
+func TestCanceledRequestDoesNotReserveAccountOrRecordUpstreamAttempt(t *testing.T) {
 	var calls atomic.Int32
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1) }))
 	defer up.Close()
-	e, p := newStreamEngine(t, up.URL, config.GlobalConfig{CBThreshold: 1})
-	p.MaxConcurrent = 1
-	e.rebuildConnLimiters(e.cfg)
-	limiter, err := e.acquireConnSlot(context.Background(), p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer e.releaseConnSlot(limiter)
+	e, _ := newStreamEngine(t, up.URL, config.GlobalConfig{CBThreshold: 1})
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	time.AfterFunc(30*time.Millisecond, cancel)
+	cancel()
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Set(middleware.CtxFormatKey, "openai")
 	c.Request = httptest.NewRequest("POST", "/chat/completions", strings.NewReader(`{"model":"m","stream":true}`)).WithContext(ctx)
 	e.HandleRequest(c)
 	if calls.Load() != 0 || e.failureCount[1] != 0 || e.stats.Snapshot().TotalReq != 0 {
-		t.Fatalf("queue cancellation counted as upstream attempt: %+v", e.stats.Snapshot())
+		t.Fatalf("cancellation counted as upstream attempt: %+v", e.stats.Snapshot())
+	}
+	if len(e.accounts.loads) != 0 {
+		t.Fatal("canceled request changed account scheduling state")
 	}
 }

@@ -16,7 +16,12 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config file: %w", err)
 	}
 
-	ext := filepath.Ext(path)
+	return Parse(data, filepath.Ext(path))
+}
+
+// Parse validates the exact bytes read by the watcher; a concurrent replacement
+// cannot make the applied config differ from the successfully recorded version.
+func Parse(data []byte, ext string) (*Config, error) {
 	cfg := &Config{}
 
 	switch ext {
@@ -85,9 +90,6 @@ func (cfg *Config) validate() error {
 		}
 		if p.Timeout < 0 {
 			return fmt.Errorf("provider %s: timeout cannot be negative", p.Name)
-		}
-		if p.MaxConcurrent < 0 {
-			return fmt.Errorf("provider %s: max_concurrent cannot be negative", p.Name)
 		}
 	}
 	ruleNames := make(map[string]bool, len(cfg.ModelRules))

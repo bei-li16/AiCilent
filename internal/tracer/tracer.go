@@ -151,6 +151,8 @@ func (r *Recorder) LogDegradeGroup(priority int, reason string) {
 	fmt.Fprint(r.logWriter, msg)
 }
 
+// rr is retained in the wire format for existing log readers; it identifies a
+// candidate's position, not a round-robin scheduling pointer.
 func (r *Recorder) LogQueue(priority int, action string, rrIdx int, groupSize int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

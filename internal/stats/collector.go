@@ -213,6 +213,7 @@ const recentAttemptsCap = 200
 const trendRequestCap = 100
 
 type Collector struct {
+	revision        atomic.Uint64
 	mu              sync.Mutex
 	providers       map[ProviderIdentity]*ProviderStats
 	totalReq        atomic.Int64 // 上游尝试次数
@@ -227,6 +228,10 @@ type Collector struct {
 	running         atomic.Bool
 	statsPath       string
 	fileMu          sync.Mutex
+	lastSaved       uint64
+	hasSaved        bool
+	configured      map[ProviderIdentity]bool
+	archiveEpoch    string
 	// Hit-rate rolling windows (last hitWindowSize outcomes) + time series of
 	// rolling success rates. priority 0 = overall.
 	overallWin     rollingHit
@@ -299,12 +304,16 @@ func (c *Collector) RecordCanceled(requestID, name, modelID string, priority int
 }
 
 func (c *Collector) record(requestID, name, modelID string, priority int, success bool, statusCode int, errMsg string, latency time.Duration, canceled bool) {
+	defer c.revision.Add(1)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	key := ProviderIdentity{Name: name, ModelID: modelID, Priority: priority}
 	ps, ok := c.providers[key]
 	if !ok {
 		ps = &ProviderStats{Name: name, ModelID: modelID, Priority: priority}
+		if archived := c.loadArchived(key); archived != nil {
+			ps = archived
+		}
 		c.providers[key] = ps
 	}
 	ps.Total++
@@ -402,6 +411,7 @@ func (c *Collector) record(requestID, name, modelID string, priority int, succes
 // inbound client request (distinct from upstream attempts, which include
 // retries and degradation).
 func (c *Collector) RecordClientRequest(requestID string) uint64 {
+	defer c.revision.Add(1)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.totalClient.Add(1)
@@ -418,6 +428,7 @@ func (c *Collector) RecordClientRequest(requestID string) uint64 {
 // RecordClientOutcome counts the result once per accepted request.
 // Requests in flight during reset belong to the previous counting period.
 func (c *Collector) RecordClientOutcome(epoch uint64, success bool) {
+	defer c.revision.Add(1)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if epoch != c.clientEpoch {
@@ -435,12 +446,24 @@ func (c *Collector) Snapshot() Snapshot {
 	for _, ps := range c.providers {
 		providers = append(providers, *ps)
 	}
+	overallSeries := append(trendSeries(nil), c.overallSeries...)
+	prioSeries := cloneSeries(c.prioSeries)
+	latencySeries := append(trendSeries(nil), c.latencySeries...)
+	prioLatency := cloneSeries(c.prioLatency)
+	modelLatency := cloneSeries(c.modelLatency)
+	trendSeq := c.trendSeq
+	recentAttempts := append([]AttemptStats(nil), c.recentAttempts...)
+	recentRequests := append([]RequestTiming(nil), c.recentRequests...)
+	totalReq, totalClient := c.totalReq.Load(), c.totalClient.Load()
+	clientCompleted, clientSuccess := c.clientCompleted, c.clientSuccess
+	totalSuccess, totalFail, totalCanceled := c.totalSuccess.Load(), c.totalFail.Load(), c.totalCanceled.Load()
+	c.mu.Unlock()
 	// Build hit-rate curves: overall first (priority 0), then per-priority sorted.
 	// Done under the lock because Record mutates these slices concurrently.
-	curves := make([]HitRateCurve, 0, 1+len(c.prioSeries))
-	curves = append(curves, c.overallSeries.rateSnapshot(0))
-	prios := make([]int, 0, len(c.prioSeries))
-	for p := range c.prioSeries {
+	curves := make([]HitRateCurve, 0, 1+len(prioSeries))
+	curves = append(curves, overallSeries.rateSnapshot(0))
+	prios := make([]int, 0, len(prioSeries))
+	for p := range prioSeries {
 		prios = append(prios, p)
 	}
 	for i := 1; i < len(prios); i++ {
@@ -449,28 +472,18 @@ func (c *Collector) Snapshot() Snapshot {
 		}
 	}
 	for _, p := range prios {
-		curves = append(curves, c.prioSeries[p].rateSnapshot(p))
+		curves = append(curves, prioSeries[p].rateSnapshot(p))
 	}
-	latencyCurves := []HitRateCurve{c.latencySeries.snapshot(0)}
+	latencyCurves := []HitRateCurve{latencySeries.snapshot(0)}
 	for _, p := range prios {
-		latencyCurves = append(latencyCurves, c.prioLatency[p].snapshot(p))
+		latencyCurves = append(latencyCurves, prioLatency[p].snapshot(p))
 	}
-	models := make([]ModelLatencyCurve, 0, len(c.modelLatency))
-	for model, series := range c.modelLatency {
+	models := make([]ModelLatencyCurve, 0, len(modelLatency))
+	for model, series := range modelLatency {
 		sample := series.snapshot(0)
 		models = append(models, ModelLatencyCurve{Model: model, Points: sample.Points, Requests: sample.Requests})
 	}
 	sort.Slice(models, func(i, j int) bool { return models[i].Model < models[j].Model })
-	trendSeq := c.trendSeq
-	recentAttempts := append([]AttemptStats(nil), c.recentAttempts...)
-	recentRequests := append([]RequestTiming(nil), c.recentRequests...)
-	totalReq := c.totalReq.Load()
-	totalClient := c.totalClient.Load()
-	clientCompleted, clientSuccess := c.clientCompleted, c.clientSuccess
-	totalSuccess := c.totalSuccess.Load()
-	totalFail := c.totalFail.Load()
-	totalCanceled := c.totalCanceled.Load()
-	c.mu.Unlock()
 	totalRate := 0.0
 	if eligible := totalSuccess + totalFail; eligible > 0 {
 		totalRate = float64(totalSuccess) / float64(eligible) * 100
@@ -503,6 +516,7 @@ func (c *Collector) Snapshot() Snapshot {
 
 // RecordRequestTiming retains bounded request-level samples in memory.
 func (c *Collector) RecordRequestTiming(sample RequestTiming) {
+	defer c.revision.Add(1)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if len(c.recentRequests) == recentAttemptsCap {
@@ -514,6 +528,7 @@ func (c *Collector) RecordRequestTiming(sample RequestTiming) {
 
 func (c *Collector) SetRunning(v bool) {
 	c.running.Store(v)
+	c.revision.Add(1)
 }
 
 // Reset zeroes all collected statistics in place: provider counters, totals,
@@ -521,7 +536,10 @@ func (c *Collector) SetRunning(v bool) {
 // are kept (zeroed) so the dashboard table keeps listing configured providers.
 // The cleared state is persisted immediately so a restart stays cleared.
 func (c *Collector) Reset() {
+	c.fileMu.Lock()
+	c.clearArchives()
 	c.mu.Lock()
+	c.archiveEpoch = time.Now().UTC().Format(time.RFC3339Nano)
 	for _, ps := range c.providers {
 		ps.Total = 0
 		ps.Success = 0
@@ -557,6 +575,8 @@ func (c *Collector) Reset() {
 	c.totalFail.Store(0)
 	c.totalCanceled.Store(0)
 	c.mu.Unlock()
+	c.fileMu.Unlock()
+	c.revision.Add(1)
 
 	c.Save()
 }
@@ -587,6 +607,7 @@ type persistedProvider struct {
 }
 
 type persistedState struct {
+	ArchiveEpoch    string              `json:"archive_epoch,omitempty"`
 	Providers       []persistedProvider `json:"providers"`
 	TotalReq        int64               `json:"total_req"`
 	TotalClient     int64               `json:"total_client_req"`
@@ -603,8 +624,14 @@ func (c *Collector) Save() {
 	}
 	c.fileMu.Lock()
 	defer c.fileMu.Unlock()
+	revision := c.revision.Load()
+	if c.hasSaved && revision == c.lastSaved {
+		return
+	}
 	c.mu.Lock()
+	c.archiveInactiveLocked()
 	state := persistedState{
+		ArchiveEpoch:    c.archiveEpoch,
 		TotalReq:        c.totalReq.Load(),
 		TotalClient:     c.totalClient.Load(),
 		ClientCompleted: c.clientCompleted,
@@ -642,7 +669,9 @@ func (c *Collector) Save() {
 	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
 		return
 	}
-	os.Rename(tmpPath, c.statsPath)
+	if os.Rename(tmpPath, c.statsPath) == nil {
+		c.lastSaved, c.hasSaved = revision, true
+	}
 }
 
 func (c *Collector) load() {
@@ -658,6 +687,7 @@ func (c *Collector) load() {
 		return
 	}
 	c.mu.Lock()
+	c.archiveEpoch = state.ArchiveEpoch
 	var canceled int64
 	for _, p := range state.Providers {
 		canceled += p.ClientAbort
@@ -704,11 +734,13 @@ func (c *Collector) load() {
 
 // StartAutoSave launches a goroutine that persists stats every interval until
 // stop is closed. Call Save() once more on shutdown.
-func (c *Collector) StartAutoSave(stop <-chan struct{}, interval time.Duration) {
+func (c *Collector) StartAutoSave(stop <-chan struct{}, interval time.Duration) <-chan struct{} {
+	done := make(chan struct{})
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
 	go func() {
+		defer close(done)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -721,6 +753,7 @@ func (c *Collector) StartAutoSave(stop <-chan struct{}, interval time.Duration) 
 			}
 		}
 	}()
+	return done
 }
 
 // StatsPath returns the on-disk path (for the control API to surface if needed).

@@ -1,11 +1,33 @@
 package config
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
+
+func TestRemovedConcurrencySettingIsIgnoredAndNotSerialized(t *testing.T) {
+	cfg, err := Load(writeConfigFile(t, validProvider+"    max_concurrent: 2\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	yamlData, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jsonData, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(yamlData), "max_concurrent") || strings.Contains(string(jsonData), "max_concurrent") {
+		t.Fatal("removed concurrency setting was serialized")
+	}
+}
 
 func TestLoadReasoningEffortOnNone(t *testing.T) {
 	for _, tc := range []struct {
@@ -144,5 +166,70 @@ func TestExampleConfigPassesValidation(t *testing.T) {
 	}
 	if _, err := Load(path); err != nil {
 		t.Fatalf("config/providers.example.yaml fails validation: %v", err)
+	}
+}
+
+func TestDocumentedTemplateDefaults(t *testing.T) {
+	for _, path := range []string{"../../config/providers.example.yaml", "../../cmd/launcher/default_providers.yaml"} {
+		t.Run(path, func(t *testing.T) {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var raw Config
+			decoder := yaml.NewDecoder(bytes.NewReader(data))
+			decoder.KnownFields(true)
+			if err := decoder.Decode(&raw); err != nil {
+				t.Fatalf("template contains unknown or invalid fields: %v", err)
+			}
+			cfg, err := Parse(data, ".yaml")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Global.MaxStreamMinutes != 15 || cfg.Global.ReasoningEffortOnNone != "" ||
+				cfg.Global.RateLimitCooldown != 0 || cfg.Global.LogFile != "../proxy.log" {
+				t.Fatalf("documented template defaults changed: %+v", cfg.Global)
+			}
+			for _, p := range cfg.Providers {
+				if p.Timeout != 60 || p.Retry.MaxRetries != 3 || p.RateLimit.Enabled {
+					t.Fatalf("provider %s differs from documented defaults", p.Name)
+				}
+			}
+		})
+	}
+}
+
+func TestExampleIncludesBothProtocolsForEachDocumentedPriority(t *testing.T) {
+	cfg, err := Load("../../config/providers.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[int]string{1: "kimi-k3", 2: "glm-5.3", 3: "deepseek-flash"}
+	seen := make(map[int]map[string]bool)
+	for _, p := range cfg.Providers {
+		if p.ModelID != want[p.Priority] {
+			t.Fatalf("unexpected P%d model %s", p.Priority, p.ModelID)
+		}
+		if seen[p.Priority] == nil {
+			seen[p.Priority] = make(map[string]bool)
+		}
+		seen[p.Priority][p.Format] = true
+	}
+	for priority := range want {
+		if !seen[priority]["openai"] || !seen[priority]["anthropic"] {
+			t.Fatalf("P%d is missing a protocol in the example", priority)
+		}
+	}
+}
+
+func TestDocumentedOmittedAndZeroRetryDefaults(t *testing.T) {
+	for _, retryYAML := range []string{"", "    retry:\n      max_retries: 0\n"} {
+		cfg, err := Parse([]byte(validProvider+retryYAML), ".yaml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Providers[0].Retry.MaxRetries != 3 || cfg.Global.MaxStreamMinutes != 3 {
+			t.Fatal("omitted/zero retry or omitted stream duration no longer matches documented defaults")
+		}
 	}
 }

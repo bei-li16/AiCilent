@@ -366,6 +366,8 @@ func responsesUsage(rawUsage interface{}) map[string]interface{} {
 }
 
 type responsesStreamState struct {
+	err             error
+	retainedBytes   int
 	finishReason    string
 	responseID      string
 	model           string
@@ -411,6 +413,9 @@ func convertOpenAISSEToResponses(src io.Reader, dst io.Writer) error {
 			continue
 		}
 		state.consumeChunk(chunk, dst)
+		if state.err != nil {
+			return state.err
+		}
 	}
 	if ew != nil && ew.err != nil {
 		return ew.err
@@ -434,6 +439,9 @@ func (s *responsesStreamState) consumeChunk(chunk map[string]interface{}, dst io
 			s.responseID = "resp_proxy"
 		}
 		s.model, _ = chunk["model"].(string)
+		if !s.retain(s.responseID) || !s.retain(s.model) {
+			return
+		}
 		s.createdAt = int64FromNumber(chunk["created"])
 		if s.createdAt == 0 {
 			s.createdAt = time.Now().Unix()
@@ -457,6 +465,9 @@ func (s *responsesStreamState) consumeChunk(chunk map[string]interface{}, dst io
 		s.ensureMessage(dst)
 	}
 	if content, ok := delta["content"].(string); ok && content != "" {
+		if !s.retain(content) {
+			return
+		}
 		s.ensureMessage(dst)
 		if !s.contentStarted {
 			s.contentStarted = true
@@ -504,11 +515,18 @@ func (s *responsesStreamState) consumeToolCall(rawTool interface{}, dst io.Write
 	index := intFromNumber(tool["index"])
 	function := s.functionCalls[index]
 	if function == nil {
+		if len(s.functionCalls) >= 128 {
+			s.err = fmt.Errorf("response exceeds 128 function calls")
+			return
+		}
 		function = &responsesStreamFunction{index: index, outputIndex: s.nextOutputIndex}
 		s.nextOutputIndex++
 		id, _ := tool["id"].(string)
 		if id == "" {
 			id = fmt.Sprintf("call_%s_%d", s.responseID, index)
+		}
+		if !s.retain(id) {
+			return
 		}
 		function.item = map[string]interface{}{"id": id, "type": "function_call", "status": "in_progress", "call_id": id, "name": "", "arguments": ""}
 		function.started = true
@@ -521,11 +539,18 @@ func (s *responsesStreamState) consumeToolCall(rawTool interface{}, dst io.Write
 		return
 	}
 	if name, ok := fn["name"].(string); ok && name != "" {
+		oldName, _ := function.item["name"].(string)
+		s.retainedBytes -= len(oldName)
+		if !s.retain(name) {
+			return
+		}
 		function.item["name"] = name
 	}
 	if args, ok := fn["arguments"].(string); ok && args != "" {
+		if !s.retain(args) {
+			return
+		}
 		function.arguments.WriteString(args)
-		function.item["arguments"] = function.arguments.String()
 		s.writeEvent(dst, "response.function_call_arguments.delta", map[string]interface{}{
 			"item_id": function.item["id"], "output_index": function.outputIndex, "delta": args,
 		})
@@ -552,6 +577,7 @@ func (s *responsesStreamState) closeFunction(dst io.Writer, function *responsesS
 	}
 	function.started = false
 	function.item["status"] = "completed"
+	function.item["arguments"] = function.arguments.String()
 	s.writeEvent(dst, "response.function_call_arguments.done", map[string]interface{}{"item_id": function.item["id"], "output_index": function.outputIndex, "name": function.item["name"], "arguments": function.arguments.String()})
 	s.writeEvent(dst, "response.output_item.done", map[string]interface{}{"output_index": function.outputIndex, "item": function.item})
 }
@@ -587,6 +613,18 @@ func (s *responsesStreamState) finish(dst io.Writer) {
 
 func (s *responsesStreamState) baseResponse(status string) map[string]interface{} {
 	return map[string]interface{}{"id": s.responseID, "object": "response", "created_at": s.createdAt, "status": status, "model": s.model, "output": []interface{}{}}
+}
+
+// Completion contains the full response, so unlike passthrough we must retain
+// output. Bound this explicitly rather than accumulating until the process OOMs.
+func (s *responsesStreamState) retain(part string) bool {
+	const maxRetained = 4 << 20
+	if len(part) > maxRetained-s.retainedBytes {
+		s.err = fmt.Errorf("Responses accumulated output exceeds %d bytes", maxRetained)
+		return false
+	}
+	s.retainedBytes += len(part)
+	return true
 }
 
 func (s *responsesStreamState) writeEvent(dst io.Writer, event string, payload map[string]interface{}) {

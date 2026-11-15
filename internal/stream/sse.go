@@ -12,6 +12,9 @@ import (
 
 const MaxEventBytes = 1 << 20
 
+// Generated Responses events repeat accumulated output. Upstream stays at 1 MiB.
+const MaxGeneratedEventBytes = 64 << 20
+
 type Event struct {
 	Raw     []byte
 	Type    string
@@ -22,6 +25,7 @@ type Event struct {
 // Framer retains at most one incomplete event between calls. scan and lineStart
 // prevent repeatedly scanning a large event when the transport splits it up.
 type Framer struct {
+	MaxBytes  int
 	pending   []byte
 	scan      int
 	lineStart int
@@ -31,10 +35,14 @@ func (f *Framer) Append(p []byte) { f.pending = append(f.pending, p...) }
 func (f *Framer) Buffered() int   { return len(f.pending) }
 
 func (f *Framer) Next(final bool) (Event, bool, error) {
+	limit := f.MaxBytes
+	if limit <= 0 {
+		limit = MaxEventBytes
+	}
 	for f.scan < len(f.pending) {
 		i := f.scan
-		if i >= MaxEventBytes {
-			return Event{}, false, fmt.Errorf("SSE event exceeds %d bytes", MaxEventBytes)
+		if i >= limit {
+			return Event{}, false, fmt.Errorf("SSE event exceeds %d bytes", limit)
 		}
 		c := f.pending[i]
 		if c != '\r' && c != '\n' {
@@ -58,8 +66,8 @@ func (f *Framer) Next(final bool) (Event, bool, error) {
 		f.scan, f.lineStart = 0, 0
 		return parseEvent(raw), true, nil
 	}
-	if len(f.pending) > MaxEventBytes {
-		return Event{}, false, fmt.Errorf("SSE event exceeds %d bytes", MaxEventBytes)
+	if len(f.pending) > limit {
+		return Event{}, false, fmt.Errorf("SSE event exceeds %d bytes", limit)
 	}
 	return Event{}, false, nil
 }

@@ -10,6 +10,8 @@
     chartSelections: {}, chartCache: {}, trendWindow: 0, confirm: null
   };
   let pollTimer, freshnessTimer, logFrame, toastTimer, statsController, chartResizeTimer;
+  const timeFormatter = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+  const fullDateFormatter = new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
   const setText = (element, text) => { if (element && element.textContent !== String(text)) element.textContent = String(text); };
   const text = (id, value) => setText($(id), value);
   const timingText = ms => Number.isFinite(ms) ? C.formatDuration(ms) : '—';
@@ -96,7 +98,7 @@
   function timeLabel(value, full) {
     const when = typeof value === 'number' ? value : C.timestamp(value);
     if (!when) return '—';
-    return new Date(when).toLocaleString('zh-CN', full ? { hour12: false } : { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+    return (full ? fullDateFormatter : timeFormatter).format(new Date(when));
   }
   function toast(message) {
     text('toast', message); $('toast').hidden = false;
@@ -127,17 +129,22 @@
       if (!response.ok) throw new Error('HTTP ' + response.status);
       const data = C.validateSnapshot(await response.json());
       state.data = data; state.lastGood = Date.now(); state.statsError = '';
-      state.logModelFor = C.logProviderIndex(data.providers, data.recent_attempts);
-      state.logView = null;
-      renderMetrics(); syncFilters(); renderDiagnostic(); renderPriorities(); renderProviders();
+      const renderSignature = JSON.stringify([data.providers, data.recent_attempts, data.recent_requests, data.curves, data.latency_curves, data.model_latency_curves, data.configured_priorities, data.trend_request_seq]);
+      const changed = renderSignature !== state.renderSignature;
+      renderMetrics(); renderPriorities();
+      if (changed) {
+        state.renderSignature = renderSignature;
+        state.logModelFor = C.logProviderIndex(data.providers, data.recent_attempts);
+        state.logView = null;
+        syncFilters(); renderDiagnostic(); renderProviders(); drawCharts();
+      }
       const signature = requestSignature(data);
       if (!state.requestSignature) refreshRequestView();
       else if (signature !== state.requestSignature) {
         text('refreshRequests', '有新记录 · 更新列表'); $('refreshRequests').classList.add('warning-text');
       }
       if (state.selectedProvider) renderProviderDetail(state.selectedProvider, false);
-      drawCharts();
-      if (state.pane === 'logs' && state.follow) scheduleLogFrame();
+      if (changed && state.pane === 'logs' && state.follow) scheduleLogFrame();
     } catch (error) {
       if (!state.stopped) state.statsError = error.name === 'AbortError' ? '请求超过 8 秒' : error.message;
     } finally {
@@ -223,7 +230,7 @@
       ['全部样本结果', '含成功尝试', '含限流 429', '含其他失败', '含取消', '暂无尝试'];
     const options = state.pane === 'logs' ? [
       ['', '全部日志结果'], ['success', '成功'], ['limited', '限流 429'],
-      ['route-switch', '账号转接'], ['route-skip', '跳过账号'], ['client-limited', '返回 429'], ['failed', '其他失败'], ['canceled', '取消'], ['reasoning-effort', '思考等级调整']
+      ['route-switch', '账号转接'], ['route-skip', '跳过账号'], ['retry-skip', '跳过重试'], ['client-limited', '返回 429'], ['failed', '其他失败'], ['canceled', '取消'], ['reasoning-effort', '思考等级调整']
     ] : ['', 'success', 'limited', 'failed', 'canceled', 'unseen'].map((key, i) => [key, labels[i]]);
     setOptions($('resultFilter'), options, state.filters.result);
   }
@@ -546,18 +553,19 @@
 
   function updateLogControls() {
     const buffer = state.logs;
-    text('logTabCount', buffer.rows.length);
+    text('logTabCount', buffer.length);
     text('logFollowState', state.follow ? '自动跟随' : '阅读模式');
     text('pauseFollow', state.follow ? '暂停跟随' : '继续跟随');
     $('jumpLatest').hidden = state.follow && !state.unread;
     text('jumpLatest', state.unread ? '新增 ' + C.formatCount(state.unread) + ' 条 · 跳到最新' : '跳到最新');
-    text('logBufferInfo', '缓存 ' + buffer.rows.length + '/' + C.LOG_LIMIT + ' · 最多显示 ' + C.LOG_VIEW_LIMIT + ' 条' +
-      (buffer.dropped ? ' · 已丢弃 ' + C.formatCount(buffer.dropped) + ' 条更早记录' : '') + (state.logReconnected ? ' · 重连期间可能有缺口' : ''));
+    text('logBufferInfo', '缓存 ' + buffer.length + '/' + C.LOG_LIMIT + ' · 最多显示 ' + C.LOG_VIEW_LIMIT + ' 条' +
+      (buffer.dropped ? ' · 已丢弃 ' + C.formatCount(buffer.dropped) + ' 条更早记录' : '') +
+      (state.serverLogDropped ? ' · 服务端分发缺失 ' + C.formatCount(state.serverLogDropped) + ' 条' : '') + (state.logReconnected ? ' · 重连期间可能有缺口' : ''));
   }
   function renderLogs(incremental = false) {
     updateLogControls();
     if (state.pane !== 'logs') return;
-    const modelFor = state.logModelFor || (() => '');
+    const modelFor = state.logModelFor || (log => log.model || '');
     const rows = state.logs.rows;
     const priorityFor = C.logPriorityIndex(rows, state.data?.recent_attempts);
     // A new attempt can resolve the priority of an earlier summary row.
@@ -580,7 +588,7 @@
     const entries = $('logEntries');
     const create = log => {
       const details = node('details', 'log-row'), summary = node('summary');
-      if (log.key === 'reasoning-effort') details.classList.add(log.tone);
+      if (log.key === 'reasoning-effort') details.classList.add(log.key);
       const id = node('button', 'table-link request-id'); id.type = 'button'; id.dataset.copyId = log.requestId; id.dataset.tooltip = '复制完整请求 ID';
       const time = node('span', 'log-timestamp');
       time.append(node('span', 'log-time', log.time), node('span', 'log-event', log.event));
@@ -602,6 +610,7 @@
         const meanings = { limited: '本次上游尝试实际收到 HTTP 429',
           'route-switch': '路由选中了下一个可尝试的账号。实际调用及其结果见后续的上游尝试日志。',
           'route-skip': '该候选账号未通过限流检查，本次请求直接略过该账号。每个略过的账号各有一条记录。',
+          'retry-skip': '这是针对上一条上游失败的路由决定，没有再次调用该账号。',
           'client-limited': '这是代理返回给客户端的状态，不另计一次上游尝试' };
         if (meanings[log.key] || log.description) resultBadge.dataset.tooltip = meanings[log.key] || log.description;
         result.append(resultBadge);
@@ -684,7 +693,7 @@
     const structured = /^\[\d{4}-\d{2}-\d{2}/.test(line);
     state.logSeen ||= new Set();
     if (structured && state.logSeen.has(line)) return;
-    if (state.logs.rows.length >= C.LOG_LIMIT) state.logSeen.delete(state.logs.rows[0].raw);
+    if (state.logs.length >= C.LOG_LIMIT) state.logSeen.delete(state.logs.oldest.raw);
     const row = state.logs.push(line);
     if (structured && row) state.logSeen.add(row.raw);
     if (!state.follow) state.unread++;
@@ -698,10 +707,14 @@
       state.logConnectedBefore = true; setConnection('logStatus', '日志已连接', 'good'); updateLogControls();
     };
     source.onmessage = event => receiveLog(event.data);
+    source.addEventListener('gap', event => {
+      state.serverLogDropped = (state.serverLogDropped || 0) + C.count(event.data);
+      updateLogControls();
+    });
     source.onerror = () => setConnection('logStatus', '日志重连中', 'warning');
   }
   function setPane(pane, focus = false) {
-    if ((pane !== 'logs' && ['route-switch', 'route-skip', 'client-limited', 'reasoning-effort'].includes(state.filters.result)) ||
+    if ((pane !== 'logs' && ['route-switch', 'route-skip', 'retry-skip', 'client-limited', 'reasoning-effort'].includes(state.filters.result)) ||
         (pane === 'logs' && state.filters.result === 'unseen')) state.filters.result = '';
     state.pane = pane;
     $('logLevelControl').hidden = pane !== 'logs';

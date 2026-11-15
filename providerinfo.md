@@ -3,6 +3,17 @@
 来源：`GET https://token.sensenova.cn/v1/models`（2026-09-21 实测）  
 思考挡位来源：API 报错枚举法实测（2026-09-28），向各模型发送 `reasoning_effort: "invalid"` 触发参数校验错误，从返回信息中提取合法值列表
 
+## 适用范围与代理策略（2026-11-15）
+
+本文件保留历史模型列表、价格/模态和参数枚举观测，具体日期见各条记录；不是实时供应商文档，也不是所有账号、协议、思考档位的持续可用性保证。接受参数或返回 HTTP 200 不足以证明指定思考等级实际生效。本次未重新请求上游刷新这些历史数据。
+
+- 下方 `reasoning_effort` 表来自 OpenAI 兼容接口，不能直接当作 Anthropic `output_config.effort` 或 `thinking` 的合法值表。回环矩阵验证代理如何发包，不证明真实上游接受每种组合。
+- 当前代理不会直接透传显式 `none`：OpenAI / Responses 按 `global.reasoning_effort_on_none` 替换档位，未配置时移除该控制；SenseNova OpenAI 存在明确档位时补充 `reasoning: true`。因此表中的「可关闭思考」描述历史直连能力，不是经过代理后 `none` 的保证。
+- Anthropic 的显式 `thinking.type: disabled` / `output_config.effort: none` 使用相同策略。配置为 `max` 时写入原生 effort，原关闭状态改为 adaptive；已有启用的手动预算保留。策略留空则省略对应控制，使用上游默认，并非强制关闭。
+- SenseNova OpenAI 的 `glm-5.3` 只保留 `low` / `high` / `max`，把 `minimal` / `medium` 映射为 `low`，其他未支持的明确档位映射为 `max`；此映射不用于 Anthropic 原生档位。各账号实际支持情况仍需真实上游验证。
+
+配置、请求头和测试边界以 [README 配置参考](README.md#配置参考) 为准；本代理未提供图像生成 API，后文图像生成模型仅为历史上游目录记录。
+
 ## 模型总览
 
 | # | 模型ID | 输入模态 | 输出模态 | 上下文 | 最大输出 | 功能特点 |

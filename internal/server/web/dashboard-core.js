@@ -11,7 +11,8 @@
   const number = value => Number.isFinite(Number(value)) ? Math.max(0, Number(value)) : 0;
   const count = value => Math.floor(number(value));
   const ratio = (success, failed) => number(success) + number(failed) > 0 ? number(success) / (number(success) + number(failed)) * 100 : null;
-  const formatCount = value => new Intl.NumberFormat('zh-CN').format(count(value));
+  const countFormatter = new Intl.NumberFormat('zh-CN');
+  const formatCount = value => countFormatter.format(count(value));
   const formatRate = value => value === null || !Number.isFinite(value) ? '—' : value.toFixed(1) + '%';
   function formatDuration(ms) {
     if (ms === null || ms === undefined || !Number.isFinite(Number(ms)) || Number(ms) < 0) return '—';
@@ -220,15 +221,16 @@
     const next = event === 'ROUTER' && body.match(/^degrade to next provider\s*\|\s*(.+?)\s+\[P(\d+)\]\s*\|\s*reason=(.*)$/s);
     const skipped = event === 'QUEUE' && body.match(/^\[P(\d+)\]\s*\|\s*provider (.+?) skipping \((.*)\)\s*\|\s*rr=/s);
     const ttfb = event === 'TTFB' && body.match(/^(.+?)\s*\[P(\d+)\]\s*\|/);
-    const retry = event === 'ROUTER' && body.match(/^non-retryable status=\d+\s*\|\s*skip retry\s*\|\s*(.+?)\s+\[P(\d+)\]$/);
+    const retry = event === 'ROUTER' && body.match(/^non-retryable status=(\d{3})\s*\|\s*skip retry\s*\|\s*(.+?)\s+\[P(\d+)\]$/);
     const summary = event === 'SUMMARY' && body.match(/\|\s*provider=([^|]*?)\s*\|\s*rr=/);
     const effort = event === 'REASONING_EFFORT' && body.match(/^\[P(\d+)\]\s+(.+?)\s*\| model=([^|]+?)\s*\| from=("(?:[^"\\]|\\.)*") \| to=(minimal|low|medium|high|xhigh|max|removed)$/);
-    const provider = (attempt?.[3] || next?.[1] || skipped?.[2] || ttfb?.[1] || retry?.[1] || summary?.[1] || effort?.[2] || '').trim();
-    const priority = Number(attempt?.[1] || next?.[2] || skipped?.[1] || ttfb?.[2] || retry?.[2] || effort?.[1] ||
+    const provider = (attempt?.[3] || next?.[1] || skipped?.[2] || ttfb?.[1] || retry?.[2] || summary?.[1] || effort?.[2] || '').trim();
+    const priority = Number(attempt?.[1] || next?.[2] || skipped?.[1] || ttfb?.[2] || retry?.[3] || effort?.[1] ||
       (resultBody.match(/\[P(\d+)\]/) || [])[1] || 0);
     const providerRole = next ? '切换目标' : skipped ? '跳过对象' : '';
     let detail = attempt ? attempt[4] :
       next ? '切换原因：' + next[3] : skipped ? '跳过原因：' + skipped[3] : body;
+    if (retry) detail = '上一次尝试返回 HTTP ' + retry[1] + '，跳过同账号重试';
     if (effort) detail = 'reasoning_effort：' + effort[4] + ' → ' + (effort[5] === 'removed' ? '省略字段' : effort[5]);
     let elapsed, timingLabel, retryGapMs = null, attemptError = '';
     if (attempt) {
@@ -268,6 +270,7 @@
     let key = 'neutral', label = '信息';
     if (effort) { key = 'reasoning-effort'; label = effort[5] === 'removed' ? '思考等级移除' : '思考等级映射'; }
     else if (next) { key = 'route-switch'; label = status === 429 ? '限流转接' : '账号转接'; }
+    else if (retry) { key = 'retry-skip'; label = '跳过重试'; }
     else if (skipped) { key = 'route-skip'; label = status === 429 ? '因 429 跳过' : '跳过账号'; }
     else if (attempt ? elapsed?.[1] === 'CANCELED' : /\bCANCELED\b/.test(resultBody)) { key = 'canceled'; label = '取消'; }
     else if (attempt && elapsed?.[1] === 'FAIL' && status === 429) { key = 'limited'; label = '限流 429'; }
@@ -290,7 +293,10 @@
       event === 'FIRST_RESPONSE' ? { label: '首次成功响应', tone: 'request-first' } :
       event === 'STREAM' && /\bterminal_written=true\s*\|\s*(?:request_elapsed=\S+\s*\|\s*)?end_reason=protocol_complete$/.test(body) ?
         { label: '流式完成', tone: 'request-end' } : null;
-    const tone = key === 'success' && attempt ? 'attempt-success' : key === 'success' && event === 'SUMMARY' ? 'route-success' : key;
+    let tone = key;
+    if (effort?.[5] === 'removed') tone = 'reasoning-effort-removed';
+    else if (key === 'success' && attempt) tone = 'attempt-success';
+    else if (key === 'success' && event === 'SUMMARY') tone = 'route-success';
     const description = effort ? '代理在发往该账号前调整了思考等级。这是一条参数处理记录，上游结果见后续尝试日志。' :
       attempt ? '本账号的一次上游调用结果；流式调用包含读取、转换和向客户端写出。仅计一次上游尝试。' :
       event === 'SUMMARY' ? '整个路由的汇总结果，包含此前的重试、退避和换号；不是另一次上游尝试。请求处理总耗时见 ACCESS。' :
@@ -340,15 +346,21 @@
     });
   }
   class LogBuffer {
-    constructor(limit = LOG_LIMIT) { this.limit = Math.max(1, count(limit)); this.rows = []; this.dropped = 0; this.sequence = 0; }
+    constructor(limit = LOG_LIMIT) { this.limit = Math.max(1, count(limit)); this.storage = new Array(this.limit); this.start = 0; this.length = 0; this.cached = null; this.dropped = 0; this.sequence = 0; }
+    get oldest() { return this.length ? this.storage[this.start] : null; }
+    get rows() {
+      if (!this.cached) this.cached = Array.from({ length: this.length }, (_, i) => this.storage[(this.start + i) % this.limit]);
+      return this.cached;
+    }
     push(raw) {
       if (!String(raw || '').trim()) return null;
       const row = parseLog(raw, ++this.sequence);
-      this.rows.push(row);
-      if (this.rows.length > this.limit) { const excess = this.rows.length - this.limit; this.rows.splice(0, excess); this.dropped += excess; }
+      if (this.length === this.limit) { this.storage[this.start] = row; this.start = (this.start + 1) % this.limit; this.dropped++; }
+      else { this.storage[(this.start + this.length) % this.limit] = row; this.length++; }
+      this.cached = null;
       return row;
     }
-    clear() { this.rows.length = 0; this.dropped = 0; }
+    clear() { this.storage.fill(undefined); this.start = this.length = this.dropped = 0; this.cached = null; }
   }
   function validateSnapshot(data) {
     if (!data || typeof data !== 'object') throw new Error('统计响应不是有效对象');

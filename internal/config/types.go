@@ -11,8 +11,8 @@ type GlobalConfig struct {
 	ListenAddr    string `yaml:"listen_addr" json:"listen_addr"`
 	DefaultFormat string `yaml:"default_format" json:"default_format"`
 	LogFile       string `yaml:"log_file" json:"log_file"`
-	// ReasoningEffortOnNone replaces explicit "none" for OpenAI upstreams.
-	// An empty value removes the effort field.
+	// ReasoningEffortOnNone replaces explicit none/disabled across both formats.
+	// An empty value omits that control, leaving the upstream default in charge.
 	ReasoningEffortOnNone string `yaml:"reasoning_effort_on_none,omitempty" json:"reasoning_effort_on_none,omitempty"`
 	// LogRequestBody 控制请求内容日志级别：
 	//   "off"     不打印请求内容
@@ -26,8 +26,8 @@ type GlobalConfig struct {
 	// 默认 false：仅允许 loopback (127.0.0.1/::1) 调用，防止远程他人停掉代理。
 	// 设为 true 才允许任意来源（如需远程管理时开启）。
 	ControlAllowRemote bool `yaml:"control_allow_remote" json:"control_allow_remote"`
-	// MaxStreamMinutes 流式传输总时长上限（分钟）。超过此时间 context 取消，
-	// 流被中断并注入 SSE error event。默认 3。
+	// MaxStreamMinutes limits each upstream streaming attempt (minutes, default 3).
+	// It cancels the upstream context, not all retries or a blocked downstream write.
 	MaxStreamMinutes int `yaml:"max_stream_minutes" json:"max_stream_minutes"`
 	// RateLimitCooldown 按 provider 的 retry 配置重试耗尽后仍返回 429 时的可选冷却秒数。
 	// 默认关闭（<=0）；显式设置正数后，冷却期内后续请求跳过该 provider。
@@ -35,6 +35,7 @@ type GlobalConfig struct {
 }
 
 type RetryConfig struct {
+	// MaxRetries excludes the initial attempt; omitted/zero defaults to 3.
 	MaxRetries    int     `yaml:"max_retries" json:"max_retries"`
 	RetryInterval int     `yaml:"retry_interval" json:"retry_interval"`
 	BackoffFactor float64 `yaml:"backoff_factor" json:"backoff_factor"`
@@ -54,14 +55,10 @@ type Provider struct {
 	BaseURL   string          `yaml:"base_url" json:"base_url"`
 	Priority  int             `yaml:"priority" json:"priority"`
 	Retry     RetryConfig     `yaml:"retry" json:"retry"`
-	Timeout   int             `yaml:"timeout" json:"timeout"`
+	Timeout   int             `yaml:"timeout" json:"timeout"` // seconds per non-streaming call or streaming header/read-idle wait
 	Format    string          `yaml:"format" json:"format"`
 	AuthType  string          `yaml:"auth_type" json:"auth_type"` // "bearer" or "x-api-key"; auto-detect from format if empty
 	RateLimit RateLimitConfig `yaml:"rate_limit" json:"rate_limit"`
-	// MaxConcurrent limits concurrent requests to the provider's upstream
-	// scheme/host/port. Providers sharing an origin share the strictest limit.
-	// Zero disables the limit.
-	MaxConcurrent int `yaml:"max_concurrent" json:"max_concurrent"`
 }
 
 type ModelRoute struct {

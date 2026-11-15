@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 )
@@ -64,11 +63,11 @@ func postAnthropic(ctx context.Context, url, apiKey, authType string, body []byt
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("anthropic-version", "2023-06-01")
 	if authType == "bearer" {
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	} else {
 		httpReq.Header.Set("x-api-key", apiKey)
-		httpReq.Header.Set("anthropic-version", "2023-06-01")
 	}
 	if requestID != "" {
 		httpReq.Header.Set("X-Request-ID", requestID)
@@ -84,7 +83,10 @@ func postAnthropic(ctx context.Context, url, apiKey, authType string, body []byt
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, &APIError{StatusCode: resp.StatusCode, Message: ReadErrorBody(resp.Body)}
+	}
+	respBody, err := ReadResponseBody(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}

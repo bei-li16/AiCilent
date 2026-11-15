@@ -1,13 +1,15 @@
 global:
   listen_addr: ":8080"
   default_format: openai
+  # reasoning_effort_on_none: max # 可选，两种协议共用；不配置则显式 none/关闭交由上游默认
   log_file: ../proxy.log
   log_request_body: snippet
   cb_threshold: 3
   cb_cooldown: 10
   cb_skip_requests: 1
   control_allow_remote: false
-  max_stream_minutes: 15
+  max_stream_minutes: 15 # 单次流式上游尝试总时限；配置省略时程序默认 3 分钟
+  rate_limit_cooldown: 0 # 默认关闭；同 provider 重试耗尽仍为 429 后的可选冷却秒数
 
 model_routes:
   - alias: default
@@ -22,13 +24,12 @@ providers:
     priority: 1
     format: openai
     auth_type: bearer
-    timeout: 60
-    max_concurrent: 2
+    timeout: 60 # 非流式单次上游总时限；流式响应头等待/读空闲时限（秒）
     retry:
-      max_retries: 3
-      retry_interval: 2
+      max_retries: 3 # 首次之外的重试次数；省略或 0 仍默认 3，总计最多 4 次
+      retry_interval: 2 # 按两次尝试的开始时间计算间隔，响应耗时计入其中
       backoff_factor: 2
     rate_limit:
-      enabled: false
+      enabled: false # 按 provider 独立的本地令牌桶，不是账号并发上限
       rpm: 60
       burst: 10

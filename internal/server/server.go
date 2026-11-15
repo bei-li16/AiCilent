@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"ai-proxy/internal/config"
@@ -29,10 +30,18 @@ var webFS embed.FS
 
 type Instance struct {
 	*gin.Engine
-	Rot            *rotator.Rotator
-	statsCollector *stats.Collector
-	cancelCtx      context.CancelFunc
-	statsStop      chan struct{}
+	Rot             *rotator.Rotator
+	statsCollector  *stats.Collector
+	cancelCtx       context.CancelFunc
+	statsStop       chan struct{}
+	statsDone       <-chan struct{}
+	watcherDone     <-chan struct{}
+	stopOnce        sync.Once
+	hub             *sse.Hub
+	requests        sync.WaitGroup
+	lifecycleMu     sync.Mutex
+	stopping        bool
+	closeTransports func()
 }
 
 // New creates and configures the Gin engine with all routes and middleware.
@@ -55,23 +64,36 @@ func New(cfg *config.Config, configPath string) *Instance {
 	combinedW := io.MultiWriter(fileW, sseHub)
 
 	r := gin.New()
+	instance := &Instance{Engine: r, Rot: rot, statsCollector: statsCollector, statsStop: make(chan struct{}), hub: sseHub}
+	r.Use(func(c *gin.Context) {
+		instance.lifecycleMu.Lock()
+		if instance.stopping {
+			instance.lifecycleMu.Unlock()
+			c.AbortWithStatus(http.StatusServiceUnavailable)
+			return
+		}
+		instance.requests.Add(1)
+		instance.lifecycleMu.Unlock()
+		defer instance.requests.Done()
+		c.Next()
+	})
 
 	r.Use(middleware.Logger(combinedW))
 	r.Use(middleware.DetectFormat())
 
 	engine := router.NewEngine(cfg, configPath, combinedW, fileW, statsCollector)
+	instance.closeTransports = engine.CloseIdleConnections
 
 	// Start config file watcher for hot-reload
 	var cancel context.CancelFunc
-	statsStop := make(chan struct{})
 	if configPath != "" {
 		ctx, c := context.WithCancel(context.Background())
 		cancel = c
-		engine.StartWatcher(ctx, 30*time.Second)
+		instance.watcherDone = engine.StartWatcher(ctx, 30*time.Second)
 	}
 
 	// Periodically persist stats (and once more on shutdown via SaveStats).
-	statsCollector.StartAutoSave(statsStop, 30*time.Second)
+	instance.statsDone = statsCollector.StartAutoSave(instance.statsStop, 30*time.Second)
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})
@@ -116,16 +138,7 @@ func New(cfg *config.Config, configPath string) *Instance {
 		})
 	})
 
-	r.GET("/api/stats", func(c *gin.Context) {
-		snap := statsCollector.Snapshot()
-		snap.UseConfiguredProviders(engine.ConfiguredProviders())
-		snap.CB = engine.CBSnapshot()
-		snap.ConfiguredPriorities = make([]int, 0, len(snap.CB))
-		for _, group := range snap.CB {
-			snap.ConfiguredPriorities = append(snap.ConfiguredPriorities, group.Priority)
-		}
-		c.JSON(200, snap)
-	})
+	r.GET("/api/stats", serveStats(statsCollector, engine))
 
 	r.GET("/api/logs", func(c *gin.Context) {
 		sseHub.ServeHTTP(c.Writer, c.Request)
@@ -178,7 +191,8 @@ func New(cfg *config.Config, configPath string) *Instance {
 		c.JSON(200, gin.H{"running": body.Running})
 	})
 
-	return &Instance{Engine: r, Rot: rot, statsCollector: statsCollector, cancelCtx: cancel, statsStop: statsStop}
+	instance.cancelCtx = cancel
+	return instance
 }
 
 // isLoopback reports whether addr (host:port form) is a loopback address.
@@ -196,24 +210,48 @@ func (i *Instance) StopWatcher() {
 	if i.cancelCtx != nil {
 		i.cancelCtx()
 	}
+	if i.watcherDone != nil {
+		<-i.watcherDone
+	}
 }
 
 // SaveStats flushes the latest stats to disk and stops the auto-save goroutine.
 // Call once during shutdown (after StopWatcher / before rotator close).
 func (i *Instance) SaveStats() {
-	if i.statsStop != nil {
-		// Closing signals StartAutoSave to do a final Save and exit.
-		select {
-		case <-i.statsStop:
-		default:
+	i.stopOnce.Do(func() {
+		if i.statsStop != nil {
 			close(i.statsStop)
 		}
-		// Give the final save a moment to land.
-		time.Sleep(50 * time.Millisecond)
+	})
+	if i.statsDone != nil {
+		<-i.statsDone
 	}
 	if i.statsCollector != nil {
 		i.statsCollector.Save()
 	}
+}
+
+// End subscriptions before draining requests, then persist their final outcomes.
+// A drain timeout forces connection closure but must never bypass persistence.
+func (i *Instance) Shutdown(ctx context.Context, server *http.Server) error {
+	i.lifecycleMu.Lock()
+	i.stopping = true
+	i.lifecycleMu.Unlock()
+	i.StopWatcher()
+	i.hub.Close()
+	err := server.Shutdown(ctx)
+	if err != nil {
+		_ = server.Close()
+	}
+	i.requests.Wait()
+	if i.closeTransports != nil {
+		i.closeTransports()
+	}
+	i.SaveStats()
+	if i.Rot != nil {
+		_ = i.Rot.Close()
+	}
+	return err
 }
 
 // serveWeb serves an embedded asset.

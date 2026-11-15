@@ -58,19 +58,8 @@ func main() {
 	// Graceful shutdown with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := httpServer.Shutdown(ctx); err != nil {
-		log.Fatalf("Shutdown error: %v", err)
-	}
-
-	// Stop config watcher goroutine
-	srv.StopWatcher()
-
-	// Flush stats to disk
-	srv.SaveStats()
-
-	// Close log rotator
-	if srv.Rot != nil {
-		srv.Rot.Close()
+	if err := srv.Shutdown(ctx, httpServer); err != nil {
+		log.Printf("Shutdown forced after drain timeout: %v", err)
 	}
 
 	log.Println("Server stopped")

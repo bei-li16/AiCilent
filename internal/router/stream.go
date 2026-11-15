@@ -18,13 +18,6 @@ type downstreamWriteError struct{ err error }
 func (e *downstreamWriteError) Error() string { return "write downstream: " + e.err.Error() }
 func (e *downstreamWriteError) Unwrap() error { return e.err }
 
-type localCapacityError struct{ err error }
-
-func (e *localCapacityError) Error() string {
-	return "wait for upstream connection slot: " + e.err.Error()
-}
-func (e *localCapacityError) Unwrap() error { return e.err }
-
 // terminalWriter forwards complete events, then records what was successfully
 // written. Neither a partial data line nor a failed write establishes completion.
 type terminalWriter struct {
