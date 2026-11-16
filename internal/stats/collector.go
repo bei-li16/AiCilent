@@ -159,6 +159,7 @@ type Snapshot struct {
 	TotalRate            float64             `json:"total_rate"`
 	Running              bool                `json:"running"`
 	StartTime            time.Time           `json:"start_time"`
+	ResetEpoch           uint64              `json:"reset_epoch"`
 	Uptime               string              `json:"uptime"`
 	CB                   []CBState           `json:"cb"`
 	Curves               []HitRateCurve      `json:"curves"`
@@ -456,6 +457,7 @@ func (c *Collector) Snapshot() Snapshot {
 	recentRequests := append([]RequestTiming(nil), c.recentRequests...)
 	totalReq, totalClient := c.totalReq.Load(), c.totalClient.Load()
 	clientCompleted, clientSuccess := c.clientCompleted, c.clientSuccess
+	resetEpoch := c.clientEpoch
 	totalSuccess, totalFail, totalCanceled := c.totalSuccess.Load(), c.totalFail.Load(), c.totalCanceled.Load()
 	c.mu.Unlock()
 	// Build hit-rate curves: overall first (priority 0), then per-priority sorted.
@@ -503,6 +505,7 @@ func (c *Collector) Snapshot() Snapshot {
 		TotalRate:            totalRate,
 		Running:              running,
 		StartTime:            c.startTime,
+		ResetEpoch:           resetEpoch,
 		Uptime:               uptime,
 		Curves:               curves,
 		LatencyCurve:         latencyCurves[0].Points,

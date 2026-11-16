@@ -2,7 +2,6 @@ package server
 
 import (
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 
@@ -17,8 +16,8 @@ func TestEmbeddedDashboardBuildIdentity(t *testing.T) {
 	res := httptest.NewRecorder()
 	r.ServeHTTP(res, httptest.NewRequest("GET", "/", nil))
 	body := res.Body.String()
-	asset := url.QueryEscape(version.Version + "." + version.Commit + "." + version.BuildDate)
-	for _, want := range []string{`content="` + version.Version + `"`, `/style.css?v=` + asset, `/dashboard-core.js?v=` + asset, `/app.js?v=` + asset, `role="tablist"`, `id="confirmDialog"`} {
+	asset := dashboardBuildID()
+	for _, want := range []string{`content="` + version.Version + `"`, `name="dashboard-assets" content="` + asset + `"`, `/style.css?v=` + asset, `/dashboard-core.js?v=` + asset, `/app.js?v=` + asset, `role="tablist"`, `id="confirmDialog"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("embedded dashboard missing %q", want)
 		}

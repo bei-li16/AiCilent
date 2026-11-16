@@ -14,6 +14,7 @@ import (
 // Only serialized immutable bytes are shared. Mutations invalidate immediately;
 // the second key keeps uptime and CB countdown current.
 func serveStats(collector *stats.Collector, engine *router.Engine) gin.HandlerFunc {
+	build := dashboardBuildID()
 	var mu sync.Mutex
 	var payload []byte
 	var lastRevision uint64
@@ -38,6 +39,7 @@ func serveStats(collector *stats.Collector, engine *router.Engine) gin.HandlerFu
 		data := payload
 		mu.Unlock()
 		c.Header("Cache-Control", "no-store")
+		c.Header("X-Dashboard-Build", build)
 		c.Data(http.StatusOK, "application/json; charset=utf-8", data)
 	}
 }

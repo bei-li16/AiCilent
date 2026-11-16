@@ -26,6 +26,8 @@ type Hub struct {
 	history     [historyCap]logEntry
 	next, count int
 	sequence    uint64
+	generation  uint64
+	reset       chan struct{}
 	done        chan struct{}
 	closed      bool
 }
@@ -33,7 +35,20 @@ type Hub struct {
 func NewHub() *Hub {
 	return &Hub{
 		clients: make(map[*subscriber]bool), done: make(chan struct{}),
+		generation: uint64(time.Now().UnixNano()), reset: make(chan struct{}),
 	}
+}
+
+// Clear drops replay history and makes existing subscribers reconnect.
+func (h *Hub) Clear() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	clear(h.history[:])
+	h.next, h.count, h.sequence = 0, 0, 0
+	h.generation++
+	close(h.reset)
+	h.reset = make(chan struct{})
+	clear(h.clients)
 }
 
 func (h *Hub) Close() {
@@ -86,7 +101,8 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 
 	client := &subscriber{queue: make(chan logEntry, 128)}
-	lastID, _ := strconv.ParseUint(r.Header.Get("Last-Event-ID"), 10, 64)
+	lastGeneration, lastSequence, _ := strings.Cut(r.Header.Get("Last-Event-ID"), ":")
+	lastID, _ := strconv.ParseUint(lastSequence, 10, 64)
 
 	h.mu.Lock()
 	if h.closed {
@@ -94,8 +110,9 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.clients[client] = true
+	generation, reset := strconv.FormatUint(h.generation, 10), h.reset
 	history := make([]logEntry, 0, h.count)
-	if lastID > h.sequence {
+	if lastGeneration != generation || lastID > h.sequence {
 		lastID = 0
 	}
 	for i := 0; i < h.count; i++ {
@@ -111,16 +128,23 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.mu.Unlock()
 	}()
 	controller := http.NewResponseController(w)
+	announce := true
 	flush := func(entries []logEntry) error {
 		_ = controller.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		defer controller.SetWriteDeadline(time.Time{})
+		if announce {
+			announce = false
+			if _, err := fmt.Fprintf(w, "event: log-generation\ndata: %s\n\n", generation); err != nil {
+				return err
+			}
+		}
 		if dropped := client.dropped.Swap(0); dropped > 0 {
 			if _, err := fmt.Fprintf(w, "event: gap\ndata: %d\n\n", dropped); err != nil {
 				return err
 			}
 		}
 		for _, e := range entries {
-			if _, err := fmt.Fprintf(w, "id: %d\ndata: %s\n\n", e.id, e.line); err != nil {
+			if _, err := fmt.Fprintf(w, "id: %s:%d\ndata: %s\n\n", generation, e.id, e.line); err != nil {
 				return err
 			}
 		}
@@ -159,6 +183,8 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case <-ctx.Done():
+			return
+		case <-reset:
 			return
 		case <-h.done:
 			return

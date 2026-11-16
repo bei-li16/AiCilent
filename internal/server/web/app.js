@@ -2,6 +2,7 @@
   'use strict';
   const C = window.AiDashboardCore;
   const $ = id => document.getElementById(id);
+  const embeddedBuild = document.querySelector('meta[name="dashboard-assets"]')?.content;
   const state = {
     data: null, lastGood: 0, statsError: '', fetching: false, pane: 'logs', filters: { query: '', priority: '', model: '', result: '', level: '' },
     providerView: 'all', groupBy: 'model',
@@ -127,7 +128,16 @@
     try {
       const response = await fetch('/api/stats', { cache: 'no-store', signal: statsController.signal });
       if (!response.ok) throw new Error('HTTP ' + response.status);
+      if (reloadDashboard(response.headers.get('X-Dashboard-Build'))) return;
       const data = C.validateSnapshot(await response.json());
+      const previous = state.data;
+      if (previous && (data.start_time !== previous.start_time || data.reset_epoch !== previous.reset_epoch)) {
+        state.requestSignature = '';
+        state.requestPage = state.providerPage = 1;
+        state.filters.priority = state.filters.model = '';
+        state.renderSignature = null;
+        if (state.selectedRequest) $('detailDrawer').close();
+      }
       state.data = data; state.lastGood = Date.now(); state.statsError = '';
       const renderSignature = JSON.stringify([data.providers, data.recent_attempts, data.recent_requests, data.curves, data.latency_curves, data.model_latency_curves, data.configured_priorities, data.trend_request_seq]);
       const changed = renderSignature !== state.renderSignature;
@@ -152,6 +162,24 @@
       if (!state.stopped) { clearTimeout(pollTimer); pollTimer = setTimeout(fetchStats, document.hidden ? 10000 : 2000); }
     }
   }
+  function reloadDashboard(build) {
+    if (!build) return false;
+    const url = new URL(window.location.href);
+    const parameter = '_dashboard_build';
+    if (build !== embeddedBuild) {
+      // A stale intermediary can return the old HTML even after navigation.
+      // Try each build once so the tab cannot enter a reload loop.
+      if (url.searchParams.get(parameter) === build) return false;
+      url.searchParams.set(parameter, build);
+      window.location.replace(url.href);
+      return true;
+    }
+    if (url.searchParams.has(parameter)) {
+      url.searchParams.delete(parameter);
+      window.history.replaceState(window.history.state, '', url.href);
+    }
+    return false;
+  }
   async function fetchVersion() {
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 8000);
     try {
@@ -161,7 +189,7 @@
       const build = version.build_date && version.build_date !== 'unknown' ? timeLabel(version.build_date, true) : '构建时间未知';
       text('buildInfo', (version.version || '版本未知') + ' · ' + (version.commit || 'commit 未知') + ' · 构建 ' + build);
       $('buildInfo').dataset.tooltip = '构建时间原值：' + (version.build_date || 'unknown');
-      const embedded = document.querySelector('meta[name="dashboard-build"]').content;
+      const embedded = document.querySelector('meta[name="dashboard-build"]')?.content;
       if (embedded !== version.version) toast('页面资源与服务版本不一致，请刷新页面。');
     } catch (_) { text('buildInfo', '版本信息不可用'); }
     finally { clearTimeout(timer); }
@@ -183,10 +211,10 @@
     text('uptime', C.formatUptime(d.uptime)); $('uptime').dataset.tooltip = '服务启动：' + timeLabel(d.start_time, true) + ' · 原始时长：' + d.uptime;
   }
   function setOptions(el, options, selected) {
-    const signature = JSON.stringify(options);
+    const values = options.slice();
+    if (selected && !values.some(o => o[0] === selected)) values.push([selected, selected + '（当前筛选）']);
+    const signature = JSON.stringify(values);
     if (el.dataset.options !== signature) {
-      const values = options.slice();
-      if (selected && !values.some(o => o[0] === selected)) values.push([selected, selected + '（当前筛选）']);
       el.replaceChildren(...values.map(([value, label]) => { const option = node('option', '', label); option.value = value; return option; }));
       el.dataset.options = signature;
     }
@@ -704,6 +732,11 @@
     if (!state.follow) state.unread++;
     scheduleLogFrame();
   }
+  function clearLogView() {
+    state.logs.clear(); state.logSeen?.clear(); state.logView = null; state.unread = 0;
+    state.serverLogDropped = 0; state.logReconnected = false;
+    renderLogs();
+  }
   function startLogStream() {
     if (state.stopped || (state.eventSource && state.eventSource.readyState !== EventSource.CLOSED)) return;
     const source = new EventSource('/api/logs'); state.eventSource = source;
@@ -711,6 +744,10 @@
       if (state.logConnectedBefore) state.logReconnected = true;
       state.logConnectedBefore = true; setConnection('logStatus', '日志已连接', 'good'); updateLogControls();
     };
+    source.addEventListener('log-generation', event => {
+      if (state.logGeneration && state.logGeneration !== event.data) clearLogView();
+      state.logGeneration = event.data;
+    });
     source.onmessage = event => receiveLog(event.data);
     source.addEventListener('gap', event => {
       state.serverLogDropped = (state.serverLogDropped || 0) + C.count(event.data);
@@ -746,7 +783,7 @@
       service: { title: state.data?.running ? '停用请求转发？' : '启用请求转发？', message: state.data?.running ?
         '将停用网关的新请求转发，已有请求继续按原业务逻辑处理。此操作会影响真实服务。' : '将恢复网关的新请求转发。', endpoint: '/api/control', payload: { running: !state.data?.running } },
       reset: { title: '重置服务端统计？', message: '累计统计和最近尝试样本将被清零，操作不可恢复。不会删除 YAML 配置或日志文件。', endpoint: '/api/stats/reset' },
-      logs: { title: '清空服务端日志文件？', message: '将截断服务端当前日志文件，操作不可恢复；现存备份文件保留。其他浏览器的日志缓存不会因此自动清空。', endpoint: '/api/logs/clear' }
+      logs: { title: '清空服务端日志？', message: '将清空当前日志文件和实时日志缓冲。已连接的监控页面会重新连接并清除旧记录。现存备份文件保留。', endpoint: '/api/logs/clear' }
     };
     state.confirm = { ...actions[kind], kind, trigger, busy: false };
     text('confirmTitle', state.confirm.title); text('confirmMessage', state.confirm.message); $('confirmError').hidden = true;
@@ -761,7 +798,6 @@
       if (!response.ok) throw new Error(response.status === 403 ? '管理操作被拒绝：仅允许本机或已配置的远程管理访问。' : '服务返回 HTTP ' + response.status);
       await response.json();
       if (action.kind === 'reset') { state.providerPage = state.requestPage = 1; state.requestSignature = ''; state.requests = []; }
-      if (action.kind === 'logs') { state.logs.clear(); state.logSeen?.clear(); state.unread = 0; renderLogs(); }
       $('confirmDialog').close(); toast('操作已完成'); fetchStats();
     } catch (error) {
       text('confirmError', error.name === 'AbortError' ? '请求超时，操作结果未知，请核对服务状态后再试。' : error.message); $('confirmError').hidden = false;
@@ -850,7 +886,7 @@
   }, { passive: true });
   $('pauseFollow').addEventListener('click', () => { state.follow = !state.follow; state.manualLogPause = !state.follow; if (state.follow) renderLogs(); else updateLogControls(); });
   $('jumpLatest').addEventListener('click', () => { state.manualLogPause = false; state.follow = true; renderLogs(); });
-  $('clearLogView').addEventListener('click', () => { state.logs.clear(); state.logSeen?.clear(); state.unread = 0; renderLogs(); toast('当前浏览器视图已清空，服务端日志保留。'); });
+  $('clearLogView').addEventListener('click', () => { clearLogView(); toast('当前浏览器视图已清空，服务端日志保留。'); });
   $('serviceControl').addEventListener('click', event => openConfirm('service', event.currentTarget));
   $('resetStats').addEventListener('click', event => openConfirm('reset', event.currentTarget));
   $('clearServerLogs').addEventListener('click', event => openConfirm('logs', event.currentTarget));

@@ -41,6 +41,14 @@ func TestVersionEndpoint(t *testing.T) {
 	if gotID := res.Header().Get("X-Request-ID"); gotID == "" {
 		t.Fatal("version response has no X-Request-ID")
 	}
+	if res.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("version response is cacheable")
+	}
+	res = httptest.NewRecorder()
+	srv.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/api/stats", nil))
+	if got := res.Header().Get("X-Dashboard-Build"); got != dashboardBuildID() {
+		t.Fatalf("stats build = %q, want %q", got, dashboardBuildID())
+	}
 	srv.SaveStats()
 	if srv.Rot != nil {
 		_ = srv.Rot.Close()

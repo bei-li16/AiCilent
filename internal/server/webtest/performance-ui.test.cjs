@@ -23,13 +23,27 @@ test('dashboard handles log bursts, stable polls, priorities and responsive view
     ],
     cb: priorities.map(priority => ({ priority, open: false, failures: 0, cooldown_sec: 60, cooldown_rem_sec: 0, skip_remaining: 10 })) };
   let reads = 0;
+  let build = 'fixture', logGeneration = 'initial';
+  const logStreams = new Set();
   const sockets = new Set();
   const server = http.createServer((request, response) => {
     const pathname = new URL(request.url, 'http://localhost').pathname;
-    if (pathname === '/api/stats') { reads++; response.setHeader('Content-Type', 'application/json'); response.end(JSON.stringify(data)); return; }
+    if (pathname === '/api/stats') {
+      reads++;
+      response.writeHead(200, { 'Content-Type': 'application/json', 'X-Dashboard-Build': build });
+      response.end(JSON.stringify(data));
+      return;
+    }
     if (pathname === '/api/version') { response.end(JSON.stringify({ version: 'v-test', commit: 'fixture', build_date: '2026-11-15T00:00:00Z' })); return; }
     if (pathname === '/api/logs') {
       response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      logStreams.add(response);
+      response.on('close', () => logStreams.delete(response));
+      response.write('retry: 100\nevent: log-generation\ndata: ' + logGeneration + '\n\n');
+      if (logGeneration !== 'initial') {
+        response.write('data: new generation\n\n');
+        return;
+      }
       response.write('event: gap\ndata: 7\n\n');
       for (let i = 0; i < 2100; i++) {
         const p = priorities[i % priorities.length];
@@ -40,7 +54,7 @@ test('dashboard handles log bursts, stable polls, priorities and responsive view
     const file = pathname === '/' ? 'index.html' : pathname.slice(1);
     if (!['index.html', 'app.js', 'dashboard-core.js', 'style.css'].includes(file)) { response.writeHead(404); response.end(); return; }
     let body = fs.readFileSync(path.join(__dirname, '..', 'web', file), 'utf8');
-    if (file === 'index.html') body = body.replaceAll('__DASHBOARD_VERSION__', 'v-test').replaceAll('__DASHBOARD_ASSET__', 'fixture');
+    if (file === 'index.html') body = body.replaceAll('__DASHBOARD_VERSION__', 'v-test').replaceAll('__DASHBOARD_ASSET__', build);
     response.setHeader('Content-Type', file.endsWith('.js') ? 'application/javascript' : file.endsWith('.css') ? 'text/css' : 'text/html');
     response.end(body);
   });
@@ -104,6 +118,31 @@ test('dashboard handles log bursts, stable polls, priorities and responsive view
     await page.screenshot({ path: path.join(output, 'mobile.png'), fullPage: true });
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth);
     assert.ok(overflow <= 2, 'body overflows by ' + overflow);
+
+    // A new stats epoch refreshes the frozen request list in other tabs.
+    data.reset_epoch = 0;
+    data.recent_attempts = [{ request_id: 'old-request', provider: 'mock-P5', model_id: 'old-model', priority: 5, success: true }];
+    await page.waitForFunction(() => document.querySelector('#priorityFilter option[value="5"]'));
+    await page.locator('#tabRequests').click();
+    assert.match(await page.locator('#requestBody').innerText(), /old-request/);
+    await page.locator('#priorityFilter').selectOption('5');
+    data.reset_epoch++;
+    data.recent_attempts = [];
+    await page.waitForFunction(() => !document.querySelector('#priorityFilter option[value="5"]'));
+    assert.equal(await page.locator('#requestBody tr').count(), 0);
+
+    // Reconnect on the same build and discard the previous server log buffer.
+    logGeneration = 'cleared';
+    for (const stream of logStreams) stream.end();
+    await page.locator('#tabLogs').click();
+    await page.waitForFunction(() => document.getElementById('logTabCount').textContent === '1');
+    await page.locator('#jumpLatest').click();
+    await page.waitForFunction(() => document.getElementById('logEntries').textContent.includes('new generation'));
+
+    // An already open tab loads changed assets even when the version is the same.
+    build = 'next-build';
+    await page.waitForFunction(() => document.querySelector('meta[name="dashboard-assets"]').content === 'next-build' &&
+      !location.search.includes('_dashboard_build') && document.getElementById('buildInfo').textContent.includes('v-test'));
     assert.deepEqual(errors, []);
     fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ reads, logCache: 1000, visibleLogs: 200, errors, overflow }, null, 2));
   } finally {

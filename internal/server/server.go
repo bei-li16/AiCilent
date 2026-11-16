@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"html"
 	"io"
 	"net"
@@ -27,6 +29,22 @@ import (
 
 //go:embed web/*
 var webFS embed.FS
+
+var dashboardAssetHash = func() string {
+	hash := sha256.New()
+	for _, name := range []string{"index.html", "app.js", "dashboard-core.js", "style.css"} {
+		data, err := webFS.ReadFile("web/" + name)
+		if err != nil {
+			panic(err)
+		}
+		_, _ = hash.Write(data)
+	}
+	return hex.EncodeToString(hash.Sum(nil))[:16]
+}()
+
+func dashboardBuildID() string {
+	return url.QueryEscape(version.Version + "." + version.Commit + "." + version.BuildDate + "." + dashboardAssetHash)
+}
 
 type Instance struct {
 	*gin.Engine
@@ -131,6 +149,7 @@ func New(cfg *config.Config, configPath string) *Instance {
 	r.GET("/app.js", serveWeb("web/app.js", "application/javascript; charset=utf-8"))
 	r.GET("/dashboard-core.js", serveWeb("web/dashboard-core.js", "application/javascript; charset=utf-8"))
 	r.GET("/api/version", func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
 		c.JSON(http.StatusOK, gin.H{
 			"version":    version.Version,
 			"commit":     version.Commit,
@@ -162,6 +181,7 @@ func New(cfg *config.Config, configPath string) *Instance {
 			return
 		}
 		if rot == nil {
+			sseHub.Clear()
 			c.JSON(200, gin.H{"cleared": true, "note": "logging to stdout, no file to clear"})
 			return
 		}
@@ -169,6 +189,7 @@ func New(cfg *config.Config, configPath string) *Instance {
 			c.JSON(500, gin.H{"error": err.Error()})
 			return
 		}
+		sseHub.Clear()
 		c.JSON(200, gin.H{"cleared": true})
 	})
 
@@ -256,6 +277,7 @@ func (i *Instance) Shutdown(ctx context.Context, server *http.Server) error {
 
 // serveWeb serves an embedded asset.
 func serveWeb(filePath, contentType string) gin.HandlerFunc {
+	asset := dashboardBuildID()
 	return func(c *gin.Context) {
 		data, err := webFS.ReadFile(filePath)
 		if err != nil {
@@ -266,7 +288,6 @@ func serveWeb(filePath, contentType string) gin.HandlerFunc {
 		// rebuilds from an uncommitted worktree with the same release version.
 		c.Header("Cache-Control", "no-cache")
 		if filePath == "web/index.html" {
-			asset := url.QueryEscape(version.Version + "." + version.Commit + "." + version.BuildDate)
 			data = []byte(strings.NewReplacer(
 				"__DASHBOARD_VERSION__", html.EscapeString(version.Version),
 				"__DASHBOARD_ASSET__", asset,

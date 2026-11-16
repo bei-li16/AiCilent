@@ -224,9 +224,9 @@ base_url = "http://localhost:8080"
 | `GET` | `/api/logs` | SSE 实时日志流 |
 | `POST` | `/api/control` | 启用/停用代理 `{"running":bool}` |
 | `POST` | `/api/stats/reset` | 清零累计统计，受 `control_allow_remote` 保护 |
-| `POST` | `/api/logs/clear` | 清空当前日志文件，受 `control_allow_remote` 保护 |
+| `POST` | `/api/logs/clear` | 清空当前日志文件和实时日志缓冲，受 `control_allow_remote` 保护 |
 
-网页「清空当前视图」只影响当前浏览器；管理操作「清空日志」会清空当前日志文件。日志轮转备份和累计统计不能替代逐条请求历史。
+网页「清空当前视图」只影响当前浏览器。管理操作「清空日志」同时清空当前日志文件和实时缓冲，已打开的面板重连后会清掉旧记录。面板检测到新构建后会自动加载更新的页面资源。日志轮转备份和累计统计不能替代逐条请求历史。
 
 ---
 
