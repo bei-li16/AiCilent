@@ -476,20 +476,30 @@ func (e *Engine) tryGroup(c *gin.Context, body []byte, requestFormat string, str
 			if lease == nil {
 				lease = e.accounts.start(candidates[idx].key)
 			}
+			probe := &headerProbe{}
 			fwdErr := func() error {
 				defer lease.finish()
 				if streaming {
-					return e.forwardRequestStream(c, body, requestFormat, provider, effectiveTimeout(provider.Timeout, modelTimeout), tr, cfg.Global.ReasoningEffortOnNone)
+					return e.forwardRequestStream(c, body, requestFormat, provider, effectiveTimeout(provider.Timeout, modelTimeout), tr, cfg.Global.ReasoningEffortOnNone, probe)
 				}
-				return e.forwardRequest(c, body, requestFormat, provider, effectiveTimeout(provider.Timeout, modelTimeout), tr, cfg.Global.ReasoningEffortOnNone)
+				return e.forwardRequest(c, body, requestFormat, provider, effectiveTimeout(provider.Timeout, modelTimeout), tr, cfg.Global.ReasoningEffortOnNone, probe)
 			}()
 			lease = nil
 
 			latency := time.Since(start)
+			// The latency curve charts time-to-first-response: attempt start
+			// -> upstream 200 header. The full transfer duration stays in the
+			// attempt log line; failures keep their wall-clock cost.
+			firstResponse := latency
+			if !probe.at.IsZero() {
+				if d := probe.at.Sub(start); d > 0 {
+					firstResponse = d
+				}
+			}
 
 			if fwdErr == nil {
 				c.Set(clientRequestSucceededKey, true)
-				e.stats.Record(middleware.GetReqID(c), provider.Name, provider.ModelID, priority, true, http.StatusOK, "", latency)
+				e.stats.Record(middleware.GetReqID(c), provider.Name, provider.ModelID, priority, true, http.StatusOK, "", firstResponse)
 				tr.LogAttempt(provider.Name, priority, attempt, maxRetries+1, true, "", latency, startGap)
 				e.closeCircuitBreaker(priority, modelName, tr,
 					cfg.Global.CBThreshold, cfg.Global.CBCooldown, cfg.Global.CBSkipRequests)
@@ -694,6 +704,31 @@ func upstreamOrigin(baseURL string) string {
 	return scheme + "://" + host
 }
 
+// headerProbe records the moment an upstream attempt receives a successful
+// (200) response header. The dashboard latency curve measures this
+// time-to-first-response (attempt start -> 200 header) instead of the full
+// transfer duration, so it reflects how fast a model starts answering.
+type headerProbe struct {
+	at time.Time
+}
+
+func (p *headerProbe) wrap(rt http.RoundTripper) http.RoundTripper {
+	if p == nil {
+		return rt
+	}
+	return roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		resp, err := rt.RoundTrip(req)
+		if err == nil && resp.StatusCode == http.StatusOK {
+			p.at = time.Now()
+		}
+		return resp, err
+	})
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
 func (e *Engine) streamTransport(timeout int) *http.Transport {
 	headerTimeout := time.Duration(timeout) * time.Second
 
@@ -788,7 +823,7 @@ func isRequestCanceled(c *gin.Context, err error) bool {
 	return ctxErr != nil && errors.Is(err, ctxErr)
 }
 
-func (e *Engine) forwardRequest(c *gin.Context, body []byte, requestFormat string, provider *config.Provider, timeout int, tr *tracer.Recorder, effortOnNone string) error {
+func (e *Engine) forwardRequest(c *gin.Context, body []byte, requestFormat string, provider *config.Provider, timeout int, tr *tracer.Recorder, effortOnNone string, probes ...*headerProbe) error {
 	var respBody []byte
 	var err error
 
@@ -807,10 +842,14 @@ func (e *Engine) forwardRequest(c *gin.Context, body []byte, requestFormat strin
 
 	tr.LogReasoningEffortChange(provider.Name, provider.Priority, provider.ModelID, originalEffort, upstreamEffort)
 	requestID := middleware.GetReqID(c)
+	rt := http.RoundTripper(e.transport)
+	if len(probes) > 0 {
+		rt = probes[0].wrap(rt)
+	}
 	if provider.Format == "openai" {
-		respBody, err = adapter.CallOpenAIRawContext(requestCtx, provider.BaseURL, provider.APIKey, body, timeout, requestID, e.transport)
+		respBody, err = adapter.CallOpenAIRawContext(requestCtx, provider.BaseURL, provider.APIKey, body, timeout, requestID, rt)
 	} else {
-		respBody, err = adapter.CallAnthropicRawContext(requestCtx, provider.BaseURL, provider.APIKey, provider.AuthType, body, timeout, requestID, e.transport)
+		respBody, err = adapter.CallAnthropicRawContext(requestCtx, provider.BaseURL, provider.APIKey, provider.AuthType, body, timeout, requestID, rt)
 	}
 
 	if err != nil {
@@ -835,7 +874,7 @@ func upstreamFormat(requestFormat string) string {
 	return requestFormat
 }
 
-func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat string, provider *config.Provider, timeout int, tr *tracer.Recorder, effortOnNone string) error {
+func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat string, provider *config.Provider, timeout int, tr *tracer.Recorder, effortOnNone string, probes ...*headerProbe) error {
 	prepared := cachedPreparation(c, body, requestFormat, provider, effortOnNone)
 	if prepared.err != nil {
 		return prepared.err
@@ -881,7 +920,11 @@ func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat
 
 	// A shared transport reuses TLS/HTTP2 connections and avoids leaving one
 	// idle connection pool behind for every completed streaming request.
-	client := &http.Client{Transport: e.streamTransport(timeout)}
+	rt := http.RoundTripper(e.streamTransport(timeout))
+	if len(probes) > 0 {
+		rt = probes[0].wrap(rt)
+	}
+	client := &http.Client{Transport: rt}
 	tr.LogReasoningEffortChange(provider.Name, provider.Priority, provider.ModelID, originalEffort, upstreamEffort)
 	streamStart := time.Now()
 	resp, err := client.Do(httpReq)
