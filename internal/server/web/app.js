@@ -4,11 +4,11 @@
   const $ = id => document.getElementById(id);
   const embeddedBuild = document.querySelector('meta[name="dashboard-assets"]')?.content;
   const state = {
-    data: null, lastGood: 0, statsError: '', fetching: false, pane: 'logs', filters: { query: '', priority: '', model: '', result: '', level: '' },
+    data: null, lastGood: 0, statsError: '', fetching: false, pane: 'usage', filters: { query: '', priority: '', model: '', result: '', level: '' },
     providerView: 'all', groupBy: 'model',
-    providerPage: 1, requestPage: 1, sort: 'priority', requests: [], requestSignature: '', logs: new C.LogBuffer(), follow: true,
+    providerPage: 1, requestPage: 1, sort: 'model', sortDirection: 'asc', requests: [], requestSignature: '', logs: new C.LogBuffer(), follow: true,
     unread: 0, stopped: false, eventSource: null, selectedProvider: null, selectedRequest: null,
-    chartSelections: {}, chartCache: {}, trendWindow: 0, confirm: null
+    chartSelections: {}, chartCache: {}, trendWindow: 0, rateWindow: C.RATE_WINDOW_DEFAULT, confirm: null
   };
   let pollTimer, freshnessTimer, logFrame, toastTimer, statsController, chartResizeTimer;
   const timeFormatter = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
@@ -54,9 +54,15 @@
       if (typeof message === 'string') {
         hoverTip.textContent = message;
       } else {
-        hoverTip.replaceChildren(...message.flatMap(({ text, color }, index) => {
-          const line = node('span', '', text);
+        hoverTip.replaceChildren(...message.flatMap(({ text, color, swatch, emphasis }, index) => {
+          const line = node(emphasis ? 'strong' : 'span', '', text);
           if (color) line.style.color = color;
+          if (swatch) {
+            const marker = node('span', 'tooltip-swatch');
+            marker.style.backgroundColor = swatch;
+            marker.setAttribute('aria-hidden', 'true');
+            line.prepend(marker);
+          }
           return index ? ['\n', line] : [line];
         }));
       }
@@ -70,9 +76,10 @@
     hoverTip.style.left = Math.max(margin, Math.min(left, window.innerWidth - width - margin)) + 'px';
     hoverTip.style.top = Math.max(margin, Math.min(top, window.innerHeight - height - margin)) + 'px';
   }
+  const tooltipMessage = owner => window.AiTokenUsage?.tooltipFor?.(owner) || owner.dataset.tooltip;
   document.addEventListener('pointermove', event => {
     const owner = event.target.closest?.('[data-tooltip]');
-    if (owner?.dataset.tooltip) showTooltip(owner, owner.dataset.tooltip, event);
+    if (owner?.dataset.tooltip) showTooltip(owner, tooltipMessage(owner), event);
     else if (!tooltipOwner?.contains(event.target)) hideTooltip();
   });
   document.addEventListener('pointerout', event => {
@@ -80,7 +87,7 @@
   });
   document.addEventListener('focusin', event => {
     const owner = event.target.closest?.('[data-tooltip]');
-    if (owner?.dataset.tooltip) showTooltip(owner, owner.dataset.tooltip);
+    if (owner?.dataset.tooltip) showTooltip(owner, tooltipMessage(owner));
   });
   document.addEventListener('focusout', event => {
     if (tooltipOwner?.contains(event.target)) hideTooltip();
@@ -137,6 +144,7 @@
         state.filters.priority = state.filters.model = '';
         state.renderSignature = null;
         if (state.selectedRequest) $('detailDrawer').close();
+        if (state.pane === 'usage') window.AiTokenUsage.refresh(true);
       }
       state.data = data; state.lastGood = Date.now(); state.statsError = '';
       const renderSignature = JSON.stringify([data.providers, data.recent_attempts, data.recent_requests, data.curves, data.latency_curves, data.model_latency_curves, data.configured_priorities, data.trend_request_seq]);
@@ -159,7 +167,11 @@
       if (!state.stopped) state.statsError = error.name === 'AbortError' ? '请求超过 8 秒' : error.message;
     } finally {
       clearTimeout(timeout); state.fetching = false; updateFreshness();
-      if (!state.stopped) { clearTimeout(pollTimer); pollTimer = setTimeout(fetchStats, document.hidden ? 10000 : 2000); }
+      if (!state.stopped) {
+        if (state.pane === 'usage') window.AiTokenUsage.refresh();
+        clearTimeout(pollTimer);
+        pollTimer = setTimeout(fetchStats, document.hidden ? 10000 : 2000);
+      }
     }
   }
   function reloadDashboard(build) {
@@ -319,35 +331,54 @@
     text(prefix + 'PageNumber', (pages ? page : 0) + ' / ' + pages);
     $(prefix + 'Prev').disabled = page <= 1; $(prefix + 'Next').disabled = !pages || page >= pages;
   }
+  const providerHeadings = $('providerTable').querySelectorAll('button[data-sort]');
+  function setProviderSort(sort, direction = C.providerSortDirection(sort)) {
+    state.sort = sort;
+    state.sortDirection = direction;
+    state.providerPage = 1;
+    $('providerSort').value = sort;
+    for (const heading of providerHeadings) {
+      const active = heading.dataset.sort === (sort === 'name' ? 'model' : sort);
+      if (active) heading.parentElement.setAttribute('aria-sort', direction === 'asc' ? 'ascending' : 'descending');
+      else heading.parentElement.removeAttribute('aria-sort');
+      setText(heading.lastElementChild, active ? (direction === 'asc' ? '↑' : '↓') : '↕');
+    }
+    renderProviders();
+    $('providerScroll').scrollTop = 0;
+  }
   function renderProviders() {
     if (!state.data) return;
     renderProviderNavigation();
-    const all = C.sortProviders(C.filterProviders(state.data.providers, state.filters, state.providerView), state.sort);
+    const all = C.sortProviders(C.filterProviders(state.data.providers, state.filters, state.providerView), state.sort, state.sortDirection);
     state.providerPage = Math.min(state.providerPage, Math.max(1, Math.ceil(all.length / C.PAGE_SIZE)));
     const page = all.slice((state.providerPage - 1) * C.PAGE_SIZE, state.providerPage * C.PAGE_SIZE);
     text('providerCount', '匹配 ' + all.length + ' / ' + state.data.providers.length + ' 个供应商 · 结果筛选按最近状态');
     $('providerEmpty').hidden = all.length > 0; $('providerTable').hidden = all.length === 0;
     reconcile($('providerBody'), page, p => p.name, () => {
-      const row = tableRow(11);
+      const row = tableRow(12);
       row.cells[0].append(node('span', 'priority-tag'));
       row.cells[1].append(node('button', 'table-link provider-name'), node('span', 'provider-model'));
       row.cells[1].firstChild.type = 'button'; row.cells[1].firstChild.dataset.action = 'provider';
-      for (let i = 2; i <= 8; i++) row.cells[i].className = 'number';
-      row.cells[9].append(badge({ tone: 'neutral', label: '' }));
-      const button = node('button', 'row-detail', '↗'); button.type = 'button'; button.dataset.action = 'provider'; row.cells[10].append(button);
+      row.cells[2].append(node('time', 'provider-attempt-time'), node('span', 'muted', '—'));
+      for (let i = 3; i <= 9; i++) row.cells[i].className = 'number';
+      row.cells[10].append(badge({ tone: 'neutral', label: '' }));
+      const button = node('button', 'row-detail', '↗'); button.type = 'button'; button.dataset.action = 'provider'; row.cells[11].append(button);
       return row;
     }, (row, p) => {
       const priority = row.cells[0].firstChild; setText(priority, 'P' + p.priority); priority.style.setProperty('--priority-color', C.priorityColor(p.priority));
       const name = row.cells[1].firstChild; setText(name, C.providerLabel(p)); name.dataset.tooltip = p.name; name.dataset.name = p.name;
       setText(row.cells[1].lastChild, p.model_id); row.cells[1].lastChild.dataset.tooltip = p.model_id;
-      [p.total, p.success, p.fail, p.client_abort].forEach((n, i) => setText(row.cells[i + 2], C.formatCount(n)));
-      const streak = C.providerStreak(p); setText(row.cells[6], streak === null ? '—' : C.formatCount(streak));
-      row.cells[6].classList.toggle('warning-text', streak > 0);
-      row.cells[6].dataset.tooltip = streak === null ? '旧记录缺少最近状态，无法还原连续失败次数' : '成功后归零；取消不增加也不中断';
-      setText(row.cells[7], C.formatRate(C.ratio(p.success, p.fail)));
-      setText(row.cells[8], p.latency_count > 0 ? C.formatDuration(p.latency_avg_ms) : '—');
-      replaceBadge(row.cells[9].firstChild, C.providerOutcome(p));
-      const button = row.cells[10].firstChild; button.dataset.name = p.name; button.setAttribute('aria-label', '查看供应商 ' + p.name + ' 详情');
+      const lastAttempt = C.timestamp(p.last_activity), time = row.cells[2].firstChild;
+      time.hidden = !lastAttempt; row.cells[2].lastChild.hidden = Boolean(lastAttempt);
+      if (lastAttempt) { time.dateTime = p.last_activity; setText(time, timeLabel(lastAttempt, true)); }
+      [p.total, p.success, p.fail, p.client_abort].forEach((n, i) => setText(row.cells[i + 3], C.formatCount(n)));
+      const streak = C.providerStreak(p); setText(row.cells[7], streak === null ? '—' : C.formatCount(streak));
+      row.cells[7].classList.toggle('warning-text', streak > 0);
+      row.cells[7].dataset.tooltip = streak === null ? '旧记录缺少最近状态，无法还原连续失败次数' : '成功后归零；取消不增加也不中断';
+      setText(row.cells[8], C.formatRate(C.ratio(p.success, p.fail)));
+      setText(row.cells[9], p.latency_count > 0 ? C.formatDuration(p.latency_avg_ms) : '—');
+      replaceBadge(row.cells[10].firstChild, C.providerOutcome(p));
+      const button = row.cells[11].firstChild; button.dataset.name = p.name; button.setAttribute('aria-label', '查看供应商 ' + p.name + ' 详情');
     });
     pagination('provider', state.providerPage, all.length, '条');
   }
@@ -381,7 +412,7 @@
   function drawCharts(force) {
     if (!state.data) return;
     for (const kind of ['rate', 'latency']) {
-      const curves = C.chartSeries(state.data, kind, state.trendWindow);
+      const curves = C.chartSeries(state.data, kind, state.trendWindow, state.rateWindow);
       if (!state.chartSelections[kind]) {
         let saved = null;
         try { saved = JSON.parse(localStorage.getItem('ai-dashboard.curves.' + kind)); } catch (_) { /* Storage can be disabled. */ }
@@ -405,18 +436,20 @@
         setText(button.children[2], c.label + (kind === 'latency' ? ' 平均 ' : ' ') + value);
         if (kind === 'latency') setText(button.lastChild.firstChild, C.formatCount(c.points.length));
         button.setAttribute('aria-pressed', String(selection.has(c.priority)));
-        button.setAttribute('aria-label', c.label + '曲线' + (kind === 'latency' ? '，平均成功耗时 ' + value + '，' + c.points.length + ' 次成功尝试' : ''));
+        button.setAttribute('aria-label', c.label + '曲线' + (kind === 'latency' ? '，平均成功耗时 ' + value + '，' + c.points.length + ' 次成功尝试' : '，滑动成功率 ' + value));
         button.dataset.tooltip = (kind === 'latency' ?
           '图例为当前范围内本曲线所有保留成功样本的算术平均，不受其他曲线显隐影响。' +
           (c.priority === 0 ? '汇总使用汇总曲线自身的样本，不重复拼接各优先级。' : '仅统计 ' + c.label + '，不包含其他优先级。') +
           '每次耗时从本次上游尝试开始，到收到上游 200 响应头（首响）。' :
-          '图例显示所选范围内保留样本的整体成功率。每个点从范围内第一个样本累计到该点，取消尝试不计入分母。') +
+          (c.precomputed ? '此快照缺少逐次结果，显示服务端预计算的 50 次窗口值。' :
+            '每个点为本曲线最近 ' + state.rateWindow + ' 次有效上游尝试的成功率，取消不计入；查看范围只裁剪曲线，不重置窗口。' +
+            (c.sampleCounts.at(-1) ? '末点实际窗口 ' + c.sampleCounts.at(-1) + '/' + state.rateWindow + ' 次。' : ''))) +
           '\n' + c.points.length + ' 个采样点。点击切换曲线。';
       });
       const selected = curves.filter(c => selection.has(c.priority));
       if (kind === 'latency') drawLatencyStatistics(selected);
       text(kind + 'Caption', selected.length ? (kind === 'latency' ? '独立样本序号 · 图例为各曲线样本均值 · 不含退避' :
-        '独立样本序号 · 按所选范围的保留样本累计') : '点击图例选择一条或多条曲线');
+        '独立样本序号 · 滑动窗口 ' + state.rateWindow + ' 次尝试 · 取消不计入') : '点击图例选择一条或多条曲线');
       setText($(kind + 'Empty').querySelector('strong'), !selected.length ? '未选择曲线' : kind === 'rate' ? '暂无成功率样本' : '暂无成功耗时样本');
       drawChart(kind, selected.filter(c => c.points.length), force);
     }
@@ -492,6 +525,7 @@
       const value = s.points[cache.active];
       const label = kind === 'rate' ? C.formatRate(value) : C.formatDuration(value * 1000);
       lines.push({ text: s.label + '：' + label, color: s.color });
+      if (kind === 'rate' && s.sampleCounts?.[cache.active]) lines.push({ text: '窗口 ' + s.sampleCounts[cache.active] + '/' + state.rateWindow + ' 次有效尝试', color: s.color });
     }
     const markers = svg.querySelector('.chart-hover-points');
     if (markers.dataset.index !== String(cache.active) || !markers.childElementCount) {
@@ -559,7 +593,7 @@
     actions.append(actionButton('复制完整名称', () => copyText(p.name)), actionButton('筛选关联请求', () => { $('detailDrawer').close(); filterTo('requests', { query: p.name }); }),
       actionButton('查看关联日志', () => { $('detailDrawer').close(); filterTo('logs', { query: p.name }); }));
     const items = [['模型', p.model_id || '—'], ['优先级', 'P' + p.priority], ['已记录尝试', C.formatCount(p.total)], ['成功 / 失败', C.formatCount(p.success) + ' / ' + C.formatCount(p.fail)],
-      ['取消尝试', C.formatCount(p.client_abort)], ['最近连续失败', C.providerStreak(p) === null ? '未知（旧存档无最近状态）' : C.formatCount(C.providerStreak(p))], ['有效成功率', C.formatRate(C.ratio(p.success, p.fail))], ['平均尝试耗时', p.latency_count > 0 ? C.formatDuration(p.latency_avg_ms) : '—'], ['最近活动', timeLabel(p.last_activity, true)]];
+      ['取消尝试', C.formatCount(p.client_abort)], ['最近连续失败', C.providerStreak(p) === null ? '未知（旧存档无最近状态）' : C.formatCount(C.providerStreak(p))], ['有效成功率', C.formatRate(C.ratio(p.success, p.fail))], ['平均尝试耗时', p.latency_count > 0 ? C.formatDuration(p.latency_avg_ms) : '—'], ['最近尝试时间', timeLabel(p.last_activity, true)]];
     const note = node('p', 'detail-description', $('providerLatencyHeading').dataset.tooltip);
     const error = node('pre', 'detail-raw', p.last_err || '当前快照没有最近错误。');
     showDetail('供应商详情 · 累计统计', C.providerLabel(p), [status, actions, title, detailGrid(items), note, node('h3', '', '最近错误原文'), error]);
@@ -756,11 +790,12 @@
     source.onerror = () => setConnection('logStatus', '日志重连中', 'warning');
   }
   function setPane(pane, focus = false) {
-    if ((pane !== 'logs' && ['route-switch', 'route-skip', 'retry-skip', 'client-limited', 'reasoning-effort'].includes(state.filters.result)) ||
+    if ((pane !== 'logs' && pane !== 'usage' && ['route-switch', 'route-skip', 'retry-skip', 'client-limited', 'reasoning-effort'].includes(state.filters.result)) ||
         (pane === 'logs' && state.filters.result === 'unseen')) state.filters.result = '';
     state.pane = pane;
+    $('filterForm').hidden = pane === 'usage';
     $('logLevelControl').hidden = pane !== 'logs';
-    const names = { providers: '供应商累计统计 · 结果按最近状态', requests: '最近尝试窗口 · 非完整请求历史', logs: '当前浏览器有界缓存' };
+    const names = { usage: '上游报告的用量', providers: '供应商累计统计 · 结果按最近状态', requests: '最近尝试窗口 · 非完整请求历史', logs: '当前浏览器有界缓存' };
     text('workspaceScope', names[pane]);
     document.querySelectorAll('[role="tab"]').forEach(button => {
       const selected = button.dataset.pane === pane;
@@ -770,20 +805,22 @@
     });
     if (state.data) syncFilters();
     if (pane === 'requests') refreshRequestView();
+    if (pane === 'usage') window.AiTokenUsage.refresh(true);
     renderActive();
   }
   function renderActive() {
     if (state.pane === 'providers') renderProviders();
     else if (state.pane === 'requests') renderRequests();
-    else renderLogs();
+    else if (state.pane === 'logs') renderLogs();
   }
   function openConfirm(kind, trigger) {
     if (!state.data && kind === 'service') { toast('服务状态尚不可用，请稍后重试。'); return; }
     const actions = {
       service: { title: state.data?.running ? '停用请求转发？' : '启用请求转发？', message: state.data?.running ?
         '将停用网关的新请求转发，已有请求继续按原业务逻辑处理。此操作会影响真实服务。' : '将恢复网关的新请求转发。', endpoint: '/api/control', payload: { running: !state.data?.running } },
-      reset: { title: '重置服务端统计？', message: '累计统计和最近尝试样本将被清零，操作不可恢复。不会删除 YAML 配置或日志文件。', endpoint: '/api/stats/reset' },
-      logs: { title: '清空服务端日志？', message: '将清空当前日志文件和实时日志缓冲。已连接的监控页面会重新连接并清除旧记录。现存备份文件保留。', endpoint: '/api/logs/clear' }
+      reset: { title: '重置服务端统计？', message: '将清零请求计数、供应商统计和最近尝试样本。此操作不可恢复。', endpoint: '/api/stats/reset' },
+      logs: { title: '清空服务端日志？', message: '将清空当前日志文件和实时日志缓冲。已连接的监控页面会重新连接并清除旧记录。现存备份文件保留。', endpoint: '/api/logs/clear' },
+      usage: { title: '清空 Token 统计？', message: '将清空累计 Token 用量、历史每日汇总和今日小时明细。此操作不可恢复。', endpoint: '/api/usage/reset' }
     };
     state.confirm = { ...actions[kind], kind, trigger, busy: false };
     text('confirmTitle', state.confirm.title); text('confirmMessage', state.confirm.message); $('confirmError').hidden = true;
@@ -798,6 +835,7 @@
       if (!response.ok) throw new Error(response.status === 403 ? '管理操作被拒绝：仅允许本机或已配置的远程管理访问。' : '服务返回 HTTP ' + response.status);
       await response.json();
       if (action.kind === 'reset') { state.providerPage = state.requestPage = 1; state.requestSignature = ''; state.requests = []; }
+      if (action.kind === 'usage' && state.pane === 'usage') window.AiTokenUsage.refresh(true);
       $('confirmDialog').close(); toast('操作已完成'); fetchStats();
     } catch (error) {
       text('confirmError', error.name === 'AbortError' ? '请求超时，操作结果未知，请核对服务状态后再试。' : error.message); $('confirmError').hidden = false;
@@ -824,14 +862,19 @@
   $('providerViews').addEventListener('click', event => {
     const button = event.target.closest('button[data-view]'); if (!button) return;
     state.providerView = button.dataset.view; state.providerPage = 1;
-    if (state.providerView === 'streak') { state.sort = 'streak'; $('providerSort').value = state.sort; }
+    if (state.providerView === 'streak') { setProviderSort('streak'); return; }
     renderProviders(); $('providerScroll').scrollTop = 0;
   });
   $('resetFilters').addEventListener('click', () => {
     state.filters = { query: '', priority: '', model: '', result: '', level: '' }; state.providerView = 'all'; $('searchInput').value = ''; $('logLevelFilter').value = ''; state.providerPage = state.requestPage = 1;
     if (state.data) syncFilters(); renderActive();
   });
-  $('providerSort').addEventListener('change', () => { state.sort = $('providerSort').value; state.providerPage = 1; renderProviders(); });
+  $('providerSort').addEventListener('change', event => setProviderSort(event.target.value));
+  for (const heading of providerHeadings) heading.addEventListener('click', () => {
+    const sort = heading.dataset.sort === 'model' && state.sort === 'name' ? 'name' : heading.dataset.sort;
+    if (sort === state.sort) setProviderSort(sort, state.sortDirection === 'asc' ? 'desc' : 'asc');
+    else setProviderSort(sort);
+  });
   $('providerPrev').addEventListener('click', () => { state.providerPage = Math.max(1, state.providerPage - 1); renderProviders(); });
   $('providerNext').addEventListener('click', () => { state.providerPage++; renderProviders(); });
   $('requestPrev').addEventListener('click', () => { state.requestPage = Math.max(1, state.requestPage - 1); renderRequests(); });
@@ -840,7 +883,7 @@
   document.querySelectorAll('[role="tab"]').forEach(button => {
     button.addEventListener('click', () => setPane(button.dataset.pane));
     button.addEventListener('keydown', event => {
-      const panes = ['logs', 'providers', 'requests']; let index = panes.indexOf(state.pane);
+      const panes = ['usage', 'logs', 'providers', 'requests']; let index = panes.indexOf(state.pane);
       if (event.key === 'ArrowRight') index = (index + 1) % 3;
       else if (event.key === 'ArrowLeft') index = (index + 2) % 3;
       else if (event.key === 'Home') index = 0;
@@ -855,6 +898,25 @@
   $('detailDrawer').addEventListener('close', () => { state.selectedProvider = state.selectedRequest = null; });
   $('inspectDiagnostic').addEventListener('click', () => filterTo('requests', { result: $('inspectDiagnostic').dataset.result || '' }));
   $('priorityGrid').addEventListener('click', event => { const card = event.target.closest('[data-priority]'); if (card) filterTo('requests', { priority: card.dataset.priority }); });
+  const rateWindowInput = $('rateWindow');
+  try { state.rateWindow = C.normalizeRateWindow(localStorage.getItem('ai-dashboard.rate-window')); } catch (_) { /* Optional preference. */ }
+  rateWindowInput.value = state.rateWindow;
+  rateWindowInput.addEventListener('input', () => {
+    const value = Number(rateWindowInput.value), valid = rateWindowInput.value !== '' && C.normalizeRateWindow(value) === value;
+    rateWindowInput.setCustomValidity(valid ? '' : '请输入 20～100 之间、步长为 10 的数值');
+    rateWindowInput.setAttribute('aria-invalid', String(!valid));
+    if (!valid) return;
+    state.rateWindow = value;
+    try { localStorage.setItem('ai-dashboard.rate-window', String(value)); } catch (_) { /* Optional preference. */ }
+    drawCharts(true);
+  });
+  rateWindowInput.addEventListener('change', () => {
+    if (!rateWindowInput.validity.valid) {
+      rateWindowInput.value = state.rateWindow;
+      rateWindowInput.setCustomValidity('');
+      rateWindowInput.removeAttribute('aria-invalid');
+    }
+  });
   for (const kind of ['rate', 'latency']) {
     const save = () => { try { localStorage.setItem('ai-dashboard.curves.' + kind, JSON.stringify([...state.chartSelections[kind]])); } catch (_) { /* Optional preference. */ } };
     $(kind + 'Legend').addEventListener('click', event => {
@@ -890,6 +952,7 @@
   $('serviceControl').addEventListener('click', event => openConfirm('service', event.currentTarget));
   $('resetStats').addEventListener('click', event => openConfirm('reset', event.currentTarget));
   $('clearServerLogs').addEventListener('click', event => openConfirm('logs', event.currentTarget));
+  $('resetTokenUsage').addEventListener('click', event => openConfirm('usage', event.currentTarget));
   $('confirmAction').addEventListener('click', confirmAction);
   $('cancelAction').addEventListener('click', () => $('confirmDialog').close());
   $('confirmDialog').addEventListener('cancel', event => { if (state.confirm?.busy) event.preventDefault(); });

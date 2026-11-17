@@ -62,6 +62,7 @@ type HitRateCurve struct {
 	Points    []float64 `json:"points"`              // 每个=最近 hitWindowSize 次尝试的成功率(%)
 	Requests  []uint64  `json:"requests"`            // corresponding client request sequence, 0 = unknown
 	Successes []bool    `json:"successes,omitempty"` // raw outcomes for request-window success rates
+	History   []bool    `json:"history,omitempty"`   // outcomes immediately preceding the first displayed sample
 }
 
 type ModelLatencyCurve struct {
@@ -71,8 +72,9 @@ type ModelLatencyCurve struct {
 }
 
 const (
-	hitWindowSize = 50  // 滚动窗口大小：每个点取最近 50 次尝试
-	hitSeriesCap  = 240 // 曲线保留的最近点数
+	hitWindowSize    = 50                     // 滚动窗口大小：每个点取最近 50 次尝试
+	hitSeriesCap     = 240                    // 曲线保留的最近点数
+	hitRateSeriesCap = hitSeriesCap + 100 - 1 // Prehistory for any supported rolling window, at most 100.
 )
 
 // rollingHit is a fixed-size ring of the last N attempt outcomes (success
@@ -122,7 +124,11 @@ type trendPoint struct {
 type trendSeries []trendPoint
 
 func (s trendSeries) push(v trendPoint) trendSeries {
-	if len(s) < hitSeriesCap {
+	return s.pushBounded(v, hitSeriesCap)
+}
+
+func (s trendSeries) pushBounded(v trendPoint, limit int) trendSeries {
+	if len(s) < limit {
 		return append(s, v)
 	}
 	copy(s, s[1:])
@@ -131,9 +137,14 @@ func (s trendSeries) push(v trendPoint) trendSeries {
 }
 
 func (s trendSeries) rateSnapshot(priority int) HitRateCurve {
-	curve := s.snapshot(priority)
-	curve.Successes = make([]bool, len(s))
-	for i, point := range s {
+	start := max(0, len(s)-hitSeriesCap)
+	curve := s[start:].snapshot(priority)
+	curve.History = make([]bool, start)
+	for i, point := range s[:start] {
+		curve.History[i] = point.success
+	}
+	curve.Successes = make([]bool, len(s)-start)
+	for i, point := range s[start:] {
 		curve.Successes[i] = point.success
 	}
 	return curve
@@ -222,6 +233,7 @@ type Collector struct {
 	clientCompleted int64
 	clientSuccess   int64
 	clientEpoch     uint64
+	usageEpoch      uint64
 	totalSuccess    atomic.Int64
 	totalFail       atomic.Int64
 	totalCanceled   atomic.Int64
@@ -247,6 +259,7 @@ type Collector struct {
 	trendIDs       map[string]uint64
 	recentAttempts []AttemptStats
 	recentRequests []RequestTiming
+	usage          usageHistory
 }
 
 func New(statsPath string) *Collector {
@@ -388,14 +401,14 @@ func (c *Collector) record(requestID, name, modelID string, priority int, succes
 		// Update health-rate windows under the same lock as counters.
 		requestSeq := c.trendIDs[requestID]
 		c.overallWin.push(success)
-		c.overallSeries = c.overallSeries.push(trendPoint{value: c.overallWin.rate(), request: requestSeq, success: success})
+		c.overallSeries = c.overallSeries.pushBounded(trendPoint{value: c.overallWin.rate(), request: requestSeq, success: success}, hitRateSeriesCap)
 		pw, ok := c.prioWin[priority]
 		if !ok {
 			pw = &rollingHit{}
 			c.prioWin[priority] = pw
 		}
 		pw.push(success)
-		c.prioSeries[priority] = c.prioSeries[priority].push(trendPoint{value: pw.rate(), request: requestSeq, success: success})
+		c.prioSeries[priority] = c.prioSeries[priority].pushBounded(trendPoint{value: pw.rate(), request: requestSeq, success: success}, hitRateSeriesCap)
 		// Latency curve: only successful attempts ("hit") record their duration.
 		if success {
 			point := trendPoint{value: latency.Seconds(), request: requestSeq}
@@ -408,10 +421,15 @@ func (c *Collector) record(requestID, name, modelID string, priority int, succes
 	}
 }
 
+// RequestEpoch identifies the counting periods when a request was accepted.
+type RequestEpoch struct {
+	client, usage uint64
+}
+
 // RecordClientRequest increments the client-side request counter once per
 // inbound client request (distinct from upstream attempts, which include
 // retries and degradation).
-func (c *Collector) RecordClientRequest(requestID string) uint64 {
+func (c *Collector) RecordClientRequest(requestID string) RequestEpoch {
 	defer c.revision.Add(1)
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -423,16 +441,16 @@ func (c *Collector) RecordClientRequest(requestID string) uint64 {
 	if requestID != "" {
 		c.trendIDs[requestID] = c.trendSeq
 	}
-	return c.clientEpoch
+	return RequestEpoch{client: c.clientEpoch, usage: c.usageEpoch}
 }
 
 // RecordClientOutcome counts the result once per accepted request.
 // Requests in flight during reset belong to the previous counting period.
-func (c *Collector) RecordClientOutcome(epoch uint64, success bool) {
+func (c *Collector) RecordClientOutcome(epoch RequestEpoch, success bool) {
 	defer c.revision.Add(1)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if epoch != c.clientEpoch {
+	if epoch.client != c.clientEpoch {
 		return
 	}
 	c.clientCompleted++
@@ -534,7 +552,7 @@ func (c *Collector) SetRunning(v bool) {
 	c.revision.Add(1)
 }
 
-// Reset zeroes all collected statistics in place: provider counters, totals,
+// Reset zeroes request statistics in place: provider counters, totals,
 // hit-rate windows/curves, latency curve and recent attempts. Provider entries
 // are kept (zeroed) so the dashboard table keeps listing configured providers.
 // The cleared state is persisted immediately so a restart stays cleared.
@@ -611,6 +629,7 @@ type persistedProvider struct {
 
 type persistedState struct {
 	ArchiveEpoch    string              `json:"archive_epoch,omitempty"`
+	Usage           *usageHistory       `json:"token_usage,omitempty"`
 	Providers       []persistedProvider `json:"providers"`
 	TotalReq        int64               `json:"total_req"`
 	TotalClient     int64               `json:"total_client_req"`
@@ -622,19 +641,26 @@ type persistedState struct {
 }
 
 func (c *Collector) Save() {
+	_ = c.save(time.Now())
+}
+
+func (c *Collector) save(now time.Time) error {
 	if c.statsPath == "" {
-		return
+		return nil
 	}
 	c.fileMu.Lock()
 	defer c.fileMu.Unlock()
+	c.mu.Lock()
+	c.pruneUsageHoursLocked(now.In(time.Local).Format(usageDateLayout))
 	revision := c.revision.Load()
 	if c.hasSaved && revision == c.lastSaved {
-		return
+		c.mu.Unlock()
+		return nil
 	}
-	c.mu.Lock()
 	c.archiveInactiveLocked()
 	state := persistedState{
 		ArchiveEpoch:    c.archiveEpoch,
+		Usage:           c.usage.snapshotForSave(),
 		TotalReq:        c.totalReq.Load(),
 		TotalClient:     c.totalClient.Load(),
 		ClientCompleted: c.clientCompleted,
@@ -666,15 +692,17 @@ func (c *Collector) Save() {
 
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
-		return
+		return err
 	}
 	tmpPath := c.statsPath + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
-		return
+		return err
 	}
-	if os.Rename(tmpPath, c.statsPath) == nil {
-		c.lastSaved, c.hasSaved = revision, true
+	if err := os.Rename(tmpPath, c.statsPath); err != nil {
+		return err
 	}
+	c.lastSaved, c.hasSaved = revision, true
+	return nil
 }
 
 func (c *Collector) load() {
@@ -691,6 +719,9 @@ func (c *Collector) load() {
 	}
 	c.mu.Lock()
 	c.archiveEpoch = state.ArchiveEpoch
+	if state.Usage != nil {
+		c.usage = *state.Usage
+	}
 	var canceled int64
 	for _, p := range state.Providers {
 		canceled += p.ClientAbort

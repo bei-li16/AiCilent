@@ -370,7 +370,7 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 		}
 
 		completed, lastErr = e.tryGroup(c, bodyBytes, requestFormat, streaming, group,
-			modelTimeout, modelName, tr, cfg, probeID)
+			modelTimeout, modelName, tr, cfg, probeID, epoch)
 		if completed {
 			break
 		}
@@ -402,7 +402,7 @@ func (e *Engine) HandleRequest(c *gin.Context) {
 // about backend health.
 func (e *Engine) tryGroup(c *gin.Context, body []byte, requestFormat string, streaming bool,
 	group []*config.Provider, modelTimeout int, modelName string, tr *tracer.Recorder,
-	cfg *config.Config, probeID uint64) (bool, error) {
+	cfg *config.Config, probeID uint64, epoch stats.RequestEpoch) (bool, error) {
 
 	ctx := c.Request.Context()
 	priority := group[0].Priority
@@ -500,6 +500,18 @@ func (e *Engine) tryGroup(c *gin.Context, body []byte, requestFormat string, str
 			if fwdErr == nil {
 				c.Set(clientRequestSucceededKey, true)
 				e.stats.Record(middleware.GetReqID(c), provider.Name, provider.ModelID, priority, true, http.StatusOK, "", firstResponse)
+				if counts, ok := probe.usage.Counts(provider.Format); ok {
+					sample := stats.TokenUsage{Input: counts.Input, Output: counts.Output,
+						CachedInput: counts.CachedInput, CacheEligible: counts.CacheEligible}
+					if !probe.usage.FirstOutput.IsZero() {
+						sample.HasFirstToken = true
+						sample.FirstToken = probe.usage.FirstOutput.Sub(start)
+						if decode := probe.usage.LastOutput.Sub(probe.usage.FirstOutput); decode >= 25*time.Millisecond {
+							sample.Decode = decode
+						}
+					}
+					e.stats.RecordTokenUsage(epoch, provider.ModelID, time.Now(), sample)
+				}
 				tr.LogAttempt(provider.Name, priority, attempt, maxRetries+1, true, "", latency, startGap)
 				e.closeCircuitBreaker(priority, modelName, tr,
 					cfg.Global.CBThreshold, cfg.Global.CBCooldown, cfg.Global.CBSkipRequests)
@@ -709,7 +721,8 @@ func upstreamOrigin(baseURL string) string {
 // time-to-first-response (attempt start -> 200 header) instead of the full
 // transfer duration, so it reflects how fast a model starts answering.
 type headerProbe struct {
-	at time.Time
+	at    time.Time
+	usage stream.UsageMeter
 }
 
 func (p *headerProbe) wrap(rt http.RoundTripper) http.RoundTripper {
@@ -856,6 +869,10 @@ func (e *Engine) forwardRequest(c *gin.Context, body []byte, requestFormat strin
 		return err
 	}
 
+	if len(probes) > 0 && probes[0] != nil {
+		probes[0].usage.ObserveJSON(respBody, provider.Format)
+	}
+
 	if provider.Format != requestFormat {
 		respBody, err = adapter.ConvertResponse(respBody, provider.Format, requestFormat, provider.ModelID)
 		if err != nil {
@@ -874,12 +891,35 @@ func upstreamFormat(requestFormat string) string {
 	return requestFormat
 }
 
+// SenseNova Kimi streams omit usage unless requested. Other upstreams can
+// report usage themselves or honor the caller's stream_options.
+func requestStreamUsage(body []byte, provider *config.Provider) ([]byte, bool) {
+	if provider.Format != "openai" || provider.ModelID != "kimi-k3" || !isSensenovaProvider(provider.BaseURL) {
+		return body, false
+	}
+	options := gjson.GetBytes(body, "stream_options")
+	if (options.Exists() && !options.IsObject()) || options.Get("include_usage").Exists() {
+		return body, false
+	}
+	updated, err := sjson.SetBytes(body, "stream_options.include_usage", true)
+	if err != nil {
+		return body, false
+	}
+	return updated, true
+}
+
 func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat string, provider *config.Provider, timeout int, tr *tracer.Recorder, effortOnNone string, probes ...*headerProbe) error {
 	prepared := cachedPreparation(c, body, requestFormat, provider, effortOnNone)
 	if prepared.err != nil {
 		return prepared.err
 	}
 	body, originalEffort, upstreamEffort := prepared.body, prepared.original, prepared.upstream
+	var meter *stream.UsageMeter
+	injectedUsage := false
+	if len(probes) > 0 && probes[0] != nil {
+		meter = &probes[0].usage
+		body, injectedUsage = requestStreamUsage(body, provider)
+	}
 
 	path := "/chat/completions"
 	if provider.Format == "anthropic" {
@@ -956,8 +996,10 @@ func (e *Engine) forwardRequestStream(c *gin.Context, body []byte, requestFormat
 		tracker.framer.MaxBytes = stream.MaxGeneratedEventBytes
 	}
 	if requestFormat != provider.Format {
-		err = adapter.StreamConvertResponse(idleReader, tracker, provider.Format, requestFormat)
+		err = adapter.StreamConvertResponse(idleReader, tracker, provider.Format, requestFormat, meter)
 	} else {
+		tracker.usage = meter
+		tracker.hideUsage = injectedUsage
 		_, err = io.Copy(tracker, idleReader)
 	}
 

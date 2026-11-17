@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"ai-proxy/internal/stream"
 )
 
 // convertResponsesRequestToOpenAI adapts the OpenAI Responses request shape
@@ -391,9 +393,9 @@ type responsesStreamFunction struct {
 	started     bool
 }
 
-func convertOpenAISSEToResponses(src io.Reader, dst io.Writer) error {
+func convertOpenAISSEToResponses(src io.Reader, dst io.Writer, meters ...*stream.UsageMeter) error {
 	state := &responsesStreamState{functionCalls: make(map[int]*responsesStreamFunction)}
-	scanner := newEventScanner(src, "openai")
+	scanner := newEventScanner(src, "openai", meters...)
 	ew, _ := dst.(*errorTrackingWriter)
 	for scanner.Scan() {
 		if ew != nil && ew.err != nil {

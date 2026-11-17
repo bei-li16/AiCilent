@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"io"
+	"time"
 
 	"ai-proxy/internal/stream"
 )
@@ -14,10 +15,15 @@ type eventScanner struct {
 	event   stream.Event
 	err     error
 	done    bool
+	usage   *stream.UsageMeter
 }
 
-func newEventScanner(src io.Reader, format string) *eventScanner {
-	return &eventScanner{decoder: stream.NewDecoder(src), state: stream.State{Format: format}}
+func newEventScanner(src io.Reader, format string, meters ...*stream.UsageMeter) *eventScanner {
+	scanner := &eventScanner{decoder: stream.NewDecoder(src), state: stream.State{Format: format}}
+	if len(meters) > 0 {
+		scanner.usage = meters[0]
+	}
+	return scanner
 }
 
 func (s *eventScanner) Scan() bool {
@@ -40,6 +46,9 @@ func (s *eventScanner) Scan() bool {
 		if err := s.state.Observe(e); err != nil {
 			s.err, s.done = err, true
 			return false
+		}
+		if s.usage != nil {
+			s.usage.ObserveEvent(e, s.state.Format, time.Now())
 		}
 		s.event = e
 		s.done = s.state.Terminated

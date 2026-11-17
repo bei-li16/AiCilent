@@ -8,6 +8,11 @@
   const LOG_LIMIT = 1000;
   const LOG_VIEW_LIMIT = 200;
   const PAGE_SIZE = 15;
+  const RATE_WINDOW_DEFAULT = 50;
+  function normalizeRateWindow(value) {
+    const n = Number(value);
+    return Number.isInteger(n) && n >= 20 && n <= 100 && n % 10 === 0 ? n : RATE_WINDOW_DEFAULT;
+  }
   const number = value => Number.isFinite(Number(value)) ? Math.max(0, Number(value)) : 0;
   const count = value => Math.floor(number(value));
   const ratio = (success, failed) => number(success) + number(failed) > 0 ? number(success) / (number(success) + number(failed)) * 100 : null;
@@ -51,25 +56,34 @@
     return (series?.points || []).filter((v, i) => Number.isFinite(v) && v >= 0 &&
       (!requestWindow || (series.requests?.[i] >= minSeq && series.requests[i] <= requestSeq))).slice(-240);
   }
-  function rateTrendPoints(series, requestSeq, requestWindow) {
+  function rateTrendSeries(series, requestSeq, requestWindow, windowSize) {
     if (!Array.isArray(series?.successes)) {
-      return trendPoints(series, requestSeq, requestWindow).map(value => Math.min(100, value));
+      return { points: trendPoints(series, requestSeq, requestWindow).map(value => Math.min(100, value)), sampleCounts: [], precomputed: true };
     }
+    windowSize = normalizeRateWindow(windowSize);
     const minSeq = Math.max(1, requestSeq - requestWindow + 1);
-    const outcomes = series.successes.filter((_, i) =>
-      !requestWindow || (series.requests?.[i] >= minSeq && series.requests[i] <= requestSeq)).slice(-240);
+    const history = Array.isArray(series.history) ? series.history.slice(-(windowSize - 1)) : [];
+    const outcomes = history.concat(series.successes), points = [], sampleCounts = [];
     let successes = 0;
-    return outcomes.map((success, i) => {
-      successes += Number(success);
-      return successes * 100 / (i + 1);
-    });
+    // Compute before cropping: changing the view must not restart a window.
+    for (let i = 0; i < outcomes.length; i++) {
+      successes += Number(outcomes[i]);
+      if (i >= windowSize) successes -= Number(outcomes[i - windowSize]);
+      const index = i - history.length;
+      if (index < 0 || (requestWindow && !(series.requests?.[index] >= minSeq && series.requests[index] <= requestSeq))) continue;
+      const count = Math.min(windowSize, i + 1);
+      points.push(successes * 100 / count);
+      sampleCounts.push(count);
+    }
+    return { points: points.slice(-240), sampleCounts: sampleCounts.slice(-240) };
   }
-  function chartSeries(data, kind, requestWindow = 0) {
+  function chartSeries(data, kind, requestWindow = 0, rateWindow = RATE_WINDOW_DEFAULT) {
     const source = kind === 'rate' ? data.curves : Array.isArray(data.latency_curves) ? data.latency_curves : [{ priority: 0, points: data.latency_curve }];
     const byPriority = new Map((source || []).filter(c => c && Array.isArray(c.points)).map(c => [Number(c.priority), c]));
     return [0, ...activePriorities(data)].map(priority => ({ priority, label: priority === 0 ? '汇总' : 'P' + priority,
-      color: priorityColor(priority), points: (kind === 'rate' ? rateTrendPoints : trendPoints)
-        (byPriority.get(priority), data.trend_request_seq, requestWindow) }));
+      color: priorityColor(priority), ...(kind === 'rate' ?
+        rateTrendSeries(byPriority.get(priority), data.trend_request_seq, requestWindow, rateWindow) :
+        { points: trendPoints(byPriority.get(priority), data.trend_request_seq, requestWindow) }) }));
   }
   function modelLatencySeries(data, requestWindow = 0) {
     const models = Array.isArray(data.model_latency_curves) ? data.model_latency_curves : [];
@@ -150,17 +164,33 @@
       (!filter.priority || Number(p.priority) === Number(filter.priority)) &&
       (!filter.model || p.model_id === filter.model) && (!filter.result || providerOutcome(p).key === filter.result) && providerMatchesView(p, view));
   }
-  function sortProviders(providers, sort) {
-    const nameOrder = (a, b) => String(a.name).localeCompare(String(b.name), 'zh-CN', { numeric: true });
+  const providerTextOrder = new Intl.Collator('zh-CN', { numeric: true });
+  const providerSortValue = {
+    model: p => p.model_id || null,
+    name: p => p.name || null,
+    priority: p => number(p.priority),
+    recent: p => timestamp(p.last_activity) || null,
+    total: p => count(p.total),
+    success: p => count(p.success),
+    fail: p => count(p.fail),
+    canceled: p => count(p.client_abort),
+    streak: providerStreak,
+    rate: p => ratio(p.success, p.fail),
+    latency: p => number(p.latency_count) > 0 && Number.isFinite(p.latency_avg_ms) ? p.latency_avg_ms : null
+  };
+  function providerSortDirection(sort) {
+    return ['model', 'name', 'priority', 'rate'].includes(sort) ? 'asc' : 'desc';
+  }
+  function sortProviders(providers, sort = 'model', direction = providerSortDirection(sort)) {
+    const value = providerSortValue[sort] || providerSortValue.model;
+    const compare = (a, b) => {
+      if (a == null || b == null) return (a == null) - (b == null);
+      const order = typeof a === 'string' ? providerTextOrder.compare(a, b) : a - b;
+      return direction === 'desc' ? -order : order;
+    };
     return providers.slice().sort((a, b) => {
-      let delta = 0;
-      if (sort === 'streak') delta = (providerStreak(b) ?? -1) - (providerStreak(a) ?? -1);
-      else if (sort === 'latency') delta = number(b.latency_avg_ms) - number(a.latency_avg_ms);
-      else if (sort === 'fail') delta = number(b.fail) - number(a.fail);
-      else if (sort === 'rate') delta = (ratio(a.success, a.fail) ?? Infinity) - (ratio(b.success, b.fail) ?? Infinity);
-      else if (sort === 'recent') delta = timestamp(b.last_activity) - timestamp(a.last_activity);
-      else if (sort !== 'name') delta = number(a.priority) - number(b.priority);
-      return (Number.isFinite(delta) ? delta : (delta === Infinity ? 1 : delta === -Infinity ? -1 : 0)) || nameOrder(a, b);
+      return compare(value(a), value(b)) || providerTextOrder.compare(a.name, b.name) ||
+        providerTextOrder.compare(a.model_id || '', b.model_id || '') || number(a.priority) - number(b.priority);
     });
   }
   function groupRequests(attempts, timings = []) {
@@ -381,7 +411,7 @@
     if (!Array.isArray(normalized.providers) || !Array.isArray(normalized.recent_attempts) || !Array.isArray(normalized.curves) || !Array.isArray(normalized.latency_curve)) throw new Error('统计样本字段缺失');
     return normalized;
   }
-  return { ATTEMPT_LIMIT, LOG_LIMIT, LOG_VIEW_LIMIT, PAGE_SIZE, number, count, ratio, formatCount, formatRate,
+  return { ATTEMPT_LIMIT, LOG_LIMIT, LOG_VIEW_LIMIT, PAGE_SIZE, RATE_WINDOW_DEFAULT, normalizeRateWindow, number, count, ratio, formatCount, formatRate,
     formatDuration, formatLogDuration, formatUptime, timestamp, priorityColor, activePriorities, chartSeries, modelLatencySeries, chartSelection, rateAxis, mean, quantile, latencySummary, attemptOutcome, providerOutcome, providerLabel,
-    providerStreak, providerMatchesView, filterProviders, sortProviders, groupRequests, filterRequests, parseLog, logProviderIndex, logPriorityIndex, filterLogs, LogBuffer, validateSnapshot };
+    providerStreak, providerMatchesView, filterProviders, sortProviders, providerSortDirection, groupRequests, filterRequests, parseLog, logProviderIndex, logPriorityIndex, filterLogs, LogBuffer, validateSnapshot };
 });

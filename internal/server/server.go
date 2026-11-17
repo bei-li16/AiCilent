@@ -148,6 +148,7 @@ func New(cfg *config.Config, configPath string) *Instance {
 	r.GET("/style.css", serveWeb("web/style.css", "text/css; charset=utf-8"))
 	r.GET("/app.js", serveWeb("web/app.js", "application/javascript; charset=utf-8"))
 	r.GET("/dashboard-core.js", serveWeb("web/dashboard-core.js", "application/javascript; charset=utf-8"))
+	r.GET("/token-usage.js", serveWeb("web/token-usage.js", "application/javascript; charset=utf-8"))
 	r.GET("/api/version", func(c *gin.Context) {
 		c.Header("Cache-Control", "no-store")
 		c.JSON(http.StatusOK, gin.H{
@@ -158,6 +159,10 @@ func New(cfg *config.Config, configPath string) *Instance {
 	})
 
 	r.GET("/api/stats", serveStats(statsCollector, engine))
+	r.GET("/api/usage", func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
+		c.JSON(http.StatusOK, statsCollector.TokenUsageSnapshot(time.Now()))
+	})
 
 	r.GET("/api/logs", func(c *gin.Context) {
 		sseHub.ServeHTTP(c.Writer, c.Request)
@@ -172,6 +177,18 @@ func New(cfg *config.Config, configPath string) *Instance {
 		}
 		statsCollector.Reset()
 		c.JSON(200, gin.H{"reset": true})
+	})
+
+	r.POST("/api/usage/reset", func(c *gin.Context) {
+		if !cfg.Global.ControlAllowRemote && !isLoopback(c.Request.RemoteAddr) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "token usage reset denied: loopback only"})
+			return
+		}
+		if err := statsCollector.ResetTokenUsage(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not save cleared token usage"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"reset": true})
 	})
 
 	r.POST("/api/logs/clear", func(c *gin.Context) {

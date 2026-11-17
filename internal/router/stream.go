@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"ai-proxy/internal/stream"
 )
@@ -21,9 +22,11 @@ func (e *downstreamWriteError) Unwrap() error { return e.err }
 // terminalWriter forwards complete events, then records what was successfully
 // written. Neither a partial data line nor a failed write establishes completion.
 type terminalWriter struct {
-	inner    io.Writer
-	framer   stream.Framer
-	progress stream.State
+	inner     io.Writer
+	framer    stream.Framer
+	progress  stream.State
+	usage     *stream.UsageMeter
+	hideUsage bool
 }
 
 func newTerminalWriter(inner io.Writer, format ...string) *terminalWriter {
@@ -52,6 +55,13 @@ func (w *terminalWriter) forwardEvents(final bool) error {
 		next := w.progress.Clone()
 		if err := next.Observe(event); err != nil {
 			return err
+		}
+		if w.usage != nil {
+			w.usage.ObserveEvent(event, next.Format, time.Now())
+		}
+		if w.hideUsage && stream.IsUsageOnly(event) {
+			w.progress = next
+			continue
 		}
 		n, err := w.inner.Write(event.Raw)
 		if err == nil && n != len(event.Raw) {

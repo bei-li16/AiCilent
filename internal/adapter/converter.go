@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"ai-proxy/internal/stream"
 )
 
 func mapStopReason(reason string) string {
@@ -441,7 +443,7 @@ func (r *errShortCircuitReader) Read(p []byte) (int, error) {
 	return r.r.Read(p)
 }
 
-func StreamConvertResponse(src io.Reader, dst io.Writer, fromFormat, toFormat string) error {
+func StreamConvertResponse(src io.Reader, dst io.Writer, fromFormat, toFormat string, meters ...*stream.UsageMeter) error {
 	if fromFormat == toFormat {
 		_, err := io.Copy(dst, src)
 		return err
@@ -449,14 +451,14 @@ func StreamConvertResponse(src io.Reader, dst io.Writer, fromFormat, toFormat st
 	ew := &errorTrackingWriter{w: dst}
 	sr := &errShortCircuitReader{r: src, err: &ew.err}
 	if fromFormat == "openai" && toFormat == "responses" {
-		return convertOpenAISSEToResponses(sr, ew)
+		return convertOpenAISSEToResponses(sr, ew, meters...)
 	}
 
 	if fromFormat == "anthropic" && toFormat == "openai" {
-		return convertAnthropicSSEToOpenAI(sr, ew)
+		return convertAnthropicSSEToOpenAI(sr, ew, meters...)
 	}
 	if fromFormat == "openai" && toFormat == "anthropic" {
-		return convertOpenAISSETOAnthropic(sr, ew)
+		return convertOpenAISSETOAnthropic(sr, ew, meters...)
 	}
 
 	return fmt.Errorf("unsupported stream conversion: %s -> %s", fromFormat, toFormat)
@@ -471,8 +473,8 @@ type blockTracker struct {
 	typ   string // "text", "tool_use", "thinking"
 }
 
-func convertAnthropicSSEToOpenAI(src io.Reader, dst io.Writer) error {
-	scanner := newEventScanner(src, "anthropic")
+func convertAnthropicSSEToOpenAI(src io.Reader, dst io.Writer, meters ...*stream.UsageMeter) error {
+	scanner := newEventScanner(src, "anthropic", meters...)
 
 	ew, _ := dst.(*errorTrackingWriter)
 
@@ -701,8 +703,8 @@ func convertAnthropicSSEToOpenAI(src io.Reader, dst io.Writer) error {
 //  OpenAI SSE → Anthropic SSE
 // ─────────────────────────────────────────────────────────────
 
-func convertOpenAISSETOAnthropic(src io.Reader, dst io.Writer) error {
-	scanner := newEventScanner(src, "openai")
+func convertOpenAISSETOAnthropic(src io.Reader, dst io.Writer, meters ...*stream.UsageMeter) error {
+	scanner := newEventScanner(src, "openai", meters...)
 
 	ew, _ := dst.(*errorTrackingWriter)
 

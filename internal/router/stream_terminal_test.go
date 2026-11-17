@@ -17,10 +17,34 @@ import (
 	"ai-proxy/internal/config"
 	"ai-proxy/internal/middleware"
 	"ai-proxy/internal/stats"
+	"ai-proxy/internal/stream"
 	"ai-proxy/internal/tracer"
 
 	"github.com/gin-gonic/gin"
 )
+
+func TestKimiUsageOptionPreservesTheClientStream(t *testing.T) {
+	provider := &config.Provider{ModelID: "kimi-k3", BaseURL: "https://token.sensenova.cn/v1", Format: "openai"}
+	body, added := requestStreamUsage([]byte(`{"stream":true,"stream_options":{"other":true}}`), provider)
+	if !added || !strings.Contains(string(body), `"include_usage":true`) || !strings.Contains(string(body), `"other":true`) {
+		t.Fatalf("did not request usage without losing options: %s", body)
+	}
+	explicit := `{"stream":true,"stream_options":{"include_usage":false}}`
+	if unchanged, added := requestStreamUsage([]byte(explicit), provider); added || string(unchanged) != explicit {
+		t.Fatalf("explicit client choice changed: %s", unchanged)
+	}
+	var downstream bytes.Buffer
+	tracker := newTerminalWriter(&downstream, "openai")
+	tracker.usage = new(stream.UsageMeter)
+	tracker.hideUsage = true
+	finish := "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n"
+	usage := "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n"
+	_, err := io.WriteString(tracker, finish+usage+"data: [DONE]\n\n")
+	counts, ok := tracker.usage.Counts("openai")
+	if !errors.Is(err, errStreamTerminal) || downstream.String() != finish+"data: [DONE]\n\n" || !ok || counts.Input != 7 || counts.Output != 2 {
+		t.Fatalf("usage must be counted without adding an event downstream: %q %+v %v", downstream.String(), counts, err)
+	}
+}
 
 func TestTerminalWriterClassifiesStreams(t *testing.T) {
 	tests := []struct {

@@ -56,6 +56,22 @@ test('providers filter by recent state and sort numerically with no-sample rates
   assert.equal(C.filterProviders(ps,{priority:'2',result:'limited'}).length,1);
   assert.equal(C.providerOutcome({total:10,fail:10,last_err_type:''}).label,'有历史记录');
 });
+test('provider order defaults to model ID and keeps missing measurements last in both directions', () => {
+  const providers = [
+    { name: 'account1', model_id: 'model-10', total: 8, success: 8, last_activity: '2026-11-17T10:00:00Z', latency_count: 8, latency_avg_ms: 120 },
+    { name: 'account10', model_id: 'model-2', total: 0, last_activity: '0001-01-01T00:00:00Z' },
+    { name: 'account2', model_id: 'model-2', total: 2, fail: 1, client_abort: 1, last_activity: '2026-11-17T08:00:00Z', latency_count: 2, latency_avg_ms: 30 }
+  ];
+  const order = (...args) => C.sortProviders(providers, ...args).map(p => p.name);
+  assert.deepEqual(order(), ['account2', 'account10', 'account1']);
+  assert.deepEqual(order('model', 'desc'), ['account1', 'account2', 'account10']);
+  for (const field of ['recent', 'rate', 'latency']) {
+    assert.deepEqual(order(field, 'asc'), ['account2', 'account1', 'account10']);
+    assert.deepEqual(order(field, 'desc'), ['account1', 'account2', 'account10']);
+  }
+  assert.equal(order('canceled', 'desc')[0], 'account2');
+  assert.equal(order('total', 'asc')[0], 'account10');
+});
 test('partial request groups preserve full IDs and do not infer final failure', () => {
   const id='0123456789abcdef0123456789abcdef';
   const rows=[{request_id:id,provider:'a',outcome:'failed',status_code:429,latency_ms:20,timestamp:'2026-11-06T01:00:01Z'}, {request_id:id,provider:'b',success:true,latency_ms:30,timestamp:'2026-11-06T01:00:02Z'}, {request_id:'unknown',status_code:500,latency_ms:10,timestamp:'2026-11-06T01:00:03Z'}];
@@ -345,7 +361,7 @@ test('latency statistics combine selected priorities without counting the overal
   assert.deepEqual(C.latencySummary([curve(3, [])]), { count: 0, p50: null, p95: null, color: C.priorityColor(3) });
 });
 
-test('all ranges accumulate success rates across every retained eligible attempt in the range', () => {
+test('success-rate view ranges crop rolling values without restarting their calculation', () => {
   const requests = [10, 80, 81, 120, 30, 120];
   const successes = [true, false, true, false, true, true];
   const points = [100, 50, 200 / 3, 50, 60, 200 / 3];
@@ -354,15 +370,61 @@ test('all ranges accumulate success rates across every retained eligible attempt
     { priority: 1, requests: [10, 80, 120], points: [100, 50, 100 / 3], successes: [true, false, false] }
   ] };
   assert.deepEqual(C.chartSeries(data, 'rate')[0].points, points);
-  assert.deepEqual(C.chartSeries(data, 'rate', 50).map(c => c.points), [[0, 50, 100 / 3, 50], [0, 0]]);
-  assert.deepEqual(C.chartSeries(data, 'rate', 100)[0].points, [0, 50, 100 / 3, 50, 60]);
+  assert.deepEqual(C.chartSeries(data, 'rate', 50).map(c => c.points), [[50, 200 / 3, 50, 200 / 3], [50, 100 / 3]]);
+  assert.deepEqual(C.chartSeries(data, 'rate', 100)[0].points, [50, 200 / 3, 50, 60, 200 / 3]);
+  assert.deepEqual(C.chartSeries(data, 'rate', 50)[0].sampleCounts, [2, 3, 4, 6]);
 
   const long = { trend_request_seq: 120, curves: [{ priority: 0, requests: Array(51).fill(120),
     successes: [true, ...Array(50).fill(false)], points: Array(51).fill(0) }] };
   for (const range of [0, 50, 100]) {
-    assert.deepEqual(C.chartSeries(long, 'rate', range)[0].points.slice(-2), [2, 100 / 51]);
+    assert.deepEqual(C.chartSeries(long, 'rate', range)[0].points.slice(-2), [2, 0]);
   }
   const capped = { curves: [{ priority: 0, points: [],
     successes: [true, ...Array(240).fill(false)] }] };
-  assert.deepEqual(C.chartSeries(capped, 'rate')[0].points, Array(240).fill(0));
+  const retained = C.chartSeries(capped, 'rate')[0].points;
+  assert.equal(retained.length, 240);
+  assert.equal(retained[0], 50);
+  assert.equal(retained[48], 2);
+  assert.deepEqual(retained.slice(49), Array(191).fill(0));
+});
+
+test('success-rate window accepts only 20 through 100 in steps of ten and defaults to 50', () => {
+  assert.equal(C.RATE_WINDOW_DEFAULT, 50);
+  for (let n = 20; n <= 100; n += 10) {
+    assert.equal(C.normalizeRateWindow(n), n);
+    assert.equal(C.normalizeRateWindow(String(n)), n);
+  }
+  for (const value of [undefined, null, '', 'invalid', NaN, Infinity, 0, 10, 19, 21, 55, 110, 50.5]) {
+    assert.equal(C.normalizeRateWindow(value), 50);
+  }
+});
+
+test('rolling windows use prehistory and remain independent for each priority', () => {
+  const data = { trend_request_seq: 300, configured_priorities: [1, 2], curves: [
+    { priority: 0, points: Array(240).fill(0), history: Array(99).fill(true), successes: Array(240).fill(false), requests: Array(240).fill(300) },
+    { priority: 1, points: Array(240).fill(0), history: Array(99).fill(false), successes: Array(240).fill(true), requests: Array(240).fill(300) },
+    { priority: 2, points: [100, 50], successes: [true, false], requests: [299, 300] }
+  ] };
+  const before = JSON.stringify(data);
+  for (let window = 20; window <= 100; window += 10) {
+    for (const range of [0, 50, 100]) {
+      const [overall, p1, p2] = C.chartSeries(data, 'rate', range, window);
+      assert.equal(overall.points.length, 240);
+      assert.equal(overall.points[0], (window - 1) * 100 / window);
+      assert.equal(p1.points[0], 100 / window);
+      assert.equal(overall.points.at(-1), 0);
+      assert.equal(p1.points.at(-1), 100);
+      assert.deepEqual(p2.points, [100, 50]);
+      assert.deepEqual(p2.sampleCounts, [1, 2]);
+      assert.equal(overall.sampleCounts[0], window);
+    }
+  }
+  assert.equal(JSON.stringify(data), before);
+});
+
+test('empty and legacy success-rate snapshots remain usable', () => {
+  assert.deepEqual(C.chartSeries({ curves: [] }, 'rate')[0].points, []);
+  const curve = C.chartSeries({ curves: [{ priority: 0, points: [20, 40] }] }, 'rate', 0, 100)[0];
+  assert.deepEqual(curve.points, [20, 40]);
+  assert.equal(curve.precomputed, true);
 });
