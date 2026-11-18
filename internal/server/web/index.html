@@ -114,27 +114,25 @@
           <section class="usage-overview" aria-labelledby="usageOverviewTitle">
             <div class="usage-heading"><h3 id="usageOverviewTitle">总览</h3><p id="usageCoverage" role="status">正在读取用量…</p></div>
             <dl class="usage-metrics">
-              <div><dt>总 Token</dt><dd id="usageTotal">—</dd></div>
-              <div><dt>今日消耗</dt><dd id="usageToday">—</dd></div>
-              <div><dt>已计量请求</dt><dd id="usageRequests">—</dd></div>
-              <div><dt>缓存命中率</dt><dd id="usageCache" data-tooltip="只在上游报告缓存明细的请求中计算：缓存读命中的输入 Token ÷ 该批请求的输入 Token。">—</dd></div>
-              <div><dt>平均首 Token</dt><dd id="usageFirst" data-tooltip="流式尝试开始到收到首个文本、思考或工具输出片段的平均时间。">—</dd></div>
-              <div><dt>解码速度</dt><dd id="usageDecode" data-tooltip="按上游报告的输出 Token 与可测流式输出阶段的用时合计计算。">—</dd></div>
-              <div><dt>连续活跃</dt><dd id="usageStreak">—</dd></div>
-              <div><dt>峰值日</dt><dd id="usagePeak">—</dd></div>
+              <div><dt><span class="usage-metric-icon" style="--metric-tone:#975bf1" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8c0-2.2 3.6-4 8-4s8 1.8 8 4-3.6 4-8 4-8-1.8-8-4Zm0 0v8c0 2.2 3.6 4 8 4s8-1.8 8-4V8"/></svg></span>总 Token</dt><dd id="usageTotal">—</dd></div>
+              <div><dt><span class="usage-metric-icon" style="--metric-tone:#0d8a8a" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3v4M17 3v4M4 9h16M6 5h12a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z"/></svg></span>今日消耗</dt><dd id="usageToday">—</dd></div>
+              <div><dt><span class="usage-metric-icon" style="--metric-tone:#4d6bfe" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/></svg></span>已计量请求</dt><dd id="usageRequests">—</dd></div>
+              <div><dt><span class="usage-metric-icon" style="--metric-tone:#00b96b" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z"/></svg></span>缓存命中率</dt><dd id="usageCache" data-tooltip="只在上游报告缓存明细的请求中计算：缓存读命中的输入 Token ÷ 该批请求的输入 Token。">—</dd></div>
+              <div><dt><span class="usage-metric-icon" style="--metric-tone:#d34591" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21a9 9 0 1 1 0-18 9 9 0 0 1 0 18ZM12 7v5l3 2"/></svg></span>平均首 Token</dt><dd id="usageFirst" data-tooltip="流式尝试开始到收到首个文本、思考或工具输出片段的平均时间。">—</dd></div>
+              <div><dt><span class="usage-metric-icon" style="--metric-tone:#e07b39" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h7l-1 8 9-12h-7l1-8Z"/></svg></span>解码速度</dt><dd id="usageDecode" data-tooltip="按上游报告的输出 Token 与可测流式输出阶段的用时合计计算。">—</dd></div>
+              <div><dt><span class="usage-metric-icon" style="--metric-tone:#e5646e" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22a7 7 0 0 0 7-7c0-2-1-3.9-2.5-5.5C15 8 13.5 6.5 13 3c-3 2-6 5.5-6 9a7 7 0 0 0 7 10Z"/></svg></span>连续活跃</dt><dd id="usageStreak">—</dd></div>
+              <div><dt><span class="usage-metric-icon" style="--metric-tone:#4d6bfe" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 20v-6M11 20V6M17 20v-9M3 20h18"/></svg></span>峰值日</dt><dd id="usagePeak">—</dd></div>
             </dl>
           </section>
           <section class="usage-card usage-activity" aria-labelledby="usageActivityTitle">
             <div class="usage-heading"><h3 id="usageActivityTitle">近一年活跃度</h3>
-              <div id="usageActivityModes" class="usage-segments" role="group" aria-label="活跃度视图">
-                <button type="button" data-mode="day" aria-pressed="true">每日</button><button type="button" data-mode="week" aria-pressed="false">每周</button><button type="button" data-mode="cumulative" aria-pressed="false">累计</button>
-              </div>
+              <div class="usage-heat-legend" aria-hidden="true"><span>少</span><i data-level="0"></i><i data-level="1"></i><i data-level="2"></i><i data-level="3"></i><i data-level="4"></i><span>多</span></div>
             </div>
             <div id="usageActivity" class="usage-activity-body"></div>
           </section>
           <div class="usage-charts">
             <section class="usage-card usage-share" aria-labelledby="usageShareTitle">
-              <div class="usage-heading"><h3 id="usageShareTitle">模型占比（今天）</h3></div>
+              <div class="usage-heading"><h3 id="usageShareTitle">模型占比（<span id="usageShareRange">今天</span>）</h3></div>
               <div id="usageShare"></div>
             </section>
             <section class="usage-card usage-trend" aria-labelledby="usageTrendTitle">

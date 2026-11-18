@@ -54,14 +54,34 @@
       if (typeof message === 'string') {
         hoverTip.textContent = message;
       } else {
-        hoverTip.replaceChildren(...message.flatMap(({ text, color, swatch, emphasis }, index) => {
-          const line = node(emphasis ? 'strong' : 'span', '', text);
-          if (color) line.style.color = color;
-          if (swatch) {
-            const marker = node('span', 'tooltip-swatch');
-            marker.style.backgroundColor = swatch;
-            marker.setAttribute('aria-hidden', 'true');
-            line.prepend(marker);
+        hoverTip.replaceChildren(...message.flatMap((row, index) => {
+          let line;
+          if (row.text === undefined) {
+            // Structured detail rows: {name, value?, swatch?} render as a
+            // two-column line (name left, value right); {note} is a small
+            // full-width remark line. Legacy {text,...} rows are untouched.
+            if (row.name === undefined) {
+              line = node('span', 'tooltip-note', row.note);
+            } else {
+              line = node('span', 'tooltip-row');
+              if (row.swatch) {
+                const marker = node('span', 'tooltip-swatch');
+                marker.style.backgroundColor = row.swatch;
+                marker.setAttribute('aria-hidden', 'true');
+                line.append(marker);
+              }
+              line.append(node('span', 'tooltip-row-name', row.name));
+              if (row.value !== undefined) line.append(document.createTextNode(' '), node('span', 'tooltip-row-value', row.value));
+            }
+          } else {
+            line = node(row.emphasis ? 'strong' : 'span', '', row.text);
+            if (row.color) line.style.color = row.color;
+            if (row.swatch) {
+              const marker = node('span', 'tooltip-swatch');
+              marker.style.backgroundColor = row.swatch;
+              marker.setAttribute('aria-hidden', 'true');
+              line.prepend(marker);
+            }
           }
           return index ? ['\n', line] : [line];
         }));

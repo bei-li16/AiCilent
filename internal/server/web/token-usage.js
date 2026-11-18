@@ -9,7 +9,7 @@
   const iso = date => date.toISOString().slice(0, 10);
   const calendar = day => new Date(day + 'T00:00:00Z');
   const activityWeeks = 52;
-  let data, signature, controller, lastPoll = 0, range = 1, activityMode = 'day';
+  let data, signature, controller, lastPoll = 0, range = 1;
   let trendChart;
   const hiddenModels = new Set();
   const usageTooltips = new WeakMap();
@@ -49,6 +49,21 @@
     return 'hsl(' + (hash % 360) + ' 68% 68%)';
   }
 
+  // Pure path builder for the cache-hit overlay (unit-tested in webtest):
+  // null buckets are skipped so the dashed line stays continuous; a single
+  // known bucket yields only a moveto, which paints nothing, so the caller
+  // draws that lone point as a dot instead.
+  function cacheHitPath(hits, x, y) {
+    let d = '', known = 0, last = null;
+    hits.forEach((hit, i) => {
+      if (hit === null || hit === undefined || !Number.isFinite(hit)) return;
+      d += (d ? 'L' : 'M') + x(i) + ',' + y(hit);
+      known += 1;
+      last = { cx: x(i), cy: y(hit) };
+    });
+    return { d, dot: known === 1 ? last : null };
+  }
+
   function drawOverview() {
     const total = data.total;
     const days = windowDays(data.today, 365);
@@ -58,17 +73,62 @@
     let streak = 0;
     while (trailing >= 0 && dayTokens[trailing] > 0) { streak++; trailing--; }
     const peak = Math.max(0, ...dayTokens);
+    const todayBucket = combine(data.days[data.today]);
+    const todayRequests = Object.values(data.days[data.today] || {}).reduce((sum, value) => sum + (value.requests || 0), 0);
+    const eligible = total.cache_eligible_tokens || 0;
+    const cached = total.cached_input_tokens || 0;
+    const firstCount = total.first_count || 0;
+    const decodeMs = total.decode_ms || 0;
+    const decodeTokens = total.decode_tokens || 0;
     set('usageTotal', compact.format(tokens(total)));
-    $('usageTotal').dataset.tooltip = count.format(total.input_tokens || 0) + ' 输入 · ' + count.format(total.output_tokens || 0) + ' 输出';
+    setUsageTooltip($('usageTotal'), [
+      { name: '输入', value: count.format(total.input_tokens || 0) + ' Token', swatch: '#4d6bfe' },
+      { name: '输出', value: count.format(total.output_tokens || 0) + ' Token', swatch: '#0d8a8a' },
+      { name: '缓存命中输入', value: count.format(cached) + ' Token' },
+      { name: '命中率计算基数', value: count.format(eligible) + ' Token' }
+    ]);
     set('usageToday', compact.format(dayTokens.at(-1)));
+    setUsageTooltip($('usageToday'), [
+      { name: '今日 Token', value: count.format(tokens(todayBucket)) },
+      { name: '今日请求数', value: count.format(todayRequests) + ' 次' }
+    ]);
     set('usageRequests', count.format(total.requests || 0));
-    set('usageCache', total.cache_eligible_tokens ? C.formatRate(100 * total.cached_input_tokens / total.cache_eligible_tokens) : '—');
-    set('usageFirst', total.first_count ? C.formatDuration((total.first_ms || 0) / total.first_count) : '—');
-    set('usageDecode', total.decode_ms ? (total.decode_tokens * 1000 / total.decode_ms).toFixed(1) + ' t/s' : '—');
+    setUsageTooltip($('usageRequests'), [{ name: '总请求数', value: count.format(total.requests || 0) + ' 次' }]);
+    set('usageCache', eligible ? C.formatRate(100 * cached / eligible) : '—');
+    setUsageTooltip($('usageCache'), [
+      { name: '命中率', value: eligible ? C.formatRate(100 * cached / eligible) : '—' },
+      { name: '缓存命中输入', value: count.format(cached) + ' Token' },
+      { name: '计算基数', value: count.format(eligible) + ' Token' },
+      { note: '只在上游报告缓存明细的请求中计算：缓存读命中的输入 Token ÷ 该批请求的输入 Token。' }
+    ]);
+    set('usageFirst', firstCount ? C.formatDuration((total.first_ms || 0) / firstCount) : '—');
+    setUsageTooltip($('usageFirst'), [
+      { name: '平均耗时', value: firstCount ? C.formatDuration((total.first_ms || 0) / firstCount) : '—' },
+      { name: '样本数', value: count.format(firstCount) + ' 次' },
+      { note: '流式尝试开始到收到首个文本、思考或工具输出片段的平均时间。' }
+    ]);
+    set('usageDecode', decodeMs ? (decodeTokens * 1000 / decodeMs).toFixed(1) + ' t/s' : '—');
+    setUsageTooltip($('usageDecode'), [
+      { name: '解码速度', value: decodeMs ? (decodeTokens * 1000 / decodeMs).toFixed(1) + ' t/s' : '—' },
+      { name: '输出 Token', value: count.format(decodeTokens) },
+      { name: '计时用时', value: decodeMs ? C.formatDuration(decodeMs) : '—' },
+      { note: '按上游报告的输出 Token 与可测流式输出阶段的用时合计计算。' }
+    ]);
     set('usageStreak', streak + ' 天');
+    setUsageTooltip($('usageStreak'), [
+      { name: '连续活跃', value: streak + ' 天' },
+      { name: '近一年活跃', value: dayTokens.filter(value => value > 0).length + ' 天' }
+    ]);
     set('usagePeak', peak ? compact.format(peak) : '—');
-    if (peak) $('usagePeak').dataset.tooltip = days[dayTokens.lastIndexOf(peak)] + ' · ' + count.format(peak) + ' Token';
-    else delete $('usagePeak').dataset.tooltip;
+    if (peak) {
+      setUsageTooltip($('usagePeak'), [
+        { name: '日期', value: days[dayTokens.lastIndexOf(peak)] },
+        { name: 'Token', value: count.format(peak) }
+      ]);
+    } else {
+      usageTooltips.delete($('usagePeak'));
+      delete $('usagePeak').dataset.tooltip;
+    }
     set('usageCoverage', data.started_at ? '自 ' + data.started_at.slice(0, 10) + ' 开始统计 · ' + data.timezone : '等待上游报告用量 · ' + data.timezone);
   }
 
@@ -78,52 +138,34 @@
     const sunday = iso(stepDate(data.today, 6 - weekday));
     const days = windowDays(sunday, activityWeeks * 7);
     const points = days.map(day => day <= data.today ? tokens(combine(data.days[day])) : 0);
-    if (activityMode === 'day') {
-      const wrap = node('div', 'usage-heat-wrap');
-      const weekdays = node('div', 'usage-weekdays');
-      for (const label of ['周一', '周二', '周三', '周四', '周五', '周六', '周日']) weekdays.append(node('span', '', label));
-      const grid = node('div', 'usage-heat');
-      const labels = node('div', 'usage-months');
-      wrap.style.setProperty('--weeks', activityWeeks);
-      const peak = Math.max(1, ...points);
-      const showFirstMonth = days[0].slice(0, 7) === days[7].slice(0, 7);
-      for (let i = 0; i < days.length; i++) {
-        const day = days[i], value = points[i];
-        const future = day > data.today;
-        const observed = data.started_at && day >= data.started_at.slice(0, 10);
-        const cell = node('span', 'usage-heat-cell');
-        cell.dataset.level = value ? Math.min(4, Math.ceil(Math.sqrt(value / peak) * 4)) : 0;
-        cell.dataset.tooltip = day + ' · ' + (future ? '尚未到来' : observed ? count.format(value) + ' Token' : '尚未开始统计');
-        if (future) cell.classList.add('future');
-        else if (!observed) cell.classList.add('untracked');
-        if (i === 0 ? showFirstMonth : i % 7 === 0 && day.slice(0, 7) !== days[i - 7].slice(0, 7)) {
-          const month = node('span', '', Number(day.slice(5, 7)) + '月');
-          month.style.gridColumn = String(Math.floor(i / 7) + 1);
-          labels.append(month);
-        }
-        grid.append(cell);
+    const wrap = node('div', 'usage-heat-wrap');
+    const weekdays = node('div', 'usage-weekdays');
+    for (const label of ['周一', '周二', '周三', '周四', '周五', '周六', '周日']) weekdays.append(node('span', '', label));
+    const grid = node('div', 'usage-heat');
+    const labels = node('div', 'usage-months');
+    wrap.style.setProperty('--weeks', activityWeeks);
+    const peak = Math.max(1, ...points);
+    const showFirstMonth = days[0].slice(0, 7) === days[7].slice(0, 7);
+    for (let i = 0; i < days.length; i++) {
+      const day = days[i], value = points[i];
+      const future = day > data.today;
+      const observed = data.started_at && day >= data.started_at.slice(0, 10);
+      const cell = node('span', 'usage-heat-cell');
+      cell.dataset.level = value ? Math.min(4, Math.ceil(Math.sqrt(value / peak) * 4)) : 0;
+      cell.dataset.tooltip = day + ' · ' + (future ? '尚未到来' : observed ? count.format(value) + ' Token' : '尚未开始统计');
+      if (future) cell.classList.add('future');
+      else if (!observed) cell.classList.add('untracked');
+      if (i === 0 ? showFirstMonth : i % 7 === 0 && day.slice(0, 7) !== days[i - 7].slice(0, 7)) {
+        const month = node('span', '', Number(day.slice(5, 7)) + '月');
+        month.style.gridColumn = String(Math.floor(i / 7) + 1);
+        labels.append(month);
       }
-      grid.setAttribute('role', 'img');
-      grid.setAttribute('aria-label', '最近 52 个自然周的每日 Token 用量，每周从周一到周日');
-      wrap.append(weekdays, grid, labels);
-      target.replaceChildren(wrap);
-      return;
+      grid.append(cell);
     }
-    const cumulative = activityMode === 'cumulative';
-    const width = target.clientWidth;
-    if (!width) return;
-    const labels = [], values = [], toolLabels = [];
-    let sum = 0;
-    for (let i = 0; i < days.length; i += 7) {
-      const total = points.slice(i, i + 7).reduce((a, b) => a + b, 0);
-      sum += total;
-      labels.push(days[i]);
-      values.push(cumulative ? sum : total);
-      toolLabels.push(days[i] + ' 至 ' + days[i + 6]);
-    }
-    target.replaceChildren(drawPlot(labels.map(day => day.slice(5)), [{ name: cumulative ? '累计用量' : '每周用量', color: '#81c8ff', values }], {
-      width, height: 112, bars: !cumulative, toolLabels
-    }));
+    grid.setAttribute('role', 'img');
+    grid.setAttribute('aria-label', '最近 52 个自然周的每日 Token 用量，每周从周一到周日');
+    wrap.append(weekdays, grid, labels);
+    target.replaceChildren(wrap);
   }
 
   function rankModels(buckets) {
@@ -146,14 +188,18 @@
 
   function setUsageTooltip(owner, rows) {
     usageTooltips.set(owner, rows);
-    owner.dataset.tooltip = rows.map(row => row.text).join('\n');
+    owner.dataset.tooltip = rows.map(row => row.text ?? row.note ??
+      [row.name, row.value].filter(value => value !== undefined).join(' ')).join('\n');
   }
 
   function drawShare() {
     const target = $('usageShare');
-    const models = rankModels([data.days[data.today]]);
+    const buckets = range === 1 ? [data.days[data.today]] : windowDays(data.today, range).map(day => data.days[day]);
+    const models = rankModels(buckets);
+    const rangeLabel = range === 1 ? '今天' : '近 ' + range + ' 天';
+    set('usageShareRange', rangeLabel);
     const total = models.reduce((sum, [, value]) => sum + value, 0);
-    const chart = svgNode('svg', { viewBox: '0 0 160 160', role: 'img', 'aria-label': '今日模型用量占比' });
+    const chart = svgNode('svg', { viewBox: '0 0 160 160', role: 'img', 'aria-label': rangeLabel + '模型用量占比' });
     if (!total) chart.append(svgNode('circle', { cx: 80, cy: 80, r: 60, fill: 'none', 'stroke-width': 18, class: 'usage-ring-empty' }));
     const groups = models.length > 7 ? [...models.slice(0, 6), ['其他模型', models.slice(6).reduce((sum, [, n]) => sum + n, 0)]] : models;
     let start = 0;
@@ -174,7 +220,7 @@
     }
     const frame = node('div', 'usage-ring-frame');
     frame.append(chart);
-    target.replaceChildren(frame, total ? legend : node('p', 'usage-empty', '今天还没有用量记录'));
+    target.replaceChildren(frame, total ? legend : node('p', 'usage-empty', rangeLabel + '暂无用量记录'));
   }
 
   function drawTrend() {
@@ -239,14 +285,14 @@
     target.replaceChildren(drawPlot(labels, series, { width, height, hits, tooltipRows, smooth: true }));
   }
 
-  function drawPlot(labels, series, { width, height, bars = false, smooth = false, hits = [], toolLabels = labels, tooltipRows }) {
+  function drawPlot(labels, series, { width, height, smooth = false, hits = [], tooltipRows }) {
     const left = 44, right = hits.some(v => v !== null) ? 39 : 13, top = 13, bottom = 25;
     const w = width - left - right, h = height - top - bottom;
     const plot = svgNode('svg', { viewBox: '0 0 ' + width + ' ' + height, role: 'img', 'aria-label': 'Token 用量趋势' });
     const maxValue = Math.max(1, ...series.flatMap(s => s.values));
     const hasHits = hits.some(v => v !== null);
-    const delta = w / (bars ? labels.length : Math.max(1, labels.length - 1));
-    const x = i => left + (i + (bars ? .5 : 0)) * delta;
+    const delta = w / Math.max(1, labels.length - 1);
+    const x = i => left + i * delta;
     const y = (v, max = maxValue) => top + h * (1 - v / max);
     for (const fraction of h >= 300 ? [0, .25, .5, .75, 1] : [0, .5, 1]) {
       const yy = y(fraction, 1);
@@ -263,36 +309,22 @@
       plot.append(svgNode('text', { x: x(i), y: height - 5, 'text-anchor': anchor, class: 'usage-axis-label' }, label));
     });
     for (const s of series) {
-      if (bars) {
-        const barWidth = Math.max(2, w / labels.length * .72);
-        s.values.forEach((v, i) => {
-          if (v > 0) plot.append(svgNode('rect', { x: x(i) - barWidth / 2, y: y(v), width: barWidth, height: top + h - y(v), fill: s.color, rx: 1 }));
-        });
-      } else {
-        const path = s.values.map((value, i) => {
-          const xx = x(i), yy = y(value);
-          if (!i) return `M${xx},${yy}`;
-          if (!smooth) return `L${xx},${yy}`;
-          return `C${xx - delta * 2 / 3},${y(s.values[i - 1])} ${xx - delta / 3},${yy} ${xx},${yy}`;
-        }).join(' ');
-        plot.append(svgNode('path', { d: path, fill: 'none', stroke: s.color, 'stroke-width': 2.2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
-        if (s.values.length === 1) plot.append(svgNode('circle', { cx: x(0), cy: y(s.values[0]), r: 3, fill: s.color }));
-      }
+      const path = s.values.map((value, i) => {
+        const xx = x(i), yy = y(value);
+        if (!i) return `M${xx},${yy}`;
+        if (!smooth) return `L${xx},${yy}`;
+        return `C${xx - delta * 2 / 3},${y(s.values[i - 1])} ${xx - delta / 3},${yy} ${xx},${yy}`;
+      }).join(' ');
+      plot.append(svgNode('path', { d: path, fill: 'none', stroke: s.color, 'stroke-width': 2.2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+      if (s.values.length === 1) plot.append(svgNode('circle', { cx: x(0), cy: y(s.values[0]), r: 3, fill: s.color }));
     }
     if (hasHits) {
-      const parts = [];
-      let active = false;
-      hits.forEach((hit, i) => {
-        if (hit === null) { active = false; return; }
-        parts.push((active ? 'L' : 'M') + x(i) + ',' + y(hit, 100));
-        active = true;
-      });
-      plot.append(svgNode('path', { d: parts.join(' '), class: 'usage-cache-path' }));
-      hits.forEach((hit, i) => {
-        if (hit != null && hits[i - 1] == null && hits[i + 1] == null) {
-          plot.append(svgNode('circle', { cx: x(i), cy: y(hit, 100), r: 2.5, class: 'usage-cache-point' }));
-        }
-      });
+      // Null buckets (no cache-eligible input) are skipped, so the dashed
+      // overlay stays one continuous line instead of shattering into
+      // floating segments. A lone known bucket paints as a dot.
+      const { d, dot } = cacheHitPath(hits, x, v => y(v, 100));
+      plot.append(svgNode('path', { d, class: 'usage-cache-path' }));
+      if (dot) plot.append(svgNode('circle', { cx: dot.cx, cy: dot.cy, r: 2.5, class: 'usage-cache-point' }));
     }
     const sampleCount = Math.max(...series.map(s => s.values.length));
     for (let i = 0; i < sampleCount; i++) {
@@ -302,7 +334,7 @@
       if (tooltipRows) {
         overlay.dataset.usageSample = i;
         setUsageTooltip(overlay, tooltipRows[i]);
-      } else overlay.dataset.tooltip = toolLabels[i] + '\n' + series[0].name + ' · ' + count.format(series[0].values[i]) + ' Token';
+      } else overlay.dataset.tooltip = labels[i] + '\n' + series[0].name + ' · ' + count.format(series[0].values[i]) + ' Token';
       plot.append(overlay);
     }
     if (tooltipRows) {
@@ -337,12 +369,8 @@
     });
   }
 
-  bindSegments('usageActivityModes', 'mode', mode => { activityMode = mode; if (data) drawActivity(); });
-  bindSegments('usageRanges', 'range', value => { range = Number(value); if (data) drawTrend(); });
+  bindSegments('usageRanges', 'range', value => { range = Number(value); if (data) { drawTrend(); drawShare(); } });
   new ResizeObserver(paintTrend).observe($('usageTrendPlot'));
-  new ResizeObserver(() => {
-    if (data && activityMode !== 'day') drawActivity();
-  }).observe($('usageActivity'));
 
   async function refresh(force = false) {
     if (!force && (controller || document.hidden || Date.now() - lastPoll < 10000)) return;

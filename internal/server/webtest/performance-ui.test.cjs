@@ -153,10 +153,14 @@ test('dashboard handles log bursts, stable polls, priorities and responsive view
     assert.equal(await page.locator('.usage-heading h3').first().evaluate(el => getComputedStyle(el).fontSize), '15px');
     await page.locator('#paneUsage').screenshot({ path: path.join(output, 'usage-wide.png') });
     await page.setViewportSize({ width: 1440, height: 1000 });
-    await page.locator('#usageActivityModes button[data-mode="week"]').click();
-    assert.equal(await page.locator('#usageActivity svg rect[data-tooltip]').count(), 52);
-    await page.locator('#usageActivityModes button[data-mode="cumulative"]').click();
-    assert.equal(await page.locator('#usageActivity svg rect[data-tooltip]').count(), 52);
+    const legendKeys = page.locator('.usage-heat-legend i');
+    assert.equal(await legendKeys.count(), 5);
+    assert.equal(await legendKeys.nth(0).evaluate(el => getComputedStyle(el).backgroundColor), 'rgb(56, 56, 56)');
+    assert.equal(await legendKeys.nth(4).evaluate(el => getComputedStyle(el).backgroundColor), 'rgb(133, 155, 250)');
+    await page.locator('#usageTotal').hover();
+    assert.match(await tip.innerText(), /输入[\s\S]*900 Token/);
+    assert.match(await tip.innerText(), /输出[\s\S]*100 Token/);
+    assert.match(await tip.innerText(), /命中率计算基数[\s\S]*900 Token/);
     const toggles = page.locator('#usageTrend .usage-model-toggle');
     await toggles.filter({ hasText: 'kimi-k3' }).click();
     for (const days of [7, 30, 90]) {
