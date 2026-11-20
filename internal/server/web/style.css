@@ -300,6 +300,10 @@ tbody tr:nth-child(even) td{background:#14223666}tbody tr:hover td{background:#1
 .badge.route-switch { color:#ffc0e7;background:#45263f;border-color:#9e6589; }
 .badge.route-skip, .badge.retry-skip { color:#c6cedd;background:#2b3444;border-color:#4a596e; }
 .badge.client-limited { color:#f6bac6;background:#402736;border-color:#805268; }
+/* Token plan exhausted: pure red, heavier weight. Deliberately distinct from
+   .badge.failed, whose red is the softened --red (#f16e7a), so a terminal quota
+   stop cannot be mistaken for an ordinary failure. */
+.badge.quota { color:#ff2d2d;background:#3a1017;border-color:#a3283a;font-weight:700; }
 .log-model-row.reasoning-effort .log-provider-model {
   color: var(--log-priority-color);
   font-weight: 700;

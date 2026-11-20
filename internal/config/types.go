@@ -32,6 +32,12 @@ type GlobalConfig struct {
 	// RateLimitCooldown 按 provider 的 retry 配置重试耗尽后仍返回 429 时的可选冷却秒数。
 	// 默认关闭（<=0）；显式设置正数后，冷却期内后续请求跳过该 provider。
 	RateLimitCooldown int `yaml:"rate_limit_cooldown" json:"rate_limit_cooldown"`
+	// EntitlementCooldown 账号套餐额度耗尽（"token plan entitlement exhausted"）时的
+	// 停用秒数。这类 429 与普通 rps/rpm/tpm 限流共用 code "8"，只能靠报文文字区分：
+	// 它不随限流窗口滑动恢复，而是按厂商计费周期回补，所以既不该重试，也不该只停
+	// rate_limit_cooldown 那么短。未设置（0）时默认 300 秒；设为负数则关闭该特殊
+	// 处理，退回普通 429 行为。
+	EntitlementCooldown int `yaml:"entitlement_cooldown" json:"entitlement_cooldown"`
 }
 
 type RetryConfig struct {

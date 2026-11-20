@@ -2,6 +2,16 @@
 
 各版本发布信息汇总（据 git 提交历史整理），最新版本在前。
 
+## v1.0.50（2026-11-20）
+
+**套餐额度耗尽单独识别，不再当普通限流反复重试**
+
+- 新增对上游 `token plan entitlement exhausted`（账号套餐额度耗尽）的识别。它与 rps／rpm／tpm 限流共用 429 状态码和通用 `code: "8"`，只能靠报文文字区分；此前被当作普通限流处理，一次请求连打 3 次、每次约 1.5 秒才失败，实测 69 次尝试中有 43 次（62%）是注定失败的重试。
+- 命中后不再重试：立即切换到下一个账号，并按 `entitlement_cooldown` 停用该账号（默认 300 秒；0 或不写即为默认值，负数关闭该特殊处理，热加载后立即解封所有已停用账号）。停用时长显著长于 `rate_limit_cooldown`，因为套餐额度按厂商计费周期回补，不随限流窗口滑动恢复。这类 429 仍不计入熔断失败。
+- 监控面板为额度耗尽单独着色：供应商状态徽章显示正红加粗的「耗尽 429」，与黄色「最近限流」、柔红「最近失败」明确区分；统计侧新增 `plan_exhausted` 错误类型，写入 `.stats.json` 的 `last_err_type`。
+- 修复 `ClassifyError` 中 `plan_exhausted` 分支从未生效的问题：原匹配串为 `token plan limit`，而实际报文是 `token plan entitlement exhausted`。
+- 启动日志的 `[CFG]` 行新增 `entitlement_cooldown` 输出，便于确认生效值。
+
 ## v1.0.49（2026-11-18）
 
 **Token 统计页对齐 dsh_token_usage 视觉规范**

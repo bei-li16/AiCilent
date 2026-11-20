@@ -16,6 +16,10 @@ global:
                                  # 省略或 <=0 默认 3；不是整个客户端请求跨重试的总时限
   rate_limit_cooldown: 0         # <=0 关闭；同 provider 重试耗尽仍为 429 后的可选冷却秒数
                                  # 按 provider name 冷却，不是自动识别上游共享配额
+  entitlement_cooldown: 300      # 账号套餐额度耗尽（token plan entitlement exhausted）时停用秒数
+                                 # 这类 429 与 tpm/rpm 限流同为 code 8，只能靠报文文字区分
+                                 # 命中后不重试、立即换账号，且不计入断路器失败
+                                 # 省略或 0 = 默认 300；负数 = 关闭特殊处理并立即解封
 
 # 同组调度：当前并发最少 -> 最久未开始尝试 -> 稳定顺序；成功后不粘账号。
 # 账号按协议 + 上游 scheme/host/port + API Key 识别；同协议同 Key 的模型共享负载。

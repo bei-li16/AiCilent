@@ -24,6 +24,12 @@ func TestAPIErrorRetryable(t *testing.T) {
 		{name: "too early", status: 425, retryable: false},
 		{name: "unprocessable", status: 422, retryable: false},
 		{name: "client abort passthrough", status: 499, retryable: false},
+		// Token plan quota: same 429 status and general "code: 8" shape as an
+		// ordinary rate limit, but no retry can refill it.
+		{name: "entitlement exhausted", status: 429, retryable: false,
+			message: `{"error":{"message":"token plan entitlement exhausted","type":"quota_exceeded_error","code":"8"}}`},
+		{name: "other quota errors stay retryable", status: 429, retryable: true,
+			message: `{"error":{"message":"rps exhausted","type":"quota_exceeded_error","code":"8"}}`},
 	}
 
 	for _, tt := range tests {

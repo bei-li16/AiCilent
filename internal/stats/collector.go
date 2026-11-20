@@ -283,12 +283,16 @@ func ClassifyError(statusCode int, msg string) string {
 	switch {
 	case statusCode == 429:
 		switch {
+		// Checked first: an exhausted token plan is terminal, and it shares the
+		// generic `code: "8"` shape with ordinary throttling. Matching on
+		// "token plan limit" never fired because the real payload reads
+		// "token plan entitlement exhausted".
+		case strings.Contains(msg, "entitlement exhausted"), strings.Contains(msg, "token plan limit"):
+			return "plan_exhausted"
 		case strings.Contains(msg, "rpm exhausted"):
 			return "rpm_exhausted"
 		case strings.Contains(msg, "TPM limit"), strings.Contains(msg, "tpm limit"):
 			return "tpm_limit"
-		case strings.Contains(msg, "token plan limit"):
-			return "plan_exhausted"
 		}
 		return "rate_limited"
 	case statusCode == 404:

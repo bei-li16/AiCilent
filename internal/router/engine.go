@@ -59,6 +59,10 @@ type Engine struct {
 	// the configured retry budget on 429 responses. Subsequent requests skip
 	// the provider until its cooldown expires.
 	coolUntil map[string]time.Time
+	// quotaUntil holds accounts whose token plan quota is exhausted. It uses a
+	// far longer horizon than coolUntil: a rate window slides, a plan quota does
+	// not, so re-probing it on the rate-limit timescale only wastes attempts.
+	quotaUntil map[string]time.Time
 
 	accounts *accountScheduler
 
@@ -106,6 +110,7 @@ func NewEngine(cfg *config.Config, configPath string, logWriter, fileWriter io.W
 		accounts:         newAccountScheduler(cfg),
 		rateLimiters:     rl,
 		coolUntil:        make(map[string]time.Time),
+		quotaUntil:       make(map[string]time.Time),
 		transport: &http.Transport{
 			MaxIdleConns:        100,
 			MaxIdleConnsPerHost: 10,
@@ -132,9 +137,9 @@ func (e *Engine) logCBConfig() {
 	g := e.cfg.Global
 	e.reloadMu.RUnlock()
 	fmt.Fprintf(e.logWriter,
-		"[%s] [-] CB       | [CFG] | config | cb_threshold=%d cb_cooldown=%ds cb_skip_requests=%d rate_limit_cooldown=%ds\n",
+		"[%s] [-] CB       | [CFG] | config | cb_threshold=%d cb_cooldown=%ds cb_skip_requests=%d rate_limit_cooldown=%ds entitlement_cooldown=%ds\n",
 		time.Now().Format("2006-01-02 15:04:05.000"),
-		g.CBThreshold, g.CBCooldown, g.CBSkipRequests, e.rateLimitCooldownSec())
+		g.CBThreshold, g.CBCooldown, g.CBSkipRequests, e.rateLimitCooldownSec(), e.entitlementCooldownSec())
 }
 
 // StartWatcher starts a goroutine that polls the config file for changes
@@ -223,6 +228,14 @@ func (e *Engine) applyConfig(cfg *config.Config) {
 	}
 	if cfg.Global.RateLimitCooldown <= 0 {
 		clear(e.coolUntil)
+	}
+	for name, until := range e.quotaUntil {
+		if !configuredNames[name] || !time.Now().Before(until) {
+			delete(e.quotaUntil, name)
+		}
+	}
+	if cfg.Global.EntitlementCooldown < 0 {
+		clear(e.quotaUntil)
 	}
 	e.rlMu.Unlock()
 
@@ -538,6 +551,30 @@ func (e *Engine) tryGroup(c *gin.Context, body []byte, requestFormat string, str
 			lastErr = fwdErr
 			upstreamFailed = upstreamFailed || breakerFailure(fwdErr)
 
+			// An exhausted token plan recovers neither on retry nor on the next
+			// rate window: park the account for the long horizon and fail over
+			// at once instead of spending the whole retry budget on it. It is
+			// also deliberately kept out of the circuit breaker — the endpoint
+			// is healthy, this account simply cannot pay for the request.
+			if apiErr, ok := fwdErr.(*adapter.APIError); ok && apiErr.EntitlementExhausted() {
+				if parked := e.markProviderQuotaExhausted(provider.Name); parked > 0 {
+					tr.LogQueue(priority, fmt.Sprintf(
+						"provider %s token plan entitlement exhausted | no retry, parked %v",
+						provider.Name, parked), idx, len(group))
+				} else {
+					e.markProviderCooldown(provider.Name)
+					tr.LogQueue(priority, fmt.Sprintf(
+						"provider %s token plan entitlement exhausted | no retry, cooling %ds",
+						provider.Name, e.rateLimitCooldownSec()), idx, len(group))
+				}
+				for i := range candidates {
+					if candidates[i].key == candidates[idx].key {
+						candidates[i].tried = true
+					}
+				}
+				break
+			}
+
 			if statusCode == http.StatusTooManyRequests && attempt == maxRetries+1 {
 				e.markProviderCooldown(provider.Name)
 				for i := range candidates {
@@ -776,9 +813,27 @@ func (e *Engine) CloseIdleConnections() {
 // checkRateLimit checks the optional upstream cooldown and the local limiter.
 // Both are disabled unless explicitly enabled in the configuration.
 func (e *Engine) checkRateLimit(providerName string) error {
+	quotaSec := e.entitlementCooldownSec()
 	cooldownEnabled := e.rateLimitCooldownSec() > 0
 	now := time.Now()
 	e.rlMu.Lock()
+	// Checked first on purpose: an exhausted plan outranks the rate-limit
+	// cooldown that the same 429 would otherwise also have set, and the skip
+	// message has to name the real reason.
+	if quotaSec > 0 {
+		if until, parked := e.quotaUntil[providerName]; parked {
+			if now.Before(until) {
+				remain := until.Sub(now)
+				e.rlMu.Unlock()
+				return &adapter.APIError{
+					StatusCode: http.StatusTooManyRequests,
+					Message: fmt.Sprintf("provider %s token plan entitlement exhausted (%v left)",
+						providerName, remain.Round(time.Second)),
+				}
+			}
+			delete(e.quotaUntil, providerName)
+		}
+	}
 	until, cooling := e.coolUntil[providerName]
 	if cooling && cooldownEnabled && now.Before(until) {
 		remain := until.Sub(now)
@@ -824,6 +879,41 @@ func (e *Engine) rateLimitCooldownSec() int {
 	e.reloadMu.RUnlock()
 	if sec <= 0 {
 		return 0
+	}
+	return sec
+}
+
+// defaultEntitlementCooldownSec parks an account with an exhausted token plan
+// for 5 minutes unless the configuration asks for something else. The exact
+// refill instant is unknown, so this is a probe interval, not a deadline.
+const defaultEntitlementCooldownSec = 300
+
+// markProviderQuotaExhausted parks an account whose token plan quota is gone
+// and returns the park duration. Unlike a rate limit this does not clear on the
+// next window, so the horizon is measured in minutes and the account is only
+// re-probed once it expires. A zero return means the special handling is
+// disabled and the caller should fall back to the ordinary 429 cooldown.
+func (e *Engine) markProviderQuotaExhausted(providerName string) time.Duration {
+	sec := e.entitlementCooldownSec()
+	if sec <= 0 || providerName == "" {
+		return 0
+	}
+	park := time.Duration(sec) * time.Second
+	e.rlMu.Lock()
+	e.quotaUntil[providerName] = time.Now().Add(park)
+	e.rlMu.Unlock()
+	return park
+}
+
+func (e *Engine) entitlementCooldownSec() int {
+	e.reloadMu.RLock()
+	sec := e.cfg.Global.EntitlementCooldown
+	e.reloadMu.RUnlock()
+	switch {
+	case sec < 0:
+		return 0
+	case sec == 0:
+		return defaultEntitlementCooldownSec
 	}
 	return sec
 }

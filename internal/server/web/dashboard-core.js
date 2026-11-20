@@ -138,7 +138,11 @@
     if (!(timestamp(p.last_activity) > 0)) return { key: 'neutral', label: '有历史记录', tone: 'neutral' };
     if (p.last_err_type === 'client_abort') return { key: 'canceled', label: '最近取消', tone: 'canceled' };
     if (p.last_err_type || number(p.consecutive_fail)) {
-      const limited = /rate|tpm|rpm|plan_exhausted/i.test(p.last_err_type || '');
+      // An exhausted token plan is terminal, not a window that slides. It keeps
+      // the 'limited' key so the 最近限流 quick view still finds it, but takes
+      // its own pure-red 'quota' tone so it never reads as ordinary throttling.
+      if (p.last_err_type === 'plan_exhausted') return { key: 'limited', label: '耗尽 429', tone: 'quota' };
+      const limited = /rate|tpm|rpm/i.test(p.last_err_type || '');
       return { key: limited ? 'limited' : 'failed', label: limited ? '最近限流' : '最近失败', tone: limited ? 'limited' : 'failed' };
     }
     if (number(p.success)) return { key: 'success', label: '最近成功', tone: 'success' };

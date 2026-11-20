@@ -252,6 +252,53 @@ func TestClientAbortExcludedFromRatesAndFailures(t *testing.T) {
 	}
 }
 
+func TestClassifyErrorDistinguishesExhaustedPlanFromThrottling(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  string
+		want string
+	}{
+		{
+			// The real payload. It shares status 429 and code "8" with the
+			// throttling cases below, which is why the text is the only signal.
+			name: "token plan entitlement exhausted",
+			msg:  `{"error":{"message":"token plan entitlement exhausted","type":"quota_exceeded_error","code":"8"}}`,
+			want: "plan_exhausted",
+		},
+		{
+			name: "legacy token plan limit wording",
+			msg:  `{"error":{"message":"token plan limit reached"}}`,
+			want: "plan_exhausted",
+		},
+		{
+			name: "rpm exhausted stays its own type",
+			msg:  `{"error":{"message":"rpm exhausted","type":"quota_exceeded_error","code":"8"}}`,
+			want: "rpm_exhausted",
+		},
+		{
+			name: "plain tpm rejection falls back to rate_limited",
+			msg:  `{"error":{"message":"inference exceeds tpm/rpm limit","type":"rate_limit_error","code":"RateLimitExceeded.EndpointTPMExceeded"}}`,
+			want: "rate_limited",
+		},
+		{
+			name: "entitlement wording on a non-429 status is not special-cased",
+			msg:  `{"error":{"message":"token plan entitlement exhausted"}}`,
+			want: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			status := 429
+			if tc.want == "" {
+				status, tc.want = 400, "http_400"
+			}
+			if got := ClassifyError(status, tc.msg); got != tc.want {
+				t.Fatalf("ClassifyError(%d, %q) = %q, want %q", status, tc.msg, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestLatencyCurvesSeparatePrioritiesAndExcludeFailedOrCanceled(t *testing.T) {
 	c := New("")
 	c.Record("a", "p1", "m", 1, true, 200, "", 2*time.Second)
