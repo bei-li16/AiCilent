@@ -42,7 +42,8 @@ providers.json
 .env
 .env.*
 
-# Deploy scripts (contain credentials)
+# deploy-rpi.ps1（含本机 IP/用户/密钥路径等私有部署默认值，不入库；
+# 公开版为 deploy-rpi-interactive.ps1，全部参数化/交互输入）
 deploy-rpi.ps1
 
 # Temp
