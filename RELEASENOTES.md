@@ -2,6 +2,15 @@
 
 各版本发布信息汇总（据 git 提交历史整理），最新版本在前。
 
+## v1.0.51（2026-11-21）
+
+**停止/重启前可见在途请求：新增 /api/inflight，脚本先等归零再动手**
+
+- 新增 `GET /api/inflight`，返回当前处于转发路由中的客户端请求数（`{"forwarding":N}`）。只统计 5 个转发端点（`/v1/chat/completions`、`/chat/completions`、`/v1/messages`、`/v1/responses`、`/responses`），dashboard 自身的 API 轮询与 SSE 日志订阅不计入——否则长连接会把计数永远顶在非零，等待归零的闸门会失效。
+- `stop-cli.bat`（cli.ps1）Stop 前先轮询 `/api/inflight` 等在途请求归零（默认最多 120s，`-InflightWaitSec 0` 跳过）。原因：Ctrl+C 后进程只排空 10 秒，长流会被硬切；归零后再停就没有可打断的对象。运行中版本无该端点时提示后直接停止，保持旧行为。
+- `deploy-rpi.ps1` 在切换二进制重启前新增同样闸门（第 5/8 步，默认最多 120s，`-InflightWaitSec 0` 跳过；`-Force` 只强制重传、不跳过等待），等归零后才 `systemctl restart`。闸门在上传/备份之后、切换/重启之前，超时退出时尚未改动远端任何文件。
+- 排空行为本身未变：SIGTERM/Ctrl+C 后新请求 503，在途请求最多排空 10s 再强制断连。
+
 ## v1.0.50（2026-11-20）
 
 **套餐额度耗尽单独识别，不再当普通限流反复重试**

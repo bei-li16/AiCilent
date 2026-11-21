@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ai-proxy/internal/config"
@@ -57,9 +58,24 @@ type Instance struct {
 	stopOnce        sync.Once
 	hub             *sse.Hub
 	requests        sync.WaitGroup
+	// forwarding counts client requests currently inside a forwarding route.
+	// /api/inflight exposes it so stop/deploy scripts can wait for quiet
+	// instead of cutting an in-flight stream mid-response.
+	forwarding      atomic.Int64
 	lifecycleMu     sync.Mutex
 	stopping        bool
 	closeTransports func()
+}
+
+// trackForwarding is installed on forwarding routes only. Dashboard traffic
+// (API polling and long-lived SSE log subscriptions) must stay outside the
+// gauge or the pre-stop gate would never see zero.
+func (i *Instance) trackForwarding() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		i.forwarding.Add(1)
+		defer i.forwarding.Add(-1)
+		c.Next()
+	}
 }
 
 // New creates and configures the Gin engine with all routes and middleware.
@@ -118,13 +134,14 @@ func New(cfg *config.Config, configPath string) *Instance {
 	})
 
 	timing := middleware.RequestTiming(combinedW, statsCollector.RecordRequestTiming)
-	r.POST("/v1/chat/completions", timing, engine.HandleRequest)
-	r.POST("/chat/completions", timing, engine.HandleRequest)
-	r.POST("/v1/messages", timing, engine.HandleRequest)
-	r.POST("/v1/responses", timing, engine.HandleRequest)
+	forwarding := instance.trackForwarding()
+	r.POST("/v1/chat/completions", forwarding, timing, engine.HandleRequest)
+	r.POST("/chat/completions", forwarding, timing, engine.HandleRequest)
+	r.POST("/v1/messages", forwarding, timing, engine.HandleRequest)
+	r.POST("/v1/responses", forwarding, timing, engine.HandleRequest)
 	// Some OpenAI-compatible clients (including Codex) append /responses
 	// directly to the configured base URL instead of using the /v1 prefix.
-	r.POST("/responses", timing, engine.HandleRequest)
+	r.POST("/responses", forwarding, timing, engine.HandleRequest)
 
 	listModels := func(c *gin.Context) {
 		type model struct {
@@ -156,6 +173,14 @@ func New(cfg *config.Config, configPath string) *Instance {
 			"commit":     version.Commit,
 			"build_date": version.BuildDate,
 		})
+	})
+
+	// Pre-stop gate for scripts (stop-cli / deploy-rpi): how many client
+	// requests are currently inside a forwarding route. Returns zero quickly
+	// so it can be polled while waiting for quiet.
+	r.GET("/api/inflight", func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
+		c.JSON(http.StatusOK, gin.H{"forwarding": instance.forwarding.Load()})
 	})
 
 	r.GET("/api/stats", serveStats(statsCollector, engine))

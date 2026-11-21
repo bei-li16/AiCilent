@@ -2,7 +2,11 @@
 param(
     [Parameter(Mandatory)]
     [ValidateSet('Start', 'Stop')]
-    [string]$Action
+    [string]$Action,
+
+    # Stop 前等待在途转发请求归零的最长秒数（GET /api/inflight）。
+    # 0 = 不等待直接停止；默认 120s。运行中版本无该端点时提示后直接停止。
+    [int]$InflightWaitSec = 120
 )
 
 $ErrorActionPreference = 'Stop'
@@ -49,11 +53,58 @@ function Start-ManagedProxy {
     return $process
 }
 
+function Get-ProxyPort {
+    # 从配置文件读 listen_addr（如 ":8080" 或 "127.0.0.1:8080"），取端口。
+    try {
+        $line = (Select-String -LiteralPath $config -Pattern '^\s*listen_addr:\s*(\S+)' |
+            Select-Object -First 1).Matches[0].Groups[1].Value
+        $port = ($line -split ':')[-1]
+        if ($port -match '^\d+$') { return [int]$port }
+    } catch { }
+    return 8080
+}
+
+# Stop 会打断在途转发（Ctrl+C 后进程只排空 10 秒）。先问运行中的进程
+# （GET /api/inflight）还有多少在途请求，等到归零再停，长流就不会被硬切。
+function Wait-InflightQuiet {
+    param([int]$TimeoutSec)
+    $url = "http://127.0.0.1:$(Get-ProxyPort)/api/inflight"
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSec)
+    $reported = $false
+    while ([DateTime]::UtcNow -lt $deadline) {
+        $busy = $null
+        $out = & curl.exe -sf -m 3 $url 2>$null
+        if ($LASTEXITCODE -eq 0 -and $out) {
+            try { $busy = [int]($out | ConvertFrom-Json).forwarding } catch { $busy = $null }
+        }
+        if ($null -eq $busy) {
+            # 老版本二进制没有 /api/inflight（或服务已不可达）：无可依据的在途信息。
+            if ($reported) { throw "在途查询中途失败：$url" }
+            Write-Output '运行中的版本不支持在途查询（无 /api/inflight），直接停止。'
+            return
+        }
+        if ($busy -le 0) { return }
+        if (-not $reported) {
+            Write-Output "仍有 $busy 个在途请求，最多等待 ${TimeoutSec}s（可用 -InflightWaitSec 0 跳过）..."
+            $reported = $true
+        } else {
+            Write-Host -NoNewline '.'
+        }
+        Start-Sleep -Seconds 2
+    }
+    throw "等待超时：仍有在途转发请求。等它们结束，或确认可中断后用 -InflightWaitSec 0 强制停止。"
+}
+
 function Stop-ManagedProxy {
     $process = Get-ManagedProxy
     if (-not $process) {
         Write-Output 'AI Proxy CLI is not running.'
         return
+    }
+
+    # 先等在途转发请求归零，再发停止信号（信号后进程只排空 10 秒）。
+    if ($InflightWaitSec -gt 0) {
+        Wait-InflightQuiet -TimeoutSec $InflightWaitSec
     }
 
     Add-Type -TypeDefinition @'
